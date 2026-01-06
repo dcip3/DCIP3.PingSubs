@@ -21,16 +21,18 @@ from bot.helpers import (
     send_public_subscription_detail,
     send_public_subscription_payment_report,
     send_public_user_payment_report,
+    send_member_list,
     send_subscription_list,
     send_user_subscription_list,
 )
 from bot.states import FriendForm, PublicReminderForm, SettingsForm, SubscriptionAction
-from constants import DEFAULT_CURRENCIES
-from config import Settings
-from database import Database
-from services import CurrencyConverter
+from bot.core.constants import DEFAULT_CURRENCIES
+from bot.core.config import Settings
+from bot.storage.db import Database
+from bot.services import CurrencyConverter
 
 from . import admin_router, public_router
+from bot.text import escape_html, format_display_name
 
 
 def _is_cancel_text(text: str | None) -> bool:
@@ -88,6 +90,21 @@ async def handle_public_help(message: Message, db: Database) -> None:
     )
 
 
+@public_router.message(F.text == "ℹ️ Help")
+async def handle_public_help_button(message: Message, db: Database) -> None:
+    if message.from_user and await db.is_admin(message.from_user.id):
+        await send_admin_help(message)
+        return
+    text = (
+        "User menu:\n"
+        " 📋 Subscriptions — view your plans and next charge date\n"
+        " 📊 Payments report — see your monthly payment status\n"
+        " ⏰ Reminder time — set when you want to be notified\n\n"
+        "I send reminders when payments are due. Tap “Paid” after you cover your share."
+    )
+    await message.answer(text, reply_markup=public_reply_keyboard())
+
+
 @public_router.message(F.text.func(_is_cancel_text))
 async def handle_public_cancel(message: Message, state: FSMContext) -> None:
     if await state.get_state() is None:
@@ -112,6 +129,9 @@ async def handle_public_subscriptions(message: Message, db: Database) -> None:
 async def handle_public_payments_report(message: Message, db: Database) -> None:
     if not message.from_user:
         await message.answer("Unable to identify your account.")
+        return
+    if await db.is_admin(message.from_user.id):
+        await handle_payments_report(message, db)
         return
     await send_public_user_payment_report(message, db, message.from_user.id)
 
@@ -212,7 +232,7 @@ async def handle_public_reminder_time_input(
 async def send_admin_help(message: Message) -> None:
     text = (
         "Admin menu:\n"
-        " 👤 Add member — save or update a family member\n"
+        " 👥 Members — add, edit, and remove members\n"
         " 📋 Subscriptions — manage and create reminders\n"
         " 📊 Payments report — monthly payment summary\n\n"
         " ⚙️ Settings — bot configuration\n\n"
@@ -235,16 +255,6 @@ async def handle_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Dialog canceled.", reply_markup=admin_reply_keyboard())
 
-
-
-@admin_router.message(F.text == "👤 Add member")
-async def friend_button(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await state.set_state(FriendForm.telegram_id)
-    await message.answer(
-        "Send the friend's Telegram ID (numbers only) or forward their message. Use the Cancel button to stop.",
-        reply_markup=dialog_keyboard(),
-    )
 
 
 @admin_router.message(FriendForm.telegram_id)
@@ -274,10 +284,8 @@ async def friend_form_name(message: Message, state: FSMContext, db: Database) ->
     telegram_id = int(data["telegram_id"])
     friend_id = await db.upsert_friend(telegram_id, full_name)
     await state.clear()
-    await message.answer(
-        "Friend saved.",
-        reply_markup=admin_reply_keyboard(),
-    )
+    await message.answer("Member saved.", reply_markup=admin_reply_keyboard())
+    await send_member_list(message, db)
 
 
 @admin_router.message(F.text == "📊 Payments report")
@@ -305,13 +313,7 @@ async def handle_payments_report(message: Message, db: Database) -> None:
         participants = await db.list_subscription_participants(sub["id"])
         if not participants:
             continue
-        names = []
-        for person in participants:
-            full_name = (person["full_name"] or "Unknown").strip()
-            parts = [part for part in full_name.split() if part]
-            first = parts[0] if parts else "Unknown"
-            last_initial = f" {parts[1][0].upper()}." if len(parts) > 1 else ""
-            names.append(f"{first}{last_initial}")
+        names = [escape_html(format_display_name(person.get("full_name"))) for person in participants]
         name_width = max(len("Name"), max(len(name) for name in names))
         header = f"{'Name':<{name_width}} | " + " ".join(month_labels)
         lines = [header]
@@ -322,7 +324,7 @@ async def handle_payments_report(message: Message, db: Database) -> None:
                 for month in months
             )
             lines.append(f"{display_name:<{name_width}} | {squares}")
-        block = f"{sub['name']}:\n" + "<pre>" + "\n".join(lines) + "</pre>"
+        block = f"{escape_html(sub['name'])}:\n" + "<pre>" + "\n".join(lines) + "</pre>"
         blocks.append(block)
 
     if not blocks:

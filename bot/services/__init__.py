@@ -11,14 +11,15 @@ import aiohttp
 from aiogram import Bot
 
 from bot.keyboards import build_payment_confirmation_keyboard
-from bot.reminders import (
+from bot.core.reminders import (
     REMINDER_TIMEZONE,
     calculate_next_charge_date,
     format_due_date,
     parse_offsets,
     parse_time_string,
 )
-from database import Database
+from bot.text import escape_html
+from bot.storage.db import Database
 
 
 class CurrencyConverter:
@@ -135,27 +136,37 @@ async def _auto_mark_admin_payments(
             await db.log_payment(subscription_id, cycle_due, admin_id)
 
 
-async def send_reminders_now(
+async def _run_reminder_pass(
     bot: Bot,
     db: Database,
     converter: CurrencyConverter,
-    subscription_id: Optional[int] = None,
-    rounding_mode: str = "precise",
+    *,
+    subscription_id: Optional[int],
+    now: datetime,
+    rounding_mode: str,
+    enforce_time: bool,
+    register_reminders: bool,
 ) -> int:
-    logger = logging.getLogger("reminder_now")
-    now = datetime.now(REMINDER_TIMEZONE)
+    logger = logging.getLogger("reminder_runner")
     today = now.date()
+    current_time = now.time()
     notify_admin_reminders = await db.get_setting_bool("notify_admin_reminders", True)
     admin_ids: set[int] = set(await db.list_admin_ids()) if notify_admin_reminders else set()
-
     sent_count = 0
+
     subscriptions = await db.fetch_subscriptions_for_reminders()
     for item in subscriptions:
         if subscription_id is not None and item.get("id") != subscription_id:
             continue
+        safe_name = escape_html(item.get("name", ""))
+        safe_currency = escape_html(item.get("currency", ""))
         try:
-            due_date = _parse_due_date(item["next_charge_at"])
+            _parse_due_date(item["next_charge_at"])
         except (KeyError, ValueError):
+            continue
+
+        reminder_time = parse_time_string(item.get("reminder_time"))
+        if enforce_time and current_time < reminder_time:
             continue
 
         participants = item.get("participants", [])
@@ -195,7 +206,7 @@ async def send_reminders_now(
                     weight = int(person.get("share_weight") or 1)
                     weight_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
                     share_line = (
-                        f"Your share ({weight_text}): {share_amount * weight:.2f} {item['currency']}"
+                        f"Your share ({weight_text}): {share_amount * weight:.2f} {safe_currency}"
                     )
                     if share_amount_rub is not None:
                         converted = share_amount_rub * weight
@@ -203,7 +214,7 @@ async def send_reminders_now(
                             f" (≈ {format_converted_amount(converted, converter.target_currency, rounding_mode)})"
                         )
                     message_text = (
-                        f"{person['full_name']},\n"
+                        f"{escape_html(person['full_name'])},\n"
                         f"🔔 {context_text}\n"
                         f"💳 {share_line}\n"
                         "Tap “Paid” when the bill is covered."
@@ -224,7 +235,7 @@ async def send_reminders_now(
                 if admin_ids:
                     admin_note = (
                         f"{context_text}\n"
-                        f"Total: {item['amount']:.2f} {item['currency']} | Members: {len(participants)}"
+                        f"Total: {item['amount']:.2f} {safe_currency} | Members: {len(participants)}"
                     )
             elif admin_ids:
                 admin_note = (
@@ -246,32 +257,58 @@ async def send_reminders_now(
                 target_date = cycle_due + timedelta(days=offset)
                 if target_date != today:
                     continue
+                if register_reminders:
+                    if not await db.register_reminder_if_new(item["id"], cycle_due, offset):
+                        continue
 
                 if target_date < cycle_due:
                     days_left = (cycle_due - today).days
                     context = (
-                        f"'{item['name']}' is due in {days_left} day(s) "
+                        f"'{safe_name}' is due in {days_left} day(s) "
                         f"({due_display})."
                     )
                 elif target_date == cycle_due:
-                    context = f"'{item['name']}' is due today ({due_display})."
+                    context = f"'{safe_name}' is due today ({due_display})."
                 else:
                     days_overdue = (today - cycle_due).days
                     context = (
-                        f"'{item['name']}' was due {days_overdue} day(s) ago "
+                        f"'{safe_name}' was due {days_overdue} day(s) ago "
                         f"({due_display})."
                     )
                 await dispatch(context, cycle_due)
 
             if item.get("remind_after_due") and today > cycle_due:
                 overdue_offset = (today - cycle_due).days
+                if register_reminders:
+                    if not await db.register_reminder_if_new(item["id"], cycle_due, overdue_offset):
+                        continue
                 context = (
-                    f"'{item['name']}' is overdue by {overdue_offset} day(s) "
+                    f"'{safe_name}' is overdue by {overdue_offset} day(s) "
                     f"(was due {due_display})."
                 )
                 await dispatch(context, cycle_due)
 
     return sent_count
+
+
+async def send_reminders_now(
+    bot: Bot,
+    db: Database,
+    converter: CurrencyConverter,
+    subscription_id: Optional[int] = None,
+    rounding_mode: str = "precise",
+) -> int:
+    now = datetime.now(REMINDER_TIMEZONE)
+    return await _run_reminder_pass(
+        bot,
+        db,
+        converter,
+        subscription_id=subscription_id,
+        now=now,
+        rounding_mode=rounding_mode,
+        enforce_time=False,
+        register_reminders=False,
+    )
 
 
 async def reminder_worker(
@@ -284,136 +321,16 @@ async def reminder_worker(
     logger = logging.getLogger("reminder_worker")
     try:
         while True:
-            now = datetime.now(REMINDER_TIMEZONE)
-            today = now.date()
-            current_time = now.time()
-            notify_admin_reminders = await db.get_setting_bool("notify_admin_reminders", True)
-            admin_ids: set[int] = set(await db.list_admin_ids()) if notify_admin_reminders else set()
-
-            subscriptions = await db.fetch_subscriptions_for_reminders()
-            for item in subscriptions:
-                try:
-                    due_date = _parse_due_date(item["next_charge_at"])
-                except (KeyError, ValueError):
-                    continue
-
-                reminder_time = parse_time_string(item.get("reminder_time"))
-                if current_time < reminder_time:
-                    continue
-
-                participants = item.get("participants", [])
-                participant_ids = {p["telegram_id"] for p in participants}
-                offsets = parse_offsets(item.get("reminder_offsets"))
-                open_cycles = await _ensure_open_cycles(db, item, today)
-                await _auto_mark_admin_payments(db, int(item["id"]), open_cycles, participant_ids, notify_admin_reminders)
-                due_dates = [cycle.isoformat() for cycle in open_cycles]
-                payment_rows = await db.list_payments_for_cycles(item["id"], due_dates)
-                paid_map = {
-                    (row["due_date"], row["paid_by_telegram_id"])
-                    for row in payment_rows
-                    if row.get("paid_by_telegram_id") is not None
-                }
-
-                async def dispatch(context_text: str, due_date_value: date) -> None:
-                    admin_note: Optional[str] = None
-                    if participants:
-                        due_key = due_date_value.isoformat()
-                        unpaid = [
-                            person for person in participants
-                            if (due_key, person["telegram_id"]) not in paid_map
-                        ]
-                        if not unpaid:
-                            return
-                        share_base = calculate_share_base(item, participants)
-                        share_amount = item["amount"] / share_base
-                        try:
-                            share_amount_rub = await converter.convert(share_amount, item["currency"])
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning("Conversion failed for subscription %s: %s", item["id"], exc)
-                            share_amount_rub = None
-
-                        keyboard = build_payment_confirmation_keyboard(item["id"], due_date_value)
-                        for person in unpaid:
-                            weight = int(person.get("share_weight") or 1)
-                            weight_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
-                            share_line = (
-                                f"Your share ({weight_text}): {share_amount * weight:.2f} {item['currency']}"
-                            )
-                            if share_amount_rub is not None:
-                                converted = share_amount_rub * weight
-                                share_line += (
-                                    f" (≈ {format_converted_amount(converted, converter.target_currency, rounding_mode)})"
-                                )
-                            message_text = (
-                                f"{person['full_name']},\n"
-                                f"🔔 {context_text}\n"
-                                f"💳 {share_line}\n"
-                                "Tap “Paid” when the bill is covered."
-                            )
-                            try:
-                                await bot.send_message(
-                                    person["telegram_id"],
-                                    message_text,
-                                    reply_markup=keyboard,
-                                )
-                            except Exception:  # noqa: BLE001
-                                logger.exception(
-                                    "Failed to send reminder to user %s",
-                                    person["telegram_id"],
-                                )
-
-                        if admin_ids:
-                            admin_note = (
-                                f"{context_text}\n"
-                                f"Total: {item['amount']:.2f} {item['currency']} | Members: {len(participants)}"
-                            )
-                    elif admin_ids:
-                        admin_note = (
-                            f"{context_text}\n"
-                            "No members are assigned yet. Add them via 📋 Subscriptions."
-                        )
-
-                    if admin_note and admin_ids:
-                        for admin_id in admin_ids:
-                            if admin_id in participant_ids:
-                                continue
-                            with contextlib.suppress(Exception):
-                                await bot.send_message(admin_id, admin_note)
-
-                for cycle_due in open_cycles:
-                    due_display = format_due_date(cycle_due.isoformat())
-                    for offset in offsets:
-                        target_date = cycle_due + timedelta(days=offset)
-                        if target_date != today:
-                            continue
-                        if not await db.register_reminder_if_new(item["id"], cycle_due, offset):
-                            continue
-
-                        if target_date < cycle_due:
-                            days_left = (cycle_due - today).days
-                            context = (
-                                f"'{item['name']}' is due in {days_left} day(s) "
-                                f"({due_display})."
-                            )
-                        elif target_date == cycle_due:
-                            context = f"'{item['name']}' is due today ({due_display})."
-                        else:
-                            days_overdue = (today - cycle_due).days
-                            context = (
-                                f"'{item['name']}' was due {days_overdue} day(s) ago "
-                                f"({due_display})."
-                            )
-                        await dispatch(context, cycle_due)
-
-                    if item.get("remind_after_due") and today > cycle_due:
-                        overdue_offset = (today - cycle_due).days
-                        if not await db.register_reminder_if_new(item["id"], cycle_due, overdue_offset):
-                            continue
-                        context = (
-                            f"'{item['name']}' is overdue by {overdue_offset} day(s) "
-                            f"(was due {due_display})."
-                        )
-                        await dispatch(context, cycle_due)
+            await _run_reminder_pass(
+                bot,
+                db,
+                converter,
+                subscription_id=None,
+                now=datetime.now(REMINDER_TIMEZONE),
+                rounding_mode=rounding_mode,
+                enforce_time=True,
+                register_reminders=True,
+            )
 
             await asyncio.sleep(interval_seconds)
     except asyncio.CancelledError:  # pragma: no cover - service shutdown

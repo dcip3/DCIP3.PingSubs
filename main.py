@@ -12,9 +12,9 @@ from aiogram.types import BotCommand
 
 from bot.handlers import admin_router, public_router
 from bot.middlewares import AdminFilter, SettingsMiddleware
-from config import Settings
-from database import Database
-from services import CurrencyConverter, reminder_worker
+from bot.core.config import Settings
+from bot.storage.db import Database
+from bot.services import CurrencyConverter, reminder_worker
 
 
 async def main() -> None:

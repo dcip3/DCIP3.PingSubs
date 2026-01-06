@@ -40,6 +40,10 @@ class SubscriptionEditForm(StatesGroup):
     reminder_offsets = State()
 
 
+class MemberEditForm(StatesGroup):
+    full_name = State()
+
+
 class SubscriptionAction(CallbackData, prefix="sub"):
     action: str
     subscription_id: int
@@ -54,6 +58,11 @@ class ParticipantAction(CallbackData, prefix="spart"):
 class ReminderAction(CallbackData, prefix="remind"):
     subscription_id: int
     due_date: str
+
+
+class MemberAction(CallbackData, prefix="member"):
+    action: str
+    friend_id: int
 
 
 Responder = Union[Message, CallbackQuery]

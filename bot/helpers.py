@@ -9,10 +9,11 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
-from constants import DATE_INPUT_FORMAT, DEFAULT_CURRENCIES, MONTHLY_PERIOD_SENTINEL
-from database import Database
+from bot.core.constants import DATE_INPUT_FORMAT, DEFAULT_CURRENCIES, MONTHLY_PERIOD_SENTINEL
+from bot.storage.db import Database
 from bot.keyboards import (
     admin_reply_keyboard,
+    build_members_list_keyboard,
     build_participants_keyboard,
     build_currency_keyboard,
     build_period_keyboard,
@@ -20,6 +21,8 @@ from bot.keyboards import (
     build_share_limit_keyboard,
     build_subscription_list_keyboard,
     dialog_keyboard,
+    member_detail_keyboard,
+    member_report_keyboard,
     pricing_settings_keyboard,
     public_subscription_detail_keyboard,
     public_subscription_report_keyboard,
@@ -28,7 +31,8 @@ from bot.keyboards import (
     subscription_detail_keyboard,
 )
 from bot.states import Responder, SubscriptionAction
-from bot.reminders import calculate_next_charge_date, format_offsets_for_display, parse_offsets
+from bot.core.reminders import calculate_next_charge_date, format_offsets_for_display, parse_offsets
+from bot.text import escape_html, format_display_name
 
 
 def _format_iso_date(value: str) -> str:
@@ -72,7 +76,7 @@ async def send_subscription_list(target: Responder, db: Database) -> None:
         audience = sub["participant_count"]
         audience_text = f"{audience} member(s)" if audience else "no members"
         lines.append(
-            f"{idx}. {sub['name']} — {sub['amount']:.2f} {sub['currency']} | {audience_text}"
+            f"{idx}. {escape_html(sub['name'])} — {sub['amount']:.2f} {escape_html(sub['currency'])} | {audience_text}"
         )
 
     await respond_with_markup(
@@ -92,7 +96,7 @@ async def send_user_subscription_list(message: Message, db: Database, telegram_i
     for idx, sub in enumerate(subs, 1):
         due = _format_iso_date(sub["next_charge_at"])
         lines.append(
-            f"{idx}. {sub['name']} — {sub['amount']:.2f} {sub['currency']} | {due}"
+            f"{idx}. {escape_html(sub['name'])} — {sub['amount']:.2f} {escape_html(sub['currency'])} | {due}"
         )
     await message.answer(
         "\n".join(lines),
@@ -114,6 +118,7 @@ async def send_public_subscription_detail(
     today = datetime.today().date()
     open_cycles = await db.list_open_cycles(subscription_id)
     unpaid_overdue = []
+    paid_due_map = set()
     user_id = None
     if isinstance(target, CallbackQuery) and target.from_user:
         user_id = target.from_user.id
@@ -135,7 +140,15 @@ async def send_public_subscription_detail(
             if due_date < today and (due_value, user_id) not in paid_due_map:
                 unpaid_overdue.append(due_value)
 
-    next_charge = _format_iso_date(subscription["next_charge_at"])
+    next_charge_value = str(subscription["next_charge_at"])
+    if user_id is not None and (next_charge_value, user_id) in paid_due_map:
+        period_days = int(subscription.get("period_days") or 30)
+        try:
+            current_due = datetime.strptime(next_charge_value, "%Y-%m-%d").date()
+            next_charge_value = calculate_next_charge_date(current_due, period_days).isoformat()
+        except ValueError:
+            pass
+    next_charge = _format_iso_date(next_charge_value)
     share_base, share_text = _share_details(subscription, participants)
     per_person = subscription["amount"] / share_base
 
@@ -145,7 +158,7 @@ async def send_public_subscription_detail(
             weight = int(p.get("share_weight") or 1)
             weight_text = f" (x{weight})" if weight > 1 else ""
             participants_lines.append(
-                f"       {p['full_name']}{weight_text}"
+                f"       {escape_html(p['full_name'])}{weight_text}"
             )
         participants_text = "\n".join(participants_lines)
     else:
@@ -167,10 +180,10 @@ async def send_public_subscription_detail(
         overdue_block = ""
 
     text = (
-        f"<b>{subscription['name']}</b>\n"
+        f"<b>{escape_html(subscription['name'])}</b>\n"
         f"💰 <b>Amount</b>:\n"
-        f"       {subscription['amount']:.2f} {subscription['currency']}\n"
-        f"       ≈ {per_person:.2f} {subscription['currency']} per share, {share_text}\n"
+        f"       {subscription['amount']:.2f} {escape_html(subscription['currency'])}\n"
+        f"       ≈ {per_person:.2f} {escape_html(subscription['currency'])} per share, {share_text}\n"
         f"{overdue_block}"
         "📅 <b>Next charge</b>:\n"
         f"       {next_charge}\n"
@@ -207,68 +220,12 @@ async def send_subscription_payment_report(
             reply_markup=subscription_report_keyboard(subscription_id),
         )
         return
-
-    today = datetime.today().date()
-    months = [f"{today.year:04d}-{month:02d}" for month in range(1, 13)]
-    month_labels = [
-        datetime.strptime(month_value, "%Y-%m").strftime("%b")[0] for month_value in months
-    ]
-    due_date = datetime.strptime(subscription["next_charge_at"], "%Y-%m-%d").date()
-    await db.ensure_cycle(subscription_id, due_date)
-    period_days = int(subscription.get("period_days") or 30)
-    while due_date < today:
-        due_date = calculate_next_charge_date(due_date, period_days)
-        await db.ensure_cycle(subscription_id, due_date)
-
-    open_cycles = await db.list_open_cycles(subscription_id)
-    open_cycle_dates = [
-        datetime.strptime(value, "%Y-%m-%d").date() for value in open_cycles
-    ]
-    payments_for_open = await db.list_payments_for_cycles(subscription_id, open_cycles)
-    paid_due_map = {
-        (row["due_date"], row["paid_by_telegram_id"])
-        for row in payments_for_open
-        if row.get("paid_by_telegram_id") is not None
-    }
-
-    paid_rows = await db.list_payment_activity_by_due_month(subscription_id, today.year)
-    paid_month_map = {
-        (row["paid_by_telegram_id"], row["month"])
-        for row in paid_rows
-        if row.get("paid_by_telegram_id") is not None
-    }
-
-    names = []
-    for person in participants:
-        full_name = (person["full_name"] or "Unknown").strip()
-        parts = [part for part in full_name.split() if part]
-        first = parts[0] if parts else "Unknown"
-        last_initial = f" {parts[1][0].upper()}." if len(parts) > 1 else ""
-        names.append(f"{first}{last_initial}")
-    name_width = max(len("Name"), max(len(name) for name in names))
-    header = f"{'Name':<{name_width}} | " + " ".join(month_labels)
-    lines = [header]
-
-    for person, display_name in zip(participants, names):
-        payer_id = person["telegram_id"]
-        squares = ""
-        for month in months:
-            month_overdue = False
-            for open_due in open_cycle_dates:
-                if open_due.strftime("%Y-%m") != month:
-                    continue
-                if open_due < today and (open_due.isoformat(), payer_id) not in paid_due_map:
-                    month_overdue = True
-                    break
-            if month_overdue:
-                squares += "🟥"
-            elif (payer_id, month) in paid_month_map:
-                squares += "🟩"
-            else:
-                squares += "⬜"
-        lines.append(f"{display_name:<{name_width}} | {squares}")
-
-    text = f"{subscription['name']}:\n" + "<pre>" + "\n".join(lines) + "</pre>"
+    text = await _build_subscription_payment_report_text(
+        db,
+        subscription,
+        participants,
+        scope="all",
+    )
     await respond_with_markup(
         target,
         text,
@@ -297,13 +254,68 @@ async def send_public_subscription_payment_report(
     if not user:
         await respond_with_markup(target, "You don't have access to this subscription.")
         return
+    text = await _build_subscription_payment_report_text(
+        db,
+        subscription,
+        participants,
+        scope="user",
+        user_id=telegram_id,
+    )
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=public_subscription_report_keyboard(subscription_id),
+    )
 
+
+async def send_public_user_payment_report(
+    message: Message,
+    db: Database,
+    telegram_id: int,
+) -> None:
+    blocks = await _build_user_payment_blocks(db, telegram_id)
+    if not blocks:
+        await message.answer("No payments to report yet.")
+        return
+    await message.answer("\n\n".join(blocks))
+
+
+async def _build_user_payment_blocks(db: Database, telegram_id: int) -> list[str]:
+    subs = await db.list_subscriptions_for_user(telegram_id)
+    if not subs:
+        return []
+    blocks: list[str] = []
+    for sub in subs:
+        participants = await db.list_subscription_participants(sub["id"])
+        user = next((p for p in participants if p["telegram_id"] == telegram_id), None)
+        if not user:
+            continue
+        block = await _build_subscription_payment_report_text(
+            db,
+            sub,
+            participants,
+            scope="user",
+            user_id=telegram_id,
+        )
+        blocks.append(block)
+    return blocks
+
+
+async def _build_subscription_payment_report_text(
+    db: Database,
+    subscription: Dict[str, object],
+    participants: Sequence[Dict[str, object]],
+    *,
+    scope: str,
+    user_id: Optional[int] = None,
+) -> str:
     today = datetime.today().date()
     months = [f"{today.year:04d}-{month:02d}" for month in range(1, 13)]
     month_labels = [
         datetime.strptime(month_value, "%Y-%m").strftime("%b")[0] for month_value in months
     ]
 
+    subscription_id = int(subscription["id"])
     due_date = datetime.strptime(subscription["next_charge_at"], "%Y-%m-%d").date()
     await db.ensure_cycle(subscription_id, due_date)
     period_days = int(subscription.get("period_days") or 30)
@@ -329,117 +341,39 @@ async def send_public_subscription_payment_report(
         if row.get("paid_by_telegram_id") is not None
     }
 
-    full_name = (user["full_name"] or "Unknown").strip()
-    parts = [part for part in full_name.split() if part]
-    first = parts[0] if parts else "Unknown"
-    last_initial = f" {parts[1][0].upper()}." if len(parts) > 1 else ""
-    display_name = f"{first}{last_initial}"
-    name_width = max(len("Name"), len(display_name))
+    if scope == "user":
+        if user_id is None:
+            raise ValueError("user_id is required when scope is 'user'")
+        filtered = [p for p in participants if p["telegram_id"] == user_id]
+    else:
+        filtered = list(participants)
+
+    names = [escape_html(format_display_name(person.get("full_name"))) for person in filtered]
+
+    name_width = max(len("Name"), max(len(name) for name in names))
     header = f"{'Name':<{name_width}} | " + " ".join(month_labels)
+    lines = [header]
 
-    squares = ""
-    for month in months:
-        month_overdue = False
-        for open_due in open_cycle_dates:
-            if open_due.strftime("%Y-%m") != month:
-                continue
-            if open_due < today and (open_due.isoformat(), telegram_id) not in paid_due_map:
-                month_overdue = True
-                break
-        if month_overdue:
-            squares += "🟥"
-        elif (telegram_id, month) in paid_month_map:
-            squares += "🟩"
-        else:
-            squares += "⬜"
-
-    lines = [header, f"{display_name:<{name_width}} | {squares}"]
-    text = f"{subscription['name']}:\n" + "<pre>" + "\n".join(lines) + "</pre>"
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=public_subscription_detail_keyboard(subscription_id),
-    )
-
-
-async def send_public_user_payment_report(
-    message: Message,
-    db: Database,
-    telegram_id: int,
-) -> None:
-    subs = await db.list_subscriptions_for_user(telegram_id)
-    if not subs:
-        await message.answer("You don't have any subscriptions yet.")
-        return
-
-    today = datetime.today().date()
-    months = [f"{today.year:04d}-{month:02d}" for month in range(1, 13)]
-    month_labels = [
-        datetime.strptime(month_value, "%Y-%m").strftime("%b")[0] for month_value in months
-    ]
-    header = "Months: " + " ".join(month_labels)
-
-    blocks: list[str] = []
-    for sub in subs:
-        participants = await db.list_subscription_participants(sub["id"])
-        user = next((p for p in participants if p["telegram_id"] == telegram_id), None)
-        if not user:
-            continue
-
-        due_date = datetime.strptime(sub["next_charge_at"], "%Y-%m-%d").date()
-        await db.ensure_cycle(sub["id"], due_date)
-        period_days = int(sub.get("period_days") or 30)
-        while due_date < today:
-            due_date = calculate_next_charge_date(due_date, period_days)
-            await db.ensure_cycle(sub["id"], due_date)
-
-        open_cycles = await db.list_open_cycles(sub["id"])
-        open_cycle_dates = [
-            datetime.strptime(value, "%Y-%m-%d").date() for value in open_cycles
-        ]
-        payments_for_open = await db.list_payments_for_cycles(sub["id"], open_cycles)
-        paid_due_map = {
-            (row["due_date"], row["paid_by_telegram_id"])
-            for row in payments_for_open
-            if row.get("paid_by_telegram_id") is not None
-        }
-        paid_rows = await db.list_payment_activity_by_due_month(sub["id"], today.year)
-        paid_month_map = {
-            (row["paid_by_telegram_id"], row["month"])
-            for row in paid_rows
-            if row.get("paid_by_telegram_id") is not None
-        }
-
-        full_name = (user["full_name"] or "Unknown").strip()
-        parts = [part for part in full_name.split() if part]
-        first = parts[0] if parts else "Unknown"
-        last_initial = f" {parts[1][0].upper()}." if len(parts) > 1 else ""
-        display_name = f"{first}{last_initial}"
-
+    for person, display_name in zip(filtered, names):
+        payer_id = person["telegram_id"]
         squares = ""
         for month in months:
             month_overdue = False
             for open_due in open_cycle_dates:
                 if open_due.strftime("%Y-%m") != month:
                     continue
-                if open_due < today and (open_due.isoformat(), telegram_id) not in paid_due_map:
+                if open_due < today and (open_due.isoformat(), payer_id) not in paid_due_map:
                     month_overdue = True
                     break
             if month_overdue:
                 squares += "🟥"
-            elif (telegram_id, month) in paid_month_map:
+            elif (payer_id, month) in paid_month_map:
                 squares += "🟩"
             else:
                 squares += "⬜"
+        lines.append(f"{display_name:<{name_width}} | {squares}")
 
-        block = f"{sub['name']}:\n<pre>{header}\n{display_name} | {squares}</pre>"
-        blocks.append(block)
-
-    if not blocks:
-        await message.answer("No payments to report yet.")
-        return
-
-    await message.answer("\n\n".join(blocks))
+    return f"{escape_html(subscription['name'])}:\n" + "<pre>" + "\n".join(lines) + "</pre>"
 
 
 def _share_details(
@@ -472,7 +406,7 @@ def _build_subscription_detail_text(
             weight = int(p.get("share_weight") or 1)
             weight_text = f" (x{weight})" if weight > 1 else ""
             participants_lines.append(
-                f"       {p['full_name']}{weight_text}"
+                f"       {escape_html(p['full_name'])}{weight_text}"
             )
         participants_text = "\n".join(participants_lines)
     else:
@@ -488,10 +422,10 @@ def _build_subscription_detail_text(
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
 
     return (
-        f"<b>{subscription['name']}</b>\n"
+        f"<b>{escape_html(subscription['name'])}</b>\n"
         f"💰 <b>Amount</b>:\n"
-        f"       {subscription['amount']:.2f} {subscription['currency']}\n"
-        f"       ≈ {per_person:.2f} {subscription['currency']} per share, {share_text}\n"
+        f"       {subscription['amount']:.2f} {escape_html(subscription['currency'])}\n"
+        f"       ≈ {per_person:.2f} {escape_html(subscription['currency'])} per share, {share_text}\n"
         f"📅 <b>Charge date</b>:\n"
         f"       {_format_iso_date(subscription['next_charge_at'])}\n"
         f"       {cadence}\n"
@@ -520,6 +454,68 @@ async def send_subscription_detail(target: Responder, db: Database, subscription
     )
 
 
+async def send_member_list(target: Responder, db: Database) -> None:
+    friends = await db.list_friends()
+    if not friends:
+        await respond_with_markup(
+            target,
+            "No members yet. Use “➕ Add member” to create one.",
+            reply_markup=build_members_list_keyboard([]),
+        )
+        return
+    lines = ["Choose a member to manage:"]
+    for idx, friend in enumerate(friends, 1):
+        lines.append(f"{idx}. {escape_html(friend['full_name'])}")
+    await respond_with_markup(
+        target,
+        "\n".join(lines),
+        reply_markup=build_members_list_keyboard(friends),
+    )
+
+
+async def send_member_detail(target: Responder, db: Database, friend_id: int) -> None:
+    friend = await db.get_friend(friend_id)
+    if not friend:
+        await respond_with_markup(target, "Member not found.")
+        return
+    subs = await db.list_subscriptions_for_user(friend["telegram_id"])
+    if subs:
+        sub_lines = "\n".join(f"       {escape_html(sub['name'])}" for sub in subs)
+    else:
+        sub_lines = "       No subscriptions yet."
+    text = (
+        f"<b>{escape_html(friend['full_name'])}</b>\n"
+        f"Telegram ID: {friend['telegram_id']}\n"
+        "Subscriptions:\n"
+        f"{sub_lines}"
+    )
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=member_detail_keyboard(friend_id),
+    )
+
+
+async def send_member_report(target: Responder, db: Database, friend_id: int) -> None:
+    friend = await db.get_friend(friend_id)
+    if not friend:
+        await respond_with_markup(target, "Member not found.")
+        return
+    blocks = await _build_user_payment_blocks(db, friend["telegram_id"])
+    if not blocks:
+        await respond_with_markup(
+            target,
+            "No payments to report yet.",
+            reply_markup=member_report_keyboard(friend_id),
+        )
+        return
+    await respond_with_markup(
+        target,
+        "\n\n".join(blocks),
+        reply_markup=member_report_keyboard(friend_id),
+    )
+
+
 async def send_reminder_settings(target: Responder, db: Database, subscription_id: int) -> None:
     subscription = await db.get_subscription(subscription_id)
     if not subscription:
@@ -530,7 +526,7 @@ async def send_reminder_settings(target: Responder, db: Database, subscription_i
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     text = (
-        f"<b>{subscription['name']}</b>\n"
+        f"<b>{escape_html(subscription['name'])}</b>\n"
         "🔔 <b>Reminders</b>:\n"
         f"       ⏰ Time: {reminder_time} MSK\n"
         f"       🔔 Days: {offsets_text}\n"
@@ -555,9 +551,9 @@ async def send_pricing_settings(target: Responder, db: Database, subscription_id
     per_person = subscription["amount"] / share_base
 
     text = (
-        f"<b>Pricing</b> for {subscription['name']}:\n"
-        f"      {subscription['amount']:.2f} {subscription['currency']}\n"
-        f"      ≈ {per_person:.2f} {subscription['currency']} per share, {share_text}"
+        f"<b>Pricing</b> for {escape_html(subscription['name'])}:\n"
+        f"      {subscription['amount']:.2f} {escape_html(subscription['currency'])}\n"
+        f"      ≈ {per_person:.2f} {escape_html(subscription['currency'])} per share, {share_text}"
     )
 
     await respond_with_markup(
@@ -576,7 +572,7 @@ async def send_participants_editor(callback: CallbackQuery, db: Database, subscr
             callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
         )
         await callback.message.edit_text(
-            "No friends in the database yet. Add someone first with “👤 Add member”.",
+            "No members in the database yet. Add someone first with “👥 Members”.",
             reply_markup=builder.as_markup(),
         )
         await callback.answer()

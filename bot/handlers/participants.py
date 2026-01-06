@@ -5,7 +5,7 @@ from aiogram.types import CallbackQuery
 
 from bot.helpers import send_participants_editor, send_subscription_detail
 from bot.states import ParticipantAction, SubscriptionAction
-from database import Database
+from bot.storage.db import Database
 
 from . import admin_router
 

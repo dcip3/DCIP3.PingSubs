@@ -9,8 +9,8 @@ from aiogram.types import CallbackQuery, Message
 from aiogram import Bot
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
-from database import Database
+from bot.core.constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
+from bot.storage.db import Database
 from bot.helpers import (
     currency_prompt,
     get_edit_subscription_id,
@@ -26,14 +26,15 @@ from bot.helpers import (
 )
 from bot.keyboards import admin_reply_keyboard, dialog_keyboard
 from bot.states import Responder, SubscriptionAction, SubscriptionEditForm, SubscriptionForm
-from bot.reminders import (
+from bot.core.reminders import (
     DEFAULT_REMINDER_OFFSETS,
     format_offsets_for_display,
     parse_offsets,
     serialize_offsets,
 )
-from config import Settings
-from services import CurrencyConverter, send_reminders_now
+from bot.core.config import Settings
+from bot.services import CurrencyConverter, send_reminders_now
+from bot.text import escape_html
 
 from . import admin_router
 
@@ -359,7 +360,7 @@ async def handle_subscription_rename_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    prompt = f"Send the new subscription name (current: {subscription['name']})."
+    prompt = f"Send the new subscription name (current: {escape_html(subscription['name'])})."
     await start_subscription_edit_flow(
         callback,
         state,
@@ -392,7 +393,7 @@ async def handle_subscription_amount_callback(
         return
     prompt = (
         f"Send the new amount (e.g. 149.99). "
-        f"Current value: {subscription['amount']:.2f} {subscription['currency']}."
+        f"Current value: {subscription['amount']:.2f} {escape_html(subscription['currency'])}."
     )
     await start_subscription_edit_flow(
         callback,
@@ -416,7 +417,7 @@ async def handle_subscription_currency_callback(
     _, prompt_markup = currency_prompt()
     prompt_text = (
         "Choose a currency or type your own (3 letters).\n"
-        f"Current value: {subscription['currency']}."
+        f"Current value: {escape_html(subscription['currency'])}."
     )
     await start_subscription_edit_flow(
         callback,
@@ -442,7 +443,7 @@ async def handle_subscription_due_callback(
         current = datetime.strptime(subscription["next_charge_at"], "%Y-%m-%d").strftime(DATE_INPUT_FORMAT)
     except (KeyError, ValueError):
         current = subscription.get("next_charge_at", "unknown")
-    prompt = f"Send the next charge date (DD.MM.YYYY). Current date: {current}."
+    prompt = f"Send the next charge date (DD.MM.YYYY). Current date: {escape_html(current)}."
     await start_subscription_edit_flow(
         callback,
         state,
@@ -538,7 +539,7 @@ async def handle_subscription_share_callback(
     current_label = f"{current_share} member(s)" if current_share else "all members"
     prompt_text = (
         "Send the number of members who split this subscription or tap “Split across all”.\n"
-        f"Current setting: {current_label}."
+        f"Current setting: {escape_html(current_label)}."
     )
     await start_subscription_edit_flow(
         callback,
@@ -561,7 +562,7 @@ async def handle_subscription_reminder_time_callback(
     if not subscription:
         return
     current_time = (subscription.get("reminder_time") or "16:00").strip() or "16:00"
-    prompt = f"Send the reminder time in HH:MM (Moscow time). Current value: {current_time}."
+    prompt = f"Send the reminder time in HH:MM (Moscow time). Current value: {escape_html(current_time)}."
     await start_subscription_edit_flow(
         callback,
         state,
@@ -587,7 +588,7 @@ async def handle_subscription_reminder_days_callback(
     prompt = (
         "Send reminder offsets as numbers separated by commas or spaces "
         "(e.g. -1 0 1). Negative = before, positive = after.\n"
-        f"Current schedule: {current_offsets}."
+        f"Current schedule: {escape_html(current_offsets)}."
     )
     await start_subscription_edit_flow(
         callback,

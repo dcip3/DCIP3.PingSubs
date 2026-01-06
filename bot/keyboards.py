@@ -6,14 +6,14 @@ from typing import Dict, Iterable, Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.states import ParticipantAction, ReminderAction, SubscriptionAction
+from bot.states import MemberAction, ParticipantAction, ReminderAction, SubscriptionAction
 
 
 def admin_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         resize_keyboard=True,
         keyboard=[
-            [KeyboardButton(text="👤 Add member"), KeyboardButton(text="📋 Subscriptions")],
+            [KeyboardButton(text="👥 Members"), KeyboardButton(text="📋 Subscriptions")],
             [KeyboardButton(text="📊 Payments report"), KeyboardButton(text="⚙️ Settings")],
             [KeyboardButton(text="ℹ️ Help")],
         ],
@@ -25,6 +25,7 @@ def public_reply_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         keyboard=[
             [KeyboardButton(text="📋 Subscriptions"), KeyboardButton(text="📊 Payments report")],
+            [KeyboardButton(text="ℹ️ Help")],
         ],
     )
 
@@ -48,6 +49,68 @@ def build_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> Inlin
             text=label,
             callback_data=SubscriptionAction(action="open", subscription_id=sub["id"]).pack(),
         )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_members_list_keyboard(friends: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="➕ Add member",
+        callback_data=MemberAction(action="add", friend_id=0).pack(),
+    )
+    for friend in friends:
+        label = friend["full_name"]
+        builder.button(
+            text=label,
+            callback_data=MemberAction(action="open", friend_id=friend["id"]).pack(),
+        )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def member_detail_keyboard(friend_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✏️ Rename",
+        callback_data=MemberAction(action="rename", friend_id=friend_id).pack(),
+    )
+    builder.button(
+        text="📊 Payments report",
+        callback_data=MemberAction(action="report", friend_id=friend_id).pack(),
+    )
+    builder.button(
+        text="🗑 Delete",
+        callback_data=MemberAction(action="delete", friend_id=friend_id).pack(),
+    )
+    builder.button(
+        text="⬅️ Back",
+        callback_data=MemberAction(action="back", friend_id=friend_id).pack(),
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def member_delete_confirm_keyboard(friend_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✅ Yes, delete",
+        callback_data=MemberAction(action="confirm_delete", friend_id=friend_id).pack(),
+    )
+    builder.button(
+        text="⬅️ Back",
+        callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def member_report_keyboard(friend_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="⬅️ Back",
+        callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
+    )
     builder.adjust(1)
     return builder.as_markup()
 
@@ -98,24 +161,22 @@ def public_subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardM
     return builder.as_markup()
 
 
-def public_subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+def build_back_keyboard(subscription_id: int, back_action: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
         text="⬅️ Back",
-        callback_data=SubscriptionAction(action="open_public", subscription_id=subscription_id).pack(),
+        callback_data=SubscriptionAction(action=back_action, subscription_id=subscription_id).pack(),
     )
     builder.adjust(1)
     return builder.as_markup()
 
 
 def subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="⬅️ Back",
-        callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-    )
-    builder.adjust(1)
-    return builder.as_markup()
+    return build_back_keyboard(subscription_id, "open")
+
+
+def public_subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    return build_back_keyboard(subscription_id, "open_public")
 
 
 def reminder_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
@@ -211,7 +272,6 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="💱 Base currency", callback_data="settings:currency")
     builder.button(text="🔢 Rounding", callback_data="settings:rounding")
     builder.button(text="🔔 Notifications", callback_data="settings:notifications")
-    builder.button(text="❌ Close", callback_data="settings:close")
     builder.adjust(1)
     return builder.as_markup()
 

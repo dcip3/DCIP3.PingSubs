@@ -171,11 +171,33 @@ class Database:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_friend(self, friend_id: int) -> Optional[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            "SELECT * FROM friends WHERE id = ?",
+            (friend_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def list_friends(self) -> List[Dict[str, Any]]:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute("SELECT id, telegram_id, full_name FROM friends ORDER BY full_name")
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def update_friend_name(self, friend_id: int, full_name: str) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            "UPDATE friends SET full_name = ? WHERE id = ?",
+            (full_name, friend_id),
+        )
+        await self._conn.commit()
+
+    async def delete_friend(self, friend_id: int) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute("DELETE FROM friends WHERE id = ?", (friend_id,))
+        await self._conn.commit()
 
     async def create_subscription(
         self,

@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Iterable, List, Sequence
 from zoneinfo import ZoneInfo
 
-from constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
+from bot.core.constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
 
 DEFAULT_REMINDER_TIME = "16:00"
 DEFAULT_REMINDER_OFFSETS = [-1, 0]

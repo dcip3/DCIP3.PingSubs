@@ -5,9 +5,12 @@ from datetime import datetime
 
 from aiogram.types import CallbackQuery
 
-from bot.reminders import format_due_date
+from bot.core.reminders import format_due_date
+from bot.services import calculate_share_base
 from bot.states import ReminderAction
-from database import Database
+from bot.storage.db import Database
+from bot.text import escape_html
+from bot.core.reminders import calculate_next_charge_date
 
 from . import public_router
 
@@ -52,6 +55,10 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         if participant_ids.issubset(paid_ids):
             await db.close_cycle(subscription["id"], due_value)
             cycle_closed = True
+            if str(subscription.get("next_charge_at")) == str(due_value):
+                period_days = int(subscription.get("period_days") or 30)
+                next_due = calculate_next_charge_date(due_date, period_days)
+                await db.update_subscription_fields(subscription["id"], next_charge_at=next_due)
     await callback.answer("Payment recorded. Thank you!")
     if callback.message:
         await callback.message.edit_text(
@@ -64,9 +71,17 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
     admin_ids = await db.list_admin_ids()
     if admin_ids and notify_paid:
         payer_name = callback.from_user.full_name if callback.from_user else "Someone"
+        share_base = calculate_share_base(subscription, participants)
+        weight = next(
+            (int(p.get("share_weight") or 1) for p in participants if p["telegram_id"] == user_id),
+            share_base,
+        )
+        paid_amount = float(subscription["amount"]) * weight / share_base
+        amount_line = f"Amount: {paid_amount:.2f} {escape_html(subscription['currency'])}"
         admin_note = (
-            f"✅ Payment recorded: {subscription['name']} ({format_due_date(due_value)})\n"
-            f"Payer: {payer_name}"
+            f"✅ Payment recorded: {escape_html(subscription['name'])} ({format_due_date(due_value)})\n"
+            f"Payer: {escape_html(payer_name)}\n"
+            f"{amount_line}"
         )
         for admin_id in admin_ids:
             if user_id is not None and admin_id == user_id:
@@ -76,7 +91,7 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
 
     if admin_ids and notify_closed and cycle_closed:
         close_note = (
-            f"✅ Cycle closed: {subscription['name']} "
+            f"✅ Cycle closed: {escape_html(subscription['name'])} "
             f"({format_due_date(due_value)})"
         )
         for admin_id in admin_ids:
