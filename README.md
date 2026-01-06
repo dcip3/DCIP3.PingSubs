@@ -24,6 +24,12 @@ pip install -r requirements.txt
 
 Create `.env` (see `.env.example`).
 
+Create the local data directory for SQLite:
+
+```bash
+mkdir -p data
+```
+
 ### Environment variables
 
 Required:
@@ -34,6 +40,7 @@ Optional:
 - `REMINDER_CHECK_INTERVAL` - reminder check interval in seconds (default: `3600`)
 - `TARGET_CURRENCY` - base currency for conversions (default: `RUB`)
 - `CURRENCY_ROUNDING` - rounding mode for conversions: `precise`, `floor`, `round`, `ceil` (default: `precise`)
+- `ADMIN_IDS` - comma-separated Telegram IDs that should be admins on startup
 
 ## Run
 
@@ -62,6 +69,7 @@ docker compose up -d --build
 - Members can view their subscriptions and mark payments as completed
 - Reminders are sent automatically based on the configured schedule
 
+
 ## Project structure
 
 - `main.py` - entry point
@@ -70,7 +78,3 @@ docker compose up -d --build
 - `bot/storage/` - database access layer (SQLite)
 - `bot/core/` - config, constants, and scheduling utilities
 - `bot/helpers.py` - shared UI/report helpers
-
-## License
-
-TBD

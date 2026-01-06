@@ -23,6 +23,8 @@ async def main() -> None:
     settings = Settings.load()
     db = Database(settings.database_path)
     await db.connect()
+    for admin_id in settings.admin_ids:
+        await db.add_admin(admin_id, f"Admin {admin_id}")
     stored_currency = await db.get_setting("target_currency")
     if stored_currency:
         settings.target_currency = stored_currency.upper()

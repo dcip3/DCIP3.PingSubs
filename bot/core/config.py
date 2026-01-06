@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Tuple
 
 from dotenv import load_dotenv
 
@@ -14,6 +15,7 @@ class Settings:
     reminder_check_interval: int
     target_currency: str
     currency_rounding: str
+    admin_ids: Tuple[int, ...]
 
     @classmethod
     def load(cls) -> "Settings":
@@ -39,10 +41,25 @@ class Settings:
         if rounding_mode not in {"precise", "floor", "round", "ceil"}:
             rounding_mode = "precise"
 
+        admin_ids_raw = os.getenv("ADMIN_IDS", "").strip()
+        admin_ids: Tuple[int, ...] = ()
+        if admin_ids_raw:
+            values = []
+            for part in admin_ids_raw.replace(";", ",").split(","):
+                piece = part.strip()
+                if not piece:
+                    continue
+                try:
+                    values.append(int(piece))
+                except ValueError as exc:
+                    raise RuntimeError("ADMIN_IDS must be comma-separated integers") from exc
+            admin_ids = tuple(dict.fromkeys(values))
+
         return cls(
             bot_token=token,
             database_path=db_path,
             reminder_check_interval=reminder_interval,
             target_currency=target_currency,
             currency_rounding=rounding_mode,
+            admin_ids=admin_ids,
         )
