@@ -5,12 +5,12 @@ from datetime import datetime
 
 from aiogram.types import CallbackQuery
 
-from bot.core.reminders import format_due_date
-from bot.services import calculate_share_base
-from bot.states import ReminderAction
-from bot.storage.db import Database
-from bot.text import escape_html
-from bot.core.reminders import calculate_next_charge_date
+from app.core.reminders import format_due_date
+from app.services import calculate_share_base
+from app.ui.states import ReminderAction
+from app.storage.db import Database
+from app.ui.text import escape_html
+from app.core.reminders import calculate_next_charge_date
 
 from . import public_router
 

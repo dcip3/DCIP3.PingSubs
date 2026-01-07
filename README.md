@@ -36,7 +36,7 @@ Required:
 - `BOT_TOKEN` - Telegram bot token
 
 Optional:
-- `DATABASE_PATH` - path to SQLite database (default: `data/bot.db`)
+- `DATABASE_PATH` - path to SQLite database (default: `data/app.db`)
 - `REMINDER_CHECK_INTERVAL` - reminder check interval in seconds (default: `3600`)
 - `TARGET_CURRENCY` - base currency for conversions (default: `RUB`)
 - `CURRENCY_ROUNDING` - rounding mode for conversions: `precise`, `floor`, `round`, `ceil` (default: `precise`)
@@ -73,8 +73,9 @@ docker compose up -d --build
 ## Project structure
 
 - `main.py` - entry point
-- `bot/handlers/` - Telegram handlers and routing
-- `bot/services/` - reminder workflow and integrations
-- `bot/storage/` - database access layer (SQLite)
-- `bot/core/` - config, constants, and scheduling utilities
-- `bot/helpers.py` - shared UI/report helpers
+- `app/handlers/` - Telegram handlers and routing
+- `app/services/` - reminder workflow and integrations
+- `app/storage/` - database access layer (SQLite)
+- `app/core/` - config, constants, and scheduling utilities
+- `app/ui/` - shared UI/report helpers, keyboards, and UI text
+- `app/infrastructure/` - middleware and integration glue

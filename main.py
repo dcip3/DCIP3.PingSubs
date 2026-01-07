@@ -10,11 +10,11 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
-from bot.handlers import admin_router, public_router
-from bot.middlewares import AdminFilter, SettingsMiddleware
-from bot.core.config import Settings
-from bot.storage.db import Database
-from bot.services import CurrencyConverter, reminder_worker
+from app.handlers import admin_router, public_router
+from app.infrastructure import AdminFilter, SettingsMiddleware
+from app.core.config import Settings
+from app.storage.db import Database
+from app.services import CurrencyConverter, reminder_worker
 
 
 async def main() -> None:

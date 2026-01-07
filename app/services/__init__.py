@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
@@ -9,17 +8,18 @@ from typing import Dict, Optional
 
 import aiohttp
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
 
-from bot.keyboards import build_payment_confirmation_keyboard
-from bot.core.reminders import (
+from app.ui.keyboards import build_payment_confirmation_keyboard
+from app.core.reminders import (
     REMINDER_TIMEZONE,
     calculate_next_charge_date,
     format_due_date,
     parse_offsets,
     parse_time_string,
 )
-from bot.text import escape_html
-from bot.storage.db import Database
+from app.ui.text import escape_html
+from app.storage.db import Database
 
 
 class CurrencyConverter:
@@ -95,6 +95,58 @@ def _parse_due_date(raw_value: str) -> date:
     return datetime.strptime(raw_value, "%Y-%m-%d").date()
 
 
+async def _send_message_with_retry(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    *,
+    reply_markup: object | None,
+    logger: logging.Logger,
+    retries: int = 2,
+    base_delay: float = 1.0,
+) -> bool:
+    attempt = 0
+    while True:
+        try:
+            await bot.send_message(chat_id, text, reply_markup=reply_markup)
+            return True
+        except TelegramForbiddenError as exc:
+            logger.warning(
+                "Cannot send reminder to user %s: forbidden (%s)",
+                chat_id,
+                exc,
+            )
+            return False
+        except TelegramBadRequest as exc:
+            logger.warning(
+                "Cannot send reminder to user %s: bad request (%s)",
+                chat_id,
+                exc,
+            )
+            return False
+        except (TelegramNetworkError, asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            if attempt >= retries:
+                logger.exception(
+                    "Failed to send reminder to user %s after %s attempts: %s",
+                    chat_id,
+                    attempt + 1,
+                    exc,
+                )
+                return False
+            delay = base_delay * (2 ** attempt)
+            logger.warning(
+                "Send reminder to user %s failed (%s). Retrying in %.1fs.",
+                chat_id,
+                exc,
+                delay,
+            )
+            attempt += 1
+            await asyncio.sleep(delay)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to send reminder to user %s", chat_id)
+            return False
+
+
 async def _ensure_open_cycles(
     db: Database,
     subscription: Dict[str, object],
@@ -146,6 +198,8 @@ async def _run_reminder_pass(
     rounding_mode: str,
     enforce_time: bool,
     register_reminders: bool,
+    target_telegram_id: Optional[int] = None,
+    record_manual_suppressions: bool = False,
 ) -> int:
     logger = logging.getLogger("reminder_runner")
     today = now.date()
@@ -186,10 +240,28 @@ async def _run_reminder_pass(
             nonlocal sent_count
             admin_note: Optional[str] = None
             if participants:
+                target_participants = participants
+                if target_telegram_id is not None:
+                    target_participants = [
+                        person for person in participants
+                        if person.get("telegram_id") == target_telegram_id
+                    ]
+                    if not target_participants:
+                        return
+                suppressed_ids: set[int] = set()
+                if register_reminders:
+                    suppressed_ids = set(
+                        await db.list_reminder_suppressed_users(
+                            int(item["id"]),
+                            due_date_value,
+                            today,
+                        )
+                    )
                 due_key = due_date_value.isoformat()
                 unpaid = [
-                    person for person in participants
+                    person for person in target_participants
                     if (due_key, person["telegram_id"]) not in paid_map
+                    and person["telegram_id"] not in suppressed_ids
                 ]
                 if not unpaid:
                     return
@@ -219,18 +291,22 @@ async def _run_reminder_pass(
                         f"💳 {share_line}\n"
                         "Tap “Paid” when the bill is covered."
                     )
-                    try:
-                        await bot.send_message(
-                            person["telegram_id"],
-                            message_text,
-                            reply_markup=keyboard,
-                        )
+                    sent = await _send_message_with_retry(
+                        bot,
+                        person["telegram_id"],
+                        message_text,
+                        reply_markup=keyboard,
+                        logger=logger,
+                    )
+                    if sent:
                         sent_count += 1
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "Failed to send reminder to user %s",
-                            person["telegram_id"],
-                        )
+                        if record_manual_suppressions:
+                            await db.register_reminder_suppression(
+                                int(item["id"]),
+                                due_date_value,
+                                person["telegram_id"],
+                                today,
+                            )
 
                 if admin_ids:
                     admin_note = (
@@ -247,8 +323,14 @@ async def _run_reminder_pass(
                 for admin_id in admin_ids:
                     if admin_id in participant_ids:
                         continue
-                    with contextlib.suppress(Exception):
-                        await bot.send_message(admin_id, admin_note)
+                    sent = await _send_message_with_retry(
+                        bot,
+                        admin_id,
+                        admin_note,
+                        reply_markup=None,
+                        logger=logger,
+                    )
+                    if sent:
                         sent_count += 1
 
         for cycle_due in open_cycles:
@@ -297,6 +379,8 @@ async def send_reminders_now(
     converter: CurrencyConverter,
     subscription_id: Optional[int] = None,
     rounding_mode: str = "precise",
+    target_telegram_id: Optional[int] = None,
+    suppress_auto_today: bool = True,
 ) -> int:
     now = datetime.now(REMINDER_TIMEZONE)
     return await _run_reminder_pass(
@@ -308,6 +392,8 @@ async def send_reminders_now(
         rounding_mode=rounding_mode,
         enforce_time=False,
         register_reminders=False,
+        target_telegram_id=target_telegram_id,
+        record_manual_suppressions=suppress_auto_today,
     )
 
 

@@ -4,9 +4,9 @@ from aiogram import BaseMiddleware
 from aiogram.filters import Filter
 from aiogram.types import Message
 
-from bot.core.config import Settings
-from bot.storage.db import Database
-from bot.services import CurrencyConverter
+from app.core.config import Settings
+from app.storage.db import Database
+from app.services import CurrencyConverter
 
 
 class SettingsMiddleware(BaseMiddleware):

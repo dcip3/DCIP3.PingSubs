@@ -6,7 +6,7 @@ from typing import Dict, Iterable, Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.states import MemberAction, ParticipantAction, ReminderAction, SubscriptionAction
+from app.ui.states import MemberAction, ParticipantAction, ReminderAction, ReminderSendAction, SubscriptionAction
 
 
 def admin_reply_keyboard() -> ReplyKeyboardMarkup:
@@ -200,6 +200,31 @@ def reminder_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder.button(
         text="⬅️ Back",
         callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def reminder_send_targets_keyboard(
+    subscription_id: int,
+    participants: Sequence[Dict[str, object]],
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="📬 All",
+        callback_data=ReminderSendAction(subscription_id=subscription_id, telegram_id=0).pack(),
+    )
+    for person in participants:
+        builder.button(
+            text=str(person.get("full_name") or "Unknown"),
+            callback_data=ReminderSendAction(
+                subscription_id=subscription_id,
+                telegram_id=int(person["telegram_id"]),
+            ).pack(),
+        )
+    builder.button(
+        text="⬅️ Back",
+        callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack(),
     )
     builder.adjust(1)
     return builder.as_markup()

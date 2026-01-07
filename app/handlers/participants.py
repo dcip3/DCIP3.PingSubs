@@ -3,9 +3,9 @@ from __future__ import annotations
 from aiogram import F
 from aiogram.types import CallbackQuery
 
-from bot.helpers import send_participants_editor, send_subscription_detail
-from bot.states import ParticipantAction, SubscriptionAction
-from bot.storage.db import Database
+from app.ui.helpers import send_participants_editor, send_subscription_detail
+from app.ui.states import ParticipantAction, SubscriptionAction
+from app.storage.db import Database
 
 from . import admin_router
 

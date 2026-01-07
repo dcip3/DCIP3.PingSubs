@@ -67,6 +67,17 @@ class Database:
         )
         await self._conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS reminder_suppressions (
+                subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                due_date TEXT NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                sent_on TEXT NOT NULL,
+                PRIMARY KEY (subscription_id, due_date, telegram_id, sent_on)
+            );
+            """
+        )
+        await self._conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -443,6 +454,44 @@ class Database:
             return True
         except aiosqlite.IntegrityError:
             return False
+
+    async def register_reminder_suppression(
+        self,
+        subscription_id: int,
+        due_date: date,
+        telegram_id: int,
+        sent_on: date,
+    ) -> None:
+        assert self._conn is not None, "Database is not connected"
+        try:
+            await self._conn.execute(
+                """
+                INSERT INTO reminder_suppressions (subscription_id, due_date, telegram_id, sent_on)
+                VALUES (?, ?, ?, ?)
+                """,
+                (subscription_id, due_date.isoformat(), telegram_id, sent_on.isoformat()),
+            )
+            await self._conn.commit()
+        except aiosqlite.IntegrityError:
+            pass
+
+    async def list_reminder_suppressed_users(
+        self,
+        subscription_id: int,
+        due_date: date,
+        sent_on: date,
+    ) -> List[int]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT telegram_id
+            FROM reminder_suppressions
+            WHERE subscription_id = ? AND due_date = ? AND sent_on = ?
+            """,
+            (subscription_id, due_date.isoformat(), sent_on.isoformat()),
+        )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
 
     async def clear_reminder_logs(self, subscription_id: int) -> None:
         assert self._conn is not None, "Database is not connected"

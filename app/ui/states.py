@@ -60,6 +60,11 @@ class ReminderAction(CallbackData, prefix="remind"):
     due_date: str
 
 
+class ReminderSendAction(CallbackData, prefix="remsend"):
+    subscription_id: int
+    telegram_id: int
+
+
 class MemberAction(CallbackData, prefix="member"):
     action: str
     friend_id: int

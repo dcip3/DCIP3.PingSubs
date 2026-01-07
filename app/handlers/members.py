@@ -4,10 +4,10 @@ from aiogram import F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot.helpers import send_member_detail, send_member_list, send_member_report
-from bot.keyboards import admin_reply_keyboard, dialog_keyboard, member_delete_confirm_keyboard
-from bot.states import FriendForm, MemberAction, MemberEditForm
-from bot.storage.db import Database
+from app.ui.helpers import send_member_detail, send_member_list, send_member_report
+from app.ui.keyboards import admin_reply_keyboard, dialog_keyboard, member_delete_confirm_keyboard
+from app.ui.states import FriendForm, MemberAction, MemberEditForm
+from app.storage.db import Database
 
 from . import admin_router
 

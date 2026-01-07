@@ -9,9 +9,9 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
-from bot.core.constants import DATE_INPUT_FORMAT, DEFAULT_CURRENCIES, MONTHLY_PERIOD_SENTINEL
-from bot.storage.db import Database
-from bot.keyboards import (
+from app.core.constants import DATE_INPUT_FORMAT, DEFAULT_CURRENCIES, MONTHLY_PERIOD_SENTINEL
+from app.storage.db import Database
+from app.ui.keyboards import (
     admin_reply_keyboard,
     build_members_list_keyboard,
     build_participants_keyboard,
@@ -27,12 +27,13 @@ from bot.keyboards import (
     public_subscription_detail_keyboard,
     public_subscription_report_keyboard,
     reminder_settings_keyboard,
+    reminder_send_targets_keyboard,
     subscription_report_keyboard,
     subscription_detail_keyboard,
 )
-from bot.states import Responder, SubscriptionAction
-from bot.core.reminders import calculate_next_charge_date, format_offsets_for_display, parse_offsets
-from bot.text import escape_html, format_display_name
+from app.ui.states import Responder, SubscriptionAction
+from app.core.reminders import calculate_next_charge_date, format_offsets_for_display, parse_offsets
+from app.ui.text import escape_html, format_display_name
 
 
 def _format_iso_date(value: str) -> str:
@@ -537,6 +538,32 @@ async def send_reminder_settings(target: Responder, db: Database, subscription_i
         target,
         text,
         reply_markup=reminder_settings_keyboard(subscription_id),
+    )
+
+
+async def send_reminder_send_menu(target: Responder, db: Database, subscription_id: int) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await respond_with_markup(target, "This subscription no longer exists.")
+        return
+
+    participants = await db.list_subscription_participants(subscription_id)
+    if not participants:
+        await respond_with_markup(
+            target,
+            "No members are assigned yet. Add them via 📋 Subscriptions.",
+            reply_markup=reminder_settings_keyboard(subscription_id),
+        )
+        return
+
+    text = (
+        f"<b>{escape_html(subscription['name'])}</b>\n"
+        "Choose who should receive the reminder."
+    )
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=reminder_send_targets_keyboard(subscription_id, participants),
     )
 
 

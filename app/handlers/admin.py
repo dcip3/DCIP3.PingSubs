@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from datetime import datetime
 
-from bot.keyboards import (
+from app.ui.keyboards import (
     admin_reply_keyboard,
     admin_settings_keyboard,
     dialog_keyboard,
@@ -17,7 +17,7 @@ from bot.keyboards import (
     settings_notifications_keyboard,
     settings_rounding_keyboard,
 )
-from bot.helpers import (
+from app.ui.helpers import (
     send_public_subscription_detail,
     send_public_subscription_payment_report,
     send_public_user_payment_report,
@@ -25,14 +25,14 @@ from bot.helpers import (
     send_subscription_list,
     send_user_subscription_list,
 )
-from bot.states import FriendForm, PublicReminderForm, SettingsForm, SubscriptionAction
-from bot.core.constants import DEFAULT_CURRENCIES
-from bot.core.config import Settings
-from bot.storage.db import Database
-from bot.services import CurrencyConverter
+from app.ui.states import FriendForm, PublicReminderForm, SettingsForm, SubscriptionAction
+from app.core.constants import DEFAULT_CURRENCIES
+from app.core.config import Settings
+from app.storage.db import Database
+from app.services import CurrencyConverter
 
 from . import admin_router, public_router
-from bot.text import escape_html, format_display_name
+from app.ui.text import escape_html, format_display_name
 
 
 def _is_cancel_text(text: str | None) -> bool:

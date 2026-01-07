@@ -9,32 +9,33 @@ from aiogram.types import CallbackQuery, Message
 from aiogram import Bot
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.core.constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
-from bot.storage.db import Database
-from bot.helpers import (
+from app.core.constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
+from app.storage.db import Database
+from app.ui.helpers import (
     currency_prompt,
     get_edit_subscription_id,
     period_prompt,
     require_edit_subscription_id,
     send_pricing_settings,
     send_subscription_payment_report,
+    send_reminder_send_menu,
     send_reminder_settings,
     send_subscription_detail,
     send_subscription_list,
     share_limit_prompt,
     start_subscription_edit_flow,
 )
-from bot.keyboards import admin_reply_keyboard, dialog_keyboard
-from bot.states import Responder, SubscriptionAction, SubscriptionEditForm, SubscriptionForm
-from bot.core.reminders import (
+from app.ui.keyboards import admin_reply_keyboard, dialog_keyboard
+from app.ui.states import ReminderSendAction, Responder, SubscriptionAction, SubscriptionEditForm, SubscriptionForm
+from app.core.reminders import (
     DEFAULT_REMINDER_OFFSETS,
     format_offsets_for_display,
     parse_offsets,
     serialize_offsets,
 )
-from bot.core.config import Settings
-from bot.services import CurrencyConverter, send_reminders_now
-from bot.text import escape_html
+from app.core.config import Settings
+from app.services import CurrencyConverter, send_reminders_now
+from app.ui.text import escape_html
 
 from . import admin_router
 
@@ -506,6 +507,17 @@ async def handle_subscription_report_callback(
 async def handle_subscription_reminders_send(
     callback: CallbackQuery,
     callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    await send_reminder_send_menu(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(ReminderSendAction.filter())
+async def handle_subscription_reminders_send_target(
+    callback: CallbackQuery,
+    callback_data: ReminderSendAction,
     bot: Bot,
     settings: Settings,
     db: Database,
@@ -513,12 +525,14 @@ async def handle_subscription_reminders_send(
     state: FSMContext,
 ) -> None:
     await state.clear()
+    target_id = callback_data.telegram_id or None
     sent_count = await send_reminders_now(
         bot,
         db,
         converter,
         subscription_id=callback_data.subscription_id,
         rounding_mode=settings.currency_rounding,
+        target_telegram_id=target_id,
     )
     await callback.answer(f"Sent {sent_count} notification(s).")
     await send_reminder_settings(callback, db, callback_data.subscription_id)
