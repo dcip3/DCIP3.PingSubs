@@ -6,7 +6,6 @@ from datetime import datetime
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
-from datetime import datetime
 
 from app.ui.keyboards import (
     admin_reply_keyboard,
@@ -18,6 +17,7 @@ from app.ui.keyboards import (
     settings_rounding_keyboard,
 )
 from app.ui.helpers import (
+    _build_subscription_payment_report_text,
     send_public_subscription_detail,
     send_public_subscription_payment_report,
     send_public_user_payment_report,
@@ -32,7 +32,6 @@ from app.storage.db import Database
 from app.services import CurrencyConverter
 
 from . import admin_router, public_router
-from app.ui.text import escape_html, format_display_name
 
 
 def _is_cancel_text(text: str | None) -> bool:
@@ -290,19 +289,6 @@ async def friend_form_name(message: Message, state: FSMContext, db: Database) ->
 
 @admin_router.message(F.text == "📊 Payments report")
 async def handle_payments_report(message: Message, db: Database) -> None:
-    today = datetime.today()
-    months = [f"{today.year:04d}-{month:02d}" for month in range(1, 13)]
-    month_labels = [
-        datetime.strptime(month_value, "%Y-%m").strftime("%b")[0] for month_value in months
-    ]
-
-    start_date = f"{months[0]}-01 00:00:00"
-    payment_rows = await db.list_payment_activity(start_date)
-    paid_map = {
-        (row["subscription_id"], row["paid_by_telegram_id"], row["month"])
-        for row in payment_rows
-    }
-
     subscriptions = await db.list_subscriptions()
     if not subscriptions:
         await message.answer("No subscriptions yet.", reply_markup=admin_reply_keyboard())
@@ -313,18 +299,12 @@ async def handle_payments_report(message: Message, db: Database) -> None:
         participants = await db.list_subscription_participants(sub["id"])
         if not participants:
             continue
-        names = [escape_html(format_display_name(person.get("full_name"))) for person in participants]
-        name_width = max(len("Name"), max(len(name) for name in names))
-        header = f"{'Name':<{name_width}} | " + " ".join(month_labels)
-        lines = [header]
-        for person, display_name in zip(participants, names):
-            payer_id = person["telegram_id"]
-            squares = "".join(
-                "🟩" if (sub["id"], payer_id, month) in paid_map else "⬜"
-                for month in months
-            )
-            lines.append(f"{display_name:<{name_width}} | {squares}")
-        block = f"{escape_html(sub['name'])}:\n" + "<pre>" + "\n".join(lines) + "</pre>"
+        block = await _build_subscription_payment_report_text(
+            db,
+            sub,
+            participants,
+            scope="all",
+        )
         blocks.append(block)
 
     if not blocks:
