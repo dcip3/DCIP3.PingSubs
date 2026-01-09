@@ -37,7 +37,7 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         if user_id in participant_ids or await db.is_admin(user_id):
             is_authorized = True
     if not is_authorized:
-        await callback.answer("Only members or admins can confirm payments.", show_alert=True)
+        await callback.answer("Only users or admins can confirm payments.", show_alert=True)
         return
 
     try:

@@ -329,12 +329,12 @@ async def _run_reminder_pass(
                 if admin_ids:
                     admin_note = (
                         f"{context_text}\n"
-                        f"Total: {item['amount']:.2f} {safe_currency} | Members: {len(participants)}"
+                        f"Total: {item['amount']:.2f} {safe_currency} | Users: {len(participants)}"
                     )
             elif admin_ids:
                 admin_note = (
                     f"{context_text}\n"
-                    "No members are assigned yet. Add them via 📋 Subscriptions."
+                    "No users are assigned yet. Add them via 📋 Subscriptions."
                 )
 
             if admin_note and admin_ids:

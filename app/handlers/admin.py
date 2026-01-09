@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from aiogram import F
+import contextlib
 from datetime import datetime
 
 from aiogram.filters import Command
@@ -41,7 +42,7 @@ def _is_cancel_text(text: str | None) -> bool:
 @public_router.message(Command("start"))
 async def handle_start(message: Message, db: Database) -> None:
     greeting = (
-        "Hi! I help families manage shared subscriptions. "
+        "PingSubs helps you manage shared subscriptions. "
         "Admins keep the schedule up to date and I send reminders on time."
     )
 
@@ -54,22 +55,15 @@ async def handle_start(message: Message, db: Database) -> None:
     has_admin = await db.has_admins()
 
     if is_admin:
-        await message.answer(
-            greeting + "\n\nUse the buttons below to open the admin menu.",
-            reply_markup=admin_reply_keyboard(),
-        )
+        await message.answer(greeting, reply_markup=admin_reply_keyboard())
         return
 
     if not has_admin:
-        await message.answer(
-            greeting
-            + "\n\nNo admins are assigned yet. Ask the bot owner to grant access.",
-            reply_markup=dialog_keyboard(),
-        )
+        await message.answer(greeting, reply_markup=dialog_keyboard())
         return
 
     await message.answer(
-        greeting + "\n\nUse the button below to view your subscriptions.",
+        greeting,
         reply_markup=public_reply_keyboard(),
     )
 
@@ -77,10 +71,7 @@ async def handle_start(message: Message, db: Database) -> None:
 @public_router.message(Command("help"))
 async def handle_public_help(message: Message, db: Database) -> None:
     if message.from_user and await db.is_admin(message.from_user.id):
-        await message.answer(
-            "You are already an admin. Use the buttons below to manage subscriptions.",
-            reply_markup=admin_reply_keyboard(),
-        )
+        await send_admin_help(message)
         return
 
     await message.answer(
@@ -88,20 +79,6 @@ async def handle_public_help(message: Message, db: Database) -> None:
         "Ask an admin to invite you if you need access."
     )
 
-
-@public_router.message(F.text == "ℹ️ Help")
-async def handle_public_help_button(message: Message, db: Database) -> None:
-    if message.from_user and await db.is_admin(message.from_user.id):
-        await send_admin_help(message)
-        return
-    text = (
-        "User menu:\n"
-        " 📋 Subscriptions — view your plans and next charge date\n"
-        " 📊 Payments report — see your monthly payment status\n"
-        " ⏰ Reminder time — set when you want to be notified\n\n"
-        "I send reminders when payments are due. Tap “Paid” after you cover your share."
-    )
-    await message.answer(text, reply_markup=public_reply_keyboard())
 
 
 @public_router.message(F.text.func(_is_cancel_text))
@@ -230,19 +207,30 @@ async def handle_public_reminder_time_input(
 
 async def send_admin_help(message: Message) -> None:
     text = (
-        "Admin menu:\n"
-        " 👥 Members — add, edit, and remove members\n"
-        " 📋 Subscriptions — manage and create reminders\n"
-        " 📊 Payments report — monthly payment summary\n\n"
-        " ⚙️ Settings — bot configuration\n\n"
-        "During dialogs tap the Cancel button (or type 'cancel') to stop the wizard."
+        "ℹ️ PingSubs helps you manage shared subscriptions, users, and payment reminders.\n\n"
+        "Buttons:\n"
+        "👥 Users — add, edit, and remove users.\n"
+        "📋 Subscriptions — manage plans and reminders.\n"
+        "📊 Payments report — payment summaries.\n"
+        "⚙️ Settings — bot configuration.\n\n"
+        "Commands:\n"
+        "/start — start the bot.\n"
+        "/help — show this help."
     )
     await message.answer(text, reply_markup=admin_reply_keyboard())
 
 
-@admin_router.message(F.text == "ℹ️ Help")
-async def handle_admin_help_button(message: Message) -> None:
-    await send_admin_help(message)
+@public_router.callback_query(F.data == "menu:close")
+@admin_router.callback_query(F.data == "menu:close")
+async def handle_menu_close(callback: CallbackQuery) -> None:
+    if callback.message:
+        with contextlib.suppress(Exception):
+            await callback.message.delete()
+        if callback.message.text:
+            with contextlib.suppress(Exception):
+                await callback.message.edit_text("Menu closed.")
+    await callback.answer()
+
 
 
 @admin_router.message(F.text.func(_is_cancel_text))
@@ -283,7 +271,7 @@ async def friend_form_name(message: Message, state: FSMContext, db: Database) ->
     telegram_id = int(data["telegram_id"])
     friend_id = await db.upsert_friend(telegram_id, full_name)
     await state.clear()
-    await message.answer("Member saved.", reply_markup=admin_reply_keyboard())
+    await message.answer("User saved.", reply_markup=admin_reply_keyboard())
     await send_member_list(message, db)
 
 
@@ -308,7 +296,7 @@ async def handle_payments_report(message: Message, db: Database) -> None:
         blocks.append(block)
 
     if not blocks:
-        await message.answer("No members to report yet.", reply_markup=admin_reply_keyboard())
+        await message.answer("No users to report yet.", reply_markup=admin_reply_keyboard())
         return
 
     await message.answer("\n\n".join(blocks), reply_markup=admin_reply_keyboard())

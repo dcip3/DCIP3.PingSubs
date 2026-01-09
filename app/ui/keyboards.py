@@ -13,9 +13,8 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         resize_keyboard=True,
         keyboard=[
-            [KeyboardButton(text="👥 Members"), KeyboardButton(text="📋 Subscriptions")],
+            [KeyboardButton(text="👥 Users"), KeyboardButton(text="📋 Subscriptions")],
             [KeyboardButton(text="📊 Payments report"), KeyboardButton(text="⚙️ Settings")],
-            [KeyboardButton(text="ℹ️ Help")],
         ],
     )
 
@@ -25,7 +24,6 @@ def public_reply_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         keyboard=[
             [KeyboardButton(text="📋 Subscriptions"), KeyboardButton(text="📊 Payments report")],
-            [KeyboardButton(text="ℹ️ Help")],
         ],
     )
 
@@ -56,7 +54,7 @@ def build_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> Inlin
 def build_members_list_keyboard(friends: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="➕ Add member",
+        text="➕ Add user",
         callback_data=MemberAction(action="add", friend_id=0).pack(),
     )
     for friend in friends:
@@ -66,6 +64,9 @@ def build_members_list_keyboard(friends: Sequence[Dict[str, object]]) -> InlineK
             callback_data=MemberAction(action="open", friend_id=friend["id"]).pack(),
         )
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
@@ -83,11 +84,14 @@ def member_detail_keyboard(friend_id: int) -> InlineKeyboardMarkup:
         text="🗑 Delete",
         callback_data=MemberAction(action="delete", friend_id=friend_id).pack(),
     )
-    builder.button(
-        text="⬅️ Back",
-        callback_data=MemberAction(action="back", friend_id=friend_id).pack(),
-    )
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=MemberAction(action="back", friend_id=friend_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
@@ -97,21 +101,26 @@ def member_delete_confirm_keyboard(friend_id: int) -> InlineKeyboardMarkup:
         text="✅ Yes, delete",
         callback_data=MemberAction(action="confirm_delete", friend_id=friend_id).pack(),
     )
-    builder.button(
-        text="⬅️ Back",
-        callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
-    )
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
 def member_report_keyboard(friend_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="⬅️ Back",
-        callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
-    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -131,15 +140,21 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Rename", callback_data=SubscriptionAction(action="rename", subscription_id=subscription_id).pack())
     builder.button(text="💰 Pricing", callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack())
-    builder.button(text="📅 Next date", callback_data=SubscriptionAction(action="duedate", subscription_id=subscription_id).pack())
+    builder.button(text="📅 Next charge", callback_data=SubscriptionAction(action="duedate", subscription_id=subscription_id).pack())
     builder.button(text="🔁 Period", callback_data=SubscriptionAction(action="period", subscription_id=subscription_id).pack())
     builder.button(text="🔔 Reminders", callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack())
-    builder.button(text="👥 Members", callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack())
+    builder.button(text="👥 Users", callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack())
     builder.button(text="➗ Split limit", callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack())
     builder.button(text="📊 Payments report", callback_data=SubscriptionAction(action="report", subscription_id=subscription_id).pack())
     builder.button(text="🗑 Delete", callback_data=SubscriptionAction(action="delete", subscription_id=subscription_id).pack())
-    builder.button(text="⬅️ Back", callback_data=SubscriptionAction(action="back", subscription_id=subscription_id).pack())
     builder.adjust(2, 2, 2, 2, 2)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="back", subscription_id=subscription_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
@@ -153,21 +168,26 @@ def public_subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardM
         text="📊 Payments report",
         callback_data=SubscriptionAction(action="public_report", subscription_id=subscription_id).pack(),
     )
-    builder.button(
-        text="⬅️ Back",
-        callback_data=SubscriptionAction(action="public_back", subscription_id=subscription_id).pack(),
-    )
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="public_back", subscription_id=subscription_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
 def build_back_keyboard(subscription_id: int, back_action: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="⬅️ Back",
-        callback_data=SubscriptionAction(action=back_action, subscription_id=subscription_id).pack(),
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action=back_action, subscription_id=subscription_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
-    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -197,11 +217,14 @@ def reminder_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         text="📬 Send reminders now",
         callback_data=SubscriptionAction(action="reminders_send", subscription_id=subscription_id).pack(),
     )
-    builder.button(
-        text="⬅️ Back",
-        callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-    )
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
@@ -222,11 +245,14 @@ def reminder_send_targets_keyboard(
                 telegram_id=int(person["telegram_id"]),
             ).pack(),
         )
-    builder.button(
-        text="⬅️ Back",
-        callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack(),
-    )
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
@@ -240,11 +266,14 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         text="💱 Currency",
         callback_data=SubscriptionAction(action="currency", subscription_id=subscription_id).pack(),
     )
-    builder.button(
-        text="⬅️ Back",
-        callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-    )
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
@@ -278,7 +307,8 @@ def build_participants_keyboard(friends: Sequence[Dict[str, object]], subscripti
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-            )
+            ),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -298,6 +328,9 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🔢 Rounding", callback_data="settings:rounding")
     builder.button(text="🔔 Notifications", callback_data="settings:notifications")
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
@@ -306,8 +339,11 @@ def settings_currency_keyboard(options: Iterable[str]) -> InlineKeyboardMarkup:
     for code in options:
         builder.button(text=code.upper(), callback_data=f"settings_currency:{code.upper()}")
     builder.button(text="Other", callback_data="settings:currency_other")
-    builder.button(text="⬅️ Back", callback_data="settings:menu")
     builder.adjust(3, 2)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
@@ -320,8 +356,11 @@ def settings_rounding_keyboard(current_mode: str) -> InlineKeyboardMarkup:
     builder.button(text=mark("floor", "Round down"), callback_data="settings_rounding:floor")
     builder.button(text=mark("round", "Round correctly"), callback_data="settings_rounding:round")
     builder.button(text=mark("ceil", "Round up"), callback_data="settings_rounding:ceil")
-    builder.button(text="⬅️ Back", callback_data="settings:menu")
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 
@@ -346,8 +385,11 @@ def settings_notifications_keyboard(
         text=mark(closed_enabled, "All paid (cycle closed)"),
         callback_data="settings_notify:closed",
     )
-    builder.button(text="⬅️ Back", callback_data="settings:menu")
     builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()
 
 

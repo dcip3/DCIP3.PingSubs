@@ -12,7 +12,7 @@ from app.storage.db import Database
 from . import admin_router
 
 
-@admin_router.message(F.text == "👥 Members")
+@admin_router.message(F.text == "👥 Users")
 async def handle_members_menu(message: Message, db: Database) -> None:
     await send_member_list(message, db)
 
@@ -36,7 +36,7 @@ async def handle_member_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(FriendForm.telegram_id)
     if callback.message:
         await callback.message.answer(
-            "Send the member's Telegram ID (numbers only) or forward their message. Use the Cancel button to stop.",
+            "Send the user's Telegram ID (numbers only) or forward their message. Use the Cancel button to stop.",
             reply_markup=dialog_keyboard(),
         )
     await callback.answer()
@@ -69,7 +69,7 @@ async def handle_member_rename(
     await state.set_state(MemberEditForm.full_name)
     await state.update_data(edit_member_id=callback_data.friend_id)
     if callback.message:
-        await callback.message.answer("Send the new member name:")
+        await callback.message.answer("Send the new user name:")
     await callback.answer()
 
 
@@ -87,7 +87,7 @@ async def handle_member_rename_input(
     friend_id = data.get("edit_member_id")
     if not friend_id:
         await state.clear()
-        await message.answer("Session expired. Open members again.")
+        await message.answer("Session expired. Open users again.")
         return
     await db.update_friend_name(int(friend_id), raw_name)
     await state.clear()
@@ -101,7 +101,7 @@ async def handle_member_delete_prompt(
 ) -> None:
     if callback.message:
         await callback.message.edit_text(
-            "Are you sure you want to delete this member?",
+            "Are you sure you want to delete this user?",
             reply_markup=member_delete_confirm_keyboard(callback_data.friend_id),
         )
     await callback.answer()
@@ -114,5 +114,5 @@ async def handle_member_delete_confirm(
     db: Database,
 ) -> None:
     await db.delete_friend(callback_data.friend_id)
-    await callback.answer("Member deleted.")
+    await callback.answer("User deleted.")
     await send_member_list(callback, db)

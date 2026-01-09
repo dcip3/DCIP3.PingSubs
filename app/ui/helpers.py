@@ -75,7 +75,7 @@ async def send_subscription_list(target: Responder, db: Database) -> None:
     ]
     for idx, sub in enumerate(subs, 1):
         audience = sub["participant_count"]
-        audience_text = f"{audience} member(s)" if audience else "no members"
+        audience_text = f"{audience} user(s)" if audience else "no users"
         lines.append(
             f"{idx}. {escape_html(sub['name'])} — {sub['amount']:.2f} {escape_html(sub['currency'])} | {audience_text}"
         )
@@ -163,7 +163,7 @@ async def send_public_subscription_detail(
             )
         participants_text = "\n".join(participants_lines)
     else:
-        participants_text = "       No members yet."
+        participants_text = "       No users yet."
 
     if subscription["period_days"] == MONTHLY_PERIOD_SENTINEL:
         cadence = "every month on the same calendar day"
@@ -193,7 +193,7 @@ async def send_public_subscription_detail(
         f"       {reminder_time} MSK\n"
         f"       Days: {offsets_text}\n"
         f"       Post-due: {overdue_text}\n"
-        f"👥 <b>Members</b> ({len(participants)}):\n"
+        f"👥 <b>Users</b> ({len(participants)}):\n"
         f"{participants_text}"
     )
     await respond_with_markup(
@@ -217,7 +217,7 @@ async def send_subscription_payment_report(
     if not participants:
         await respond_with_markup(
             target,
-            "No members to report yet.",
+        "No users to report yet.",
             reply_markup=subscription_report_keyboard(subscription_id),
         )
         return
@@ -386,12 +386,12 @@ def _share_details(
         return share_limit, f"split into {share_limit} share(s)"
 
     if not participants:
-        return 1, "waiting for members"
+        return 1, "waiting for users"
 
     total_shares = sum(int(p.get("share_weight") or 1) for p in participants)
     if total_shares == len(participants):
-        return total_shares, f"split across {len(participants)} member(s)"
-    return total_shares, f"split across {total_shares} share(s) across {len(participants)} member(s)"
+        return total_shares, f"split across {len(participants)} user(s)"
+    return total_shares, f"split across {total_shares} share(s) across {len(participants)} user(s)"
 
 
 def _build_subscription_detail_text(
@@ -411,7 +411,7 @@ def _build_subscription_detail_text(
             )
         participants_text = "\n".join(participants_lines)
     else:
-        participants_text = "       No members yet."
+        participants_text = "       No users yet."
 
     if subscription["period_days"] == MONTHLY_PERIOD_SENTINEL:
         cadence = "every month on the same calendar day"
@@ -427,14 +427,14 @@ def _build_subscription_detail_text(
         f"💰 <b>Amount</b>:\n"
         f"       {subscription['amount']:.2f} {escape_html(subscription['currency'])}\n"
         f"       ≈ {per_person:.2f} {escape_html(subscription['currency'])} per share, {share_text}\n"
-        f"📅 <b>Charge date</b>:\n"
+        f"📅 <b>Next charge</b>:\n"
         f"       {_format_iso_date(subscription['next_charge_at'])}\n"
         f"       {cadence}\n"
         f"🔔 <b>Reminders</b>:\n"
         f"       {reminder_time} MSK\n"
         f"       Days: {offsets_text}\n"
         f"       Post-due: {overdue_text}\n"
-        f"👥 <b>Members</b> ({len(participants)}):\n"
+        f"👥 <b>Users</b> ({len(participants)}):\n"
         f"{participants_text}"
     )
 
@@ -460,11 +460,11 @@ async def send_member_list(target: Responder, db: Database) -> None:
     if not friends:
         await respond_with_markup(
             target,
-            "No members yet. Use “➕ Add member” to create one.",
+            "No users yet. Use “➕ Add user” to create one.",
             reply_markup=build_members_list_keyboard([]),
         )
         return
-    lines = ["Choose a member to manage:"]
+    lines = ["Choose a user to manage:"]
     for idx, friend in enumerate(friends, 1):
         lines.append(f"{idx}. {escape_html(friend['full_name'])}")
     await respond_with_markup(
@@ -477,7 +477,7 @@ async def send_member_list(target: Responder, db: Database) -> None:
 async def send_member_detail(target: Responder, db: Database, friend_id: int) -> None:
     friend = await db.get_friend(friend_id)
     if not friend:
-        await respond_with_markup(target, "Member not found.")
+        await respond_with_markup(target, "User not found.")
         return
     subs = await db.list_subscriptions_for_user(friend["telegram_id"])
     if subs:
@@ -500,7 +500,7 @@ async def send_member_detail(target: Responder, db: Database, friend_id: int) ->
 async def send_member_report(target: Responder, db: Database, friend_id: int) -> None:
     friend = await db.get_friend(friend_id)
     if not friend:
-        await respond_with_markup(target, "Member not found.")
+        await respond_with_markup(target, "User not found.")
         return
     blocks = await _build_user_payment_blocks(db, friend["telegram_id"])
     if not blocks:
@@ -551,7 +551,7 @@ async def send_reminder_send_menu(target: Responder, db: Database, subscription_
     if not participants:
         await respond_with_markup(
             target,
-            "No members are assigned yet. Add them via 📋 Subscriptions.",
+            "No users are assigned yet. Add them via 📋 Subscriptions.",
             reply_markup=reminder_settings_keyboard(subscription_id),
         )
         return
@@ -599,7 +599,7 @@ async def send_participants_editor(callback: CallbackQuery, db: Database, subscr
             callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
         )
         await callback.message.edit_text(
-            "No members in the database yet. Add someone first with “👥 Members”.",
+            "No users in the database yet. Add someone first with “👥 Users”.",
             reply_markup=builder.as_markup(),
         )
         await callback.answer()
@@ -609,7 +609,7 @@ async def send_participants_editor(callback: CallbackQuery, db: Database, subscr
     selected = sum(1 for friend in friends if friend["is_member"])
     total_shares = sum(int(friend.get("share_weight") or 1) for friend in friends if friend["is_member"])
     text = (
-        "Toggle members for this subscription.\n"
+        "Toggle users for this subscription.\n"
         "Tap xN to change share weight (1-5).\n"
         f"Currently selected: {selected} | Total shares: {total_shares}"
     )
@@ -681,6 +681,6 @@ def period_prompt() -> Tuple[str, InlineKeyboardMarkup]:
 
 def share_limit_prompt() -> Tuple[str, InlineKeyboardMarkup]:
     return (
-        'Send the number of members who split this subscription or tap “Split across all”.',
+        'Send the number of users who split this subscription or tap “Split across all”.',
         build_share_limit_keyboard(),
     )

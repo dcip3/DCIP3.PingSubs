@@ -550,9 +550,9 @@ async def handle_subscription_share_callback(
         return
     _, prompt_markup = share_limit_prompt()
     current_share = subscription.get("share_limit")
-    current_label = f"{current_share} member(s)" if current_share else "all members"
+    current_label = f"{current_share} user(s)" if current_share else "all users"
     prompt_text = (
-        "Send the number of members who split this subscription or tap “Split across all”.\n"
+        "Send the number of users who split this subscription or tap “Split across all”.\n"
         f"Current setting: {escape_html(current_label)}."
     )
     await start_subscription_edit_flow(

@@ -30,7 +30,7 @@ async def handle_participant_toggle(
     friends = await db.list_friends_with_membership(callback_data.subscription_id)
     target = next((f for f in friends if f["id"] == callback_data.friend_id), None)
     if target is None:
-        await callback.answer("Unknown member.", show_alert=True)
+        await callback.answer("Unknown user.", show_alert=True)
         return
 
     await db.set_participant(
@@ -50,10 +50,10 @@ async def handle_participant_weight(
     friends = await db.list_friends_with_membership(callback_data.subscription_id)
     target = next((f for f in friends if f["id"] == callback_data.friend_id), None)
     if target is None:
-        await callback.answer("Unknown member.", show_alert=True)
+        await callback.answer("Unknown user.", show_alert=True)
         return
     if not target["is_member"]:
-        await callback.answer("Add the member first.", show_alert=True)
+        await callback.answer("Add the user first.", show_alert=True)
         return
 
     current_weight = int(target.get("share_weight") or 1)
