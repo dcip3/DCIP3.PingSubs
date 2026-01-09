@@ -104,26 +104,26 @@ async def _send_message_with_retry(
     logger: logging.Logger,
     retries: int = 2,
     base_delay: float = 1.0,
-) -> bool:
+) -> Optional[int]:
     attempt = 0
     while True:
         try:
-            await bot.send_message(chat_id, text, reply_markup=reply_markup)
-            return True
+            sent = await bot.send_message(chat_id, text, reply_markup=reply_markup)
+            return sent.message_id
         except TelegramForbiddenError as exc:
             logger.warning(
                 "Cannot send reminder to user %s: forbidden (%s)",
                 chat_id,
                 exc,
             )
-            return False
+            return None
         except TelegramBadRequest as exc:
             logger.warning(
                 "Cannot send reminder to user %s: bad request (%s)",
                 chat_id,
                 exc,
             )
-            return False
+            return None
         except (TelegramNetworkError, asyncio.TimeoutError, aiohttp.ClientError) as exc:
             if attempt >= retries:
                 logger.exception(
@@ -132,7 +132,7 @@ async def _send_message_with_retry(
                     attempt + 1,
                     exc,
                 )
-                return False
+                return None
             delay = base_delay * (2 ** attempt)
             logger.warning(
                 "Send reminder to user %s failed (%s). Retrying in %.1fs.",
@@ -144,7 +144,7 @@ async def _send_message_with_retry(
             await asyncio.sleep(delay)
         except Exception:  # noqa: BLE001
             logger.exception("Failed to send reminder to user %s", chat_id)
-            return False
+            return None
 
 
 async def _ensure_open_cycles(
@@ -277,29 +277,47 @@ async def _run_reminder_pass(
                 for person in unpaid:
                     weight = int(person.get("share_weight") or 1)
                     weight_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
+                    share_amount_value = share_amount * weight
                     share_line = (
-                        f"Your share ({weight_text}): {share_amount * weight:.2f} {safe_currency}"
+                        f"Your share ({weight_text}): {share_amount_value:.2f} {safe_currency}"
                     )
+                    converted_value: Optional[float] = None
+                    converted_display: Optional[str] = None
                     if share_amount_rub is not None:
                         converted = share_amount_rub * weight
-                        share_line += (
-                            f" (≈ {format_converted_amount(converted, converter.target_currency, rounding_mode)})"
+                        converted_display = format_converted_amount(
+                            converted,
+                            converter.target_currency,
+                            rounding_mode,
                         )
+                        converted_value = float(converted)
+                        share_line += f" (≈ {converted_display})"
                     message_text = (
                         f"{escape_html(person['full_name'])},\n"
                         f"🔔 {context_text}\n"
                         f"💳 {share_line}\n"
                         "Tap “Paid” when the bill is covered."
                     )
-                    sent = await _send_message_with_retry(
+                    message_id = await _send_message_with_retry(
                         bot,
                         person["telegram_id"],
                         message_text,
                         reply_markup=keyboard,
                         logger=logger,
                     )
-                    if sent:
+                    if message_id is not None:
                         sent_count += 1
+                        await db.record_reminder_message(
+                            subscription_id=int(item["id"]),
+                            due_date=due_date_value,
+                            telegram_id=person["telegram_id"],
+                            message_id=message_id,
+                            share_amount=share_amount_value,
+                            share_currency=str(item["currency"]),
+                            converted_amount=converted_value,
+                            converted_currency=converter.target_currency if converted_display else None,
+                            converted_display=converted_display,
+                        )
                         if record_manual_suppressions:
                             await db.register_reminder_suppression(
                                 int(item["id"]),
@@ -330,7 +348,7 @@ async def _run_reminder_pass(
                         reply_markup=None,
                         logger=logger,
                     )
-                    if sent:
+                    if sent is not None:
                         sent_count += 1
 
         for cycle_due in open_cycles:

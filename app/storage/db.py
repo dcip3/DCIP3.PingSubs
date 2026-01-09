@@ -78,6 +78,23 @@ class Database:
         )
         await self._conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS reminder_messages (
+                subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                due_date TEXT NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                share_amount REAL NOT NULL,
+                share_currency TEXT NOT NULL,
+                converted_amount REAL,
+                converted_currency TEXT,
+                converted_display TEXT,
+                sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (telegram_id, message_id)
+            );
+            """
+        )
+        await self._conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -492,6 +509,66 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [row[0] for row in rows]
+
+    async def record_reminder_message(
+        self,
+        subscription_id: int,
+        due_date: date | str,
+        telegram_id: int,
+        message_id: int,
+        share_amount: float,
+        share_currency: str,
+        converted_amount: Optional[float],
+        converted_currency: Optional[str],
+        converted_display: Optional[str],
+    ) -> None:
+        assert self._conn is not None, "Database is not connected"
+        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
+        await self._conn.execute(
+            """
+            INSERT OR REPLACE INTO reminder_messages (
+                subscription_id,
+                due_date,
+                telegram_id,
+                message_id,
+                share_amount,
+                share_currency,
+                converted_amount,
+                converted_currency,
+                converted_display
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                subscription_id,
+                due_value,
+                telegram_id,
+                message_id,
+                share_amount,
+                share_currency,
+                converted_amount,
+                converted_currency,
+                converted_display,
+            ),
+        )
+        await self._conn.commit()
+
+    async def get_reminder_message(
+        self,
+        telegram_id: int,
+        message_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT *
+            FROM reminder_messages
+            WHERE telegram_id = ? AND message_id = ?
+            """,
+            (telegram_id, message_id),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     async def clear_reminder_logs(self, subscription_id: int) -> None:
         assert self._conn is not None, "Database is not connected"

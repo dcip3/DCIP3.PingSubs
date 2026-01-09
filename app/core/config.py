@@ -25,7 +25,7 @@ class Settings:
         if not token:
             raise RuntimeError("BOT_TOKEN is missing in .env")
 
-        db_path = Path(os.getenv("DATABASE_PATH", "data/bot.db"))
+        db_path = Path(os.getenv("DATABASE_PATH", "data/app.db"))
 
         interval_raw = os.getenv("REMINDER_CHECK_INTERVAL", "3600")
         try:

@@ -71,13 +71,25 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
     admin_ids = await db.list_admin_ids()
     if admin_ids and notify_paid:
         payer_name = callback.from_user.full_name if callback.from_user else "Someone"
-        share_base = calculate_share_base(subscription, participants)
-        weight = next(
-            (int(p.get("share_weight") or 1) for p in participants if p["telegram_id"] == user_id),
-            share_base,
-        )
-        paid_amount = float(subscription["amount"]) * weight / share_base
-        amount_line = f"Amount: {paid_amount:.2f} {escape_html(subscription['currency'])}"
+        reminder_snapshot = None
+        if callback.message and user_id is not None:
+            reminder_snapshot = await db.get_reminder_message(user_id, callback.message.message_id)
+
+        if reminder_snapshot:
+            paid_amount = float(reminder_snapshot["share_amount"])
+            paid_currency = escape_html(reminder_snapshot["share_currency"])
+            amount_line = f"Amount: {paid_amount:.2f} {paid_currency}"
+            converted_display = reminder_snapshot.get("converted_display")
+            if converted_display:
+                amount_line += f" (≈ {escape_html(converted_display)})"
+        else:
+            share_base = calculate_share_base(subscription, participants)
+            weight = next(
+                (int(p.get("share_weight") or 1) for p in participants if p["telegram_id"] == user_id),
+                share_base,
+            )
+            paid_amount = float(subscription["amount"]) * weight / share_base
+            amount_line = f"Amount: {paid_amount:.2f} {escape_html(subscription['currency'])}"
         admin_note = (
             f"✅ Payment recorded: {escape_html(subscription['name'])} ({format_due_date(due_value)})\n"
             f"Payer: {escape_html(payer_name)}\n"
