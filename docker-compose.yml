@@ -1,5 +1,5 @@
 services:
-  app:
+  pingsubs:
     build: .
     env_file:
       - .env
