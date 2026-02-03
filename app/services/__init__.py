@@ -156,7 +156,7 @@ def _build_reminder_message(
     footer: str,
     test_prefix: Optional[str] = None,
 ) -> str:
-    blocks: list[list[str]] = [[f"{person_name},"]]
+    blocks: list[list[str]] = [[f"{escape_html(person_name)},"]]
     blocks += _build_subscription_blocks(
         index=None,
         subscription_name=subscription_name,
@@ -190,23 +190,30 @@ def _build_subscription_blocks(
         title = f"🔔 {prefix}Subscription Info:"
     else:
         title = f"🔔 {prefix}Subscription {index} Info:"
+    safe_name = escape_html(subscription_name)
+    safe_status = escape_html(status_text)
+    safe_due_date = escape_html(due_date_text)
+    safe_share = escape_html(share_text)
+    safe_amount = escape_html(amount_text)
+    safe_converted = escape_html(converted_text) if converted_text else None
+    safe_comment = escape_html(comment) if comment else ""
     blocks: list[list[str]] = [
         [
             title,
-            f"🏷️ Name: <code>{subscription_name}</code>",
-            f"⏳ Status: <code>{status_text}</code>",
-            f"📅 Date: <code>{due_date_text}</code>",
+            f"🏷️ Name: <code>{safe_name}</code>",
+            f"⏳ Status: <code>{safe_status}</code>",
+            f"📅 Date: <code>{safe_due_date}</code>",
         ],
         [
             "💳 Payment:",
-            f"👥 Share: <code>{share_text}</code>",
-            f"💰 Amount: <code>{amount_text}</code>",
+            f"👥 Share: <code>{safe_share}</code>",
+            f"💰 Amount: <code>{safe_amount}</code>",
         ],
     ]
-    if converted_text:
-        blocks[-1].append(f"≈ <code>{converted_text}</code>")
-    if comment:
-        blocks.append(["📝 Comment:", f"<code>{comment}</code>"])
+    if safe_converted:
+        blocks[-1].append(f"≈ <code>{safe_converted}</code>")
+    if safe_comment:
+        blocks.append(["📝 Comment:", f"<code>{safe_comment}</code>"])
     return blocks
 
 
@@ -217,7 +224,7 @@ def _build_batch_reminder_message(
     total_text: Optional[str],
     footer: str,
 ) -> str:
-    blocks: list[list[str]] = [[f"{person_name},"]]
+    blocks: list[list[str]] = [[f"{escape_html(person_name)},"]]
     for idx, item in enumerate(items, 1):
         blocks += _build_subscription_blocks(
             index=idx,
@@ -230,7 +237,13 @@ def _build_batch_reminder_message(
             comment=str(item.get("comment") or ""),
         )
     if total_text:
-        blocks.append(["==============================", "💳 Total:", f"💰 Amount: <code>{total_text}</code>"])
+        blocks.append(
+            [
+                "==============================",
+                "💳 Total:",
+                f"💰 Amount: <code>{escape_html(total_text)}</code>",
+            ]
+        )
     if footer:
         blocks.append([footer])
     return "\n\n".join("\n".join(block) for block in blocks)
@@ -354,9 +367,11 @@ async def _run_reminder_pass(
     for item in subscriptions:
         if subscription_id is not None and item.get("id") != subscription_id:
             continue
-        safe_name = escape_html(item.get("name", ""))
-        safe_currency = escape_html(item.get("currency", ""))
-        safe_comment = escape_html(item.get("comment", "")).strip()
+        raw_name = str(item.get("name", ""))
+        raw_currency = str(item.get("currency", ""))
+        raw_comment = str(item.get("comment", "")).strip()
+        safe_name = escape_html(raw_name)
+        safe_currency = escape_html(raw_currency)
         try:
             _parse_due_date(item["next_charge_at"])
         except (KeyError, ValueError):
@@ -422,28 +437,28 @@ async def _run_reminder_pass(
                         share_amount=share_amount,
                         weight=weight,
                         share_base=share_base,
-                        safe_currency=safe_currency,
+                        safe_currency=raw_currency,
                         converted_base=share_amount_rub,
                         rounding_mode=rounding_mode,
                         target_currency=converter.target_currency,
                     )
                     base_amount_value: Optional[float] = converted_value
-                    if base_amount_value is None and safe_currency == converter.target_currency:
+                    if base_amount_value is None and raw_currency == converter.target_currency:
                         base_amount_value = float(share_amount_value)
                     key = (int(person["telegram_id"]), reminder_time_label)
                     pending.setdefault(key, []).append(
                         {
-                            "person_name": escape_html(person["full_name"]),
+                            "person_name": str(person["full_name"]),
                             "subscription_id": int(item["id"]),
                             "due_date": due_date_value,
-                            "subscription_name": safe_name,
+                            "subscription_name": raw_name,
                             "subscription_label": str(item.get("name", "")),
                             "status_text": status_text,
                             "due_date_text": due_date_text,
                             "share_text": share_text,
                             "amount_text": amount_text,
                             "converted_text": converted_display,
-                            "comment": safe_comment,
+                            "comment": raw_comment,
                             "share_amount_value": share_amount_value,
                             "share_currency": str(item["currency"]),
                             "converted_value": converted_value,
@@ -452,7 +467,7 @@ async def _run_reminder_pass(
                     )
 
                 if admin_ids:
-                    admin_comment = f"\nComment: {safe_comment}" if safe_comment else ""
+                    admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
                     admin_note = (
                         f"🔔 {safe_name}\n"
                         f"{context_text}\n"
@@ -460,7 +475,7 @@ async def _run_reminder_pass(
                         f"{admin_comment}"
                     )
             elif admin_ids:
-                admin_comment = f"\nComment: {safe_comment}" if safe_comment else ""
+                admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
                 admin_note = (
                     f"🔔 {safe_name}\n"
                     f"{context_text}\n"
@@ -644,9 +659,9 @@ async def send_test_reminders(
     except (KeyError, ValueError):
         return 0
 
-    safe_name = escape_html(subscription.get("name", ""))
-    safe_currency = escape_html(subscription.get("currency", ""))
-    safe_comment = escape_html(subscription.get("comment", "")).strip()
+    raw_name = str(subscription.get("name", ""))
+    raw_currency = str(subscription.get("currency", ""))
+    raw_comment = str(subscription.get("comment", "")).strip()
     today = datetime.now(REMINDER_TIMEZONE).date()
     share_base = calculate_share_base(subscription, participants)
     share_amount = subscription["amount"] / share_base
@@ -663,21 +678,21 @@ async def send_test_reminders(
             share_amount=share_amount,
             weight=weight,
             share_base=share_base,
-            safe_currency=safe_currency,
+            safe_currency=raw_currency,
             converted_base=share_amount_converted,
             rounding_mode=rounding_mode,
             target_currency=converter.target_currency,
         )
         status_text, due_date_text = _format_status_and_date(due_date, today)
         message_text = _build_reminder_message(
-            person_name=escape_html(person["full_name"]),
-            subscription_name=safe_name,
+            person_name=str(person["full_name"]),
+            subscription_name=raw_name,
             status_text=status_text,
             due_date_text=due_date_text,
             share_text=share_text,
             amount_text=amount_text,
             converted_text=converted_display,
-            comment=safe_comment,
+            comment=raw_comment,
             footer="This is a test reminder. Tapping “Paid” will not record anything.",
             test_prefix="🧪",
         )
