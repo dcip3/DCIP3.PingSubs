@@ -154,7 +154,6 @@ def _build_reminder_message(
     converted_text: Optional[str],
     comment: str,
     footer: str,
-    test_prefix: Optional[str] = None,
 ) -> str:
     blocks: list[list[str]] = [[f"{escape_html(person_name)},"]]
     blocks += _build_subscription_blocks(
@@ -166,7 +165,6 @@ def _build_reminder_message(
         amount_text=amount_text,
         converted_text=converted_text,
         comment=comment,
-        test_prefix=test_prefix,
     )
     if footer:
         blocks.append([footer])
@@ -183,13 +181,11 @@ def _build_subscription_blocks(
     amount_text: str,
     converted_text: Optional[str],
     comment: str,
-    test_prefix: Optional[str] = None,
 ) -> list[list[str]]:
-    prefix = f"{test_prefix} " if test_prefix else ""
     if index is None:
-        title = f"🔔 {prefix}Subscription Info:"
+        title = "🔔 Subscription Info:"
     else:
-        title = f"🔔 {prefix}Subscription {index} Info:"
+        title = f"🔔 Subscription {index} Info:"
     safe_name = escape_html(subscription_name)
     safe_status = escape_html(status_text)
     safe_due_date = escape_html(due_date_text)
@@ -694,7 +690,6 @@ async def send_test_reminders(
             converted_text=converted_display,
             comment=raw_comment,
             footer="This is a test reminder. Tapping “Paid” will not record anything.",
-            test_prefix="🧪",
         )
         keyboard = build_test_payment_confirmation_keyboard(subscription_id, due_date)
         message_id = await _send_message_with_retry(
