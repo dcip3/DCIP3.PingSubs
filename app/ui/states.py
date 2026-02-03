@@ -38,6 +38,7 @@ class SubscriptionEditForm(StatesGroup):
     share_limit = State()
     reminder_time = State()
     reminder_offsets = State()
+    comment = State()
 
 
 class MemberEditForm(StatesGroup):

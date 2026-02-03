@@ -153,9 +153,10 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder.button(text="🔔 Reminders", callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack())
     builder.button(text="👥 Users", callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack())
     builder.button(text="➗ Split limit", callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack())
+    builder.button(text="📝 Comment", callback_data=SubscriptionAction(action="comment", subscription_id=subscription_id).pack())
     builder.button(text="📊 Payments report", callback_data=SubscriptionAction(action="report", subscription_id=subscription_id).pack())
     builder.button(text="🗑 Delete", callback_data=SubscriptionAction(action="delete", subscription_id=subscription_id).pack())
-    builder.adjust(2, 2, 2, 2, 2)
+    builder.adjust(2, 2, 2, 2, 2, 1)
     builder.row(
         InlineKeyboardButton(
             text="⬅️ Back",
@@ -489,4 +490,22 @@ def build_test_payment_confirmation_keyboard(subscription_id: int, due_date: dat
         callback_data=TestPaidAction(subscription_id=subscription_id, due_date=due_str).pack(),
     )
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def comment_edit_keyboard(
+    subscription_id: int,
+    has_comment: bool,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if has_comment:
+        builder.row(
+            InlineKeyboardButton(
+                text="Clear",
+                callback_data=SubscriptionAction(action="comment_clear", subscription_id=subscription_id).pack(),
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
     return builder.as_markup()

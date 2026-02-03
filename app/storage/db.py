@@ -42,6 +42,7 @@ class Database:
                 next_charge_at TEXT NOT NULL,
                 period_days INTEGER NOT NULL DEFAULT 30,
                 share_limit INTEGER,
+                comment TEXT NOT NULL DEFAULT '',
                 reminder_time TEXT NOT NULL DEFAULT '16:00',
                 reminder_offsets TEXT NOT NULL DEFAULT '[-1, 0]',
                 remind_after_due INTEGER NOT NULL DEFAULT 1
@@ -151,6 +152,11 @@ class Database:
             "subscriptions",
             "remind_after_due",
             "INTEGER NOT NULL DEFAULT 1",
+        )
+        await self._ensure_column(
+            "subscriptions",
+            "comment",
+            "TEXT NOT NULL DEFAULT ''",
         )
 
     async def _ensure_participant_columns(self) -> None:
@@ -389,7 +395,7 @@ class Database:
         cursor = await self._conn.execute(
             """
             SELECT id, name, amount, currency, next_charge_at, period_days, share_limit,
-                   reminder_time, reminder_offsets, remind_after_due
+                   reminder_time, reminder_offsets, remind_after_due, comment
             FROM subscriptions
             """,
         )

@@ -25,7 +25,7 @@ from app.ui.helpers import (
     share_limit_prompt,
     start_subscription_edit_flow,
 )
-from app.ui.keyboards import admin_reply_keyboard, dialog_keyboard
+from app.ui.keyboards import admin_reply_keyboard, comment_edit_keyboard, dialog_keyboard
 from app.ui.states import ReminderSendAction, Responder, SubscriptionAction, SubscriptionEditForm, SubscriptionForm
 from app.core.reminders import (
     DEFAULT_REMINDER_OFFSETS,
@@ -613,6 +613,74 @@ async def handle_subscription_reminder_days_callback(
     )
 
 
+def _comment_prompt_text(current_value: str) -> str:
+    base = "Send the comment text to attach to reminders."
+    if current_value:
+        return f"{base}\nCurrent value: {escape_html(current_value)}."
+    return base
+
+
+async def _open_comment_editor(
+    callback: CallbackQuery,
+    state: FSMContext,
+    subscription_id: int,
+    current_value: str,
+    *,
+    edit_existing: bool,
+) -> None:
+    await state.set_state(SubscriptionEditForm.comment)
+    await state.update_data(edit_subscription_id=int(subscription_id))
+    prompt = _comment_prompt_text(current_value)
+    markup = comment_edit_keyboard(subscription_id, bool(current_value))
+    if callback.message:
+        if edit_existing:
+            await callback.message.edit_text(prompt, reply_markup=markup)
+        else:
+            await callback.message.answer(prompt, reply_markup=markup)
+    await callback.answer()
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "comment"))
+async def handle_subscription_comment_callback(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
+    if not subscription:
+        return
+    current_value = (subscription.get("comment") or "").strip()
+    await _open_comment_editor(
+        callback,
+        state,
+        callback_data.subscription_id,
+        current_value,
+        edit_existing=False,
+    )
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "comment_clear"))
+async def handle_subscription_comment_clear(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await db.update_subscription_fields(callback_data.subscription_id, comment="")
+    subscription = await db.get_subscription(callback_data.subscription_id)
+    if not subscription:
+        await callback.answer("Subscription not found.", show_alert=True)
+        return
+    await _open_comment_editor(
+        callback,
+        state,
+        callback_data.subscription_id,
+        "",
+        edit_existing=True,
+    )
+
+
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "reminderloop"))
 async def handle_subscription_reminder_loop_toggle(
     callback: CallbackQuery,
@@ -842,4 +910,22 @@ async def edit_subscription_reminder_offsets(message: Message, state: FSMContext
     await db.update_subscription_fields(sub_id, reminder_offsets=serialize_offsets(offsets))
     await state.clear()
     await message.answer("Reminder schedule updated.", reply_markup=admin_reply_keyboard())
+    await send_subscription_detail(message, db, sub_id)
+
+
+@admin_router.message(SubscriptionEditForm.comment)
+async def edit_subscription_comment(message: Message, state: FSMContext, db: Database) -> None:
+    sub_id = await require_edit_subscription_id(message, state)
+    if sub_id is None:
+        return
+
+    raw = (message.text or "").strip()
+    if raw.lower() in {"clear", "none", "-"}:
+        comment = ""
+    else:
+        comment = raw
+
+    await db.update_subscription_fields(sub_id, comment=comment)
+    await state.clear()
+    await message.answer("Comment updated.", reply_markup=admin_reply_keyboard())
     await send_subscription_detail(message, db, sub_id)

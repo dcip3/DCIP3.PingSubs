@@ -214,6 +214,7 @@ async def _run_reminder_pass(
             continue
         safe_name = escape_html(item.get("name", ""))
         safe_currency = escape_html(item.get("currency", ""))
+        safe_comment = escape_html(item.get("comment", "")).strip()
         try:
             _parse_due_date(item["next_charge_at"])
         except (KeyError, ValueError):
@@ -278,9 +279,7 @@ async def _run_reminder_pass(
                     weight = int(person.get("share_weight") or 1)
                     weight_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
                     share_amount_value = share_amount * weight
-                    share_line = (
-                        f"Your share ({weight_text}): {share_amount_value:.2f} {safe_currency}"
-                    )
+                    amount_line = f"{share_amount_value:.2f} {safe_currency}"
                     converted_value: Optional[float] = None
                     converted_display: Optional[str] = None
                     if share_amount_rub is not None:
@@ -291,11 +290,15 @@ async def _run_reminder_pass(
                             rounding_mode,
                         )
                         converted_value = float(converted)
-                        share_line += f" (≈ {converted_display})"
+                        amount_line += f" (≈ {converted_display})"
+                    share_line = f"Your share ({weight_text}):\n       {amount_line}"
+                    comment_line = f"📝 {safe_comment}\n" if safe_comment else ""
                     message_text = (
                         f"{escape_html(person['full_name'])},\n"
-                        f"🔔 {context_text}\n"
+                        f"🔔 <b>{safe_name}</b>\n"
+                        f"{context_text}\n"
                         f"💳 {share_line}\n"
+                        f"{comment_line}"
                         "Tap “Paid” when the bill is covered."
                     )
                     message_id = await _send_message_with_retry(
@@ -327,14 +330,20 @@ async def _run_reminder_pass(
                             )
 
                 if admin_ids:
+                    admin_comment = f"\nComment: {safe_comment}" if safe_comment else ""
                     admin_note = (
+                        f"🔔 {safe_name}\n"
                         f"{context_text}\n"
                         f"Total: {item['amount']:.2f} {safe_currency} | Users: {len(participants)}"
+                        f"{admin_comment}"
                     )
             elif admin_ids:
+                admin_comment = f"\nComment: {safe_comment}" if safe_comment else ""
                 admin_note = (
+                    f"🔔 {safe_name}\n"
                     f"{context_text}\n"
                     "No users are assigned yet. Add them via 📋 Subscriptions."
+                    f"{admin_comment}"
                 )
 
             if admin_note and admin_ids:
@@ -363,18 +372,12 @@ async def _run_reminder_pass(
 
                 if target_date < cycle_due:
                     days_left = (cycle_due - today).days
-                    context = (
-                        f"'{safe_name}' is due in {days_left} day(s) "
-                        f"({due_display})."
-                    )
+                    context = f"Due in {days_left} day(s) ({due_display})."
                 elif target_date == cycle_due:
-                    context = f"'{safe_name}' is due today ({due_display})."
+                    context = f"Due today ({due_display})."
                 else:
                     days_overdue = (today - cycle_due).days
-                    context = (
-                        f"'{safe_name}' was due {days_overdue} day(s) ago "
-                        f"({due_display})."
-                    )
+                    context = f"Overdue by {days_overdue} day(s) (due {due_display})."
                 await dispatch(context, cycle_due)
 
             if item.get("remind_after_due") and today > cycle_due:
@@ -382,10 +385,7 @@ async def _run_reminder_pass(
                 if register_reminders:
                     if not await db.register_reminder_if_new(item["id"], cycle_due, overdue_offset):
                         continue
-                context = (
-                    f"'{safe_name}' is overdue by {overdue_offset} day(s) "
-                    f"(was due {due_display})."
-                )
+                context = f"Overdue by {overdue_offset} day(s) (due {due_display})."
                 await dispatch(context, cycle_due)
 
     return sent_count
@@ -445,16 +445,17 @@ async def send_test_reminders(
 
     safe_name = escape_html(subscription.get("name", ""))
     safe_currency = escape_html(subscription.get("currency", ""))
+    safe_comment = escape_html(subscription.get("comment", "")).strip()
     today = datetime.now(REMINDER_TIMEZONE).date()
     due_display = format_due_date(due_date.isoformat())
     if due_date > today:
         days_left = (due_date - today).days
-        context_text = f"'{safe_name}' is due in {days_left} day(s) ({due_display})."
+        context_text = f"Due in {days_left} day(s) ({due_display})."
     elif due_date == today:
-        context_text = f"'{safe_name}' is due today ({due_display})."
+        context_text = f"Due today ({due_display})."
     else:
         days_overdue = (today - due_date).days
-        context_text = f"'{safe_name}' was due {days_overdue} day(s) ago ({due_display})."
+        context_text = f"Overdue by {days_overdue} day(s) (due {due_display})."
 
     share_base = calculate_share_base(subscription, participants)
     share_amount = subscription["amount"] / share_base
@@ -469,7 +470,7 @@ async def send_test_reminders(
         weight = int(person.get("share_weight") or 1)
         weight_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
         share_amount_value = share_amount * weight
-        share_line = f"Your share ({weight_text}): {share_amount_value:.2f} {safe_currency}"
+        amount_line = f"{share_amount_value:.2f} {safe_currency}"
         if share_amount_converted is not None:
             converted = share_amount_converted * weight
             converted_display = format_converted_amount(
@@ -477,12 +478,15 @@ async def send_test_reminders(
                 converter.target_currency,
                 rounding_mode,
             )
-            share_line += f" (≈ {converted_display})"
+            amount_line += f" (≈ {converted_display})"
+        share_line = f"Your share ({weight_text}):\n       {amount_line}"
+        comment_line = f"📝 {safe_comment}\n" if safe_comment else ""
         message_text = (
             f"{escape_html(person['full_name'])},\n"
-            "🧪 Test reminder\n"
-            f"🔔 {context_text}\n"
+            f"🧪 <b>{safe_name}</b>\n"
+            f"{context_text}\n"
             f"💳 {share_line}\n"
+            f"{comment_line}"
             "This is a test reminder. Tapping “Paid” will not record anything."
         )
         keyboard = build_test_payment_confirmation_keyboard(subscription_id, due_date)

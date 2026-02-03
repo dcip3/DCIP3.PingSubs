@@ -176,6 +176,10 @@ async def send_public_subscription_detail(
     reminder_time = (subscription.get("reminder_time") or "16:00").strip() or "16:00"
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
+    comment_value = (subscription.get("comment") or "").strip()
+    comment_block = ""
+    if comment_value:
+        comment_block = f"📝 <b>Comment</b>:\n       {escape_html(comment_value)}\n"
 
     if unpaid_overdue:
         overdue_lines = "\n".join(f"       {_format_iso_date(value)}" for value in unpaid_overdue)
@@ -189,6 +193,7 @@ async def send_public_subscription_detail(
         f"       {subscription['amount']:.2f} {escape_html(subscription['currency'])}\n"
         f"       ≈ {per_person:.2f} {escape_html(subscription['currency'])} per share, {share_text}\n"
         f"{overdue_block}"
+        f"{comment_block}"
         "📅 <b>Next charge</b>:\n"
         f"       {next_charge}\n"
         f"       {cadence}\n"
@@ -403,6 +408,10 @@ def _build_subscription_detail_text(
 ) -> str:
     share_base, share_text = _share_details(subscription, participants)
     per_person = subscription["amount"] / share_base
+    comment_value = (subscription.get("comment") or "").strip()
+    comment_block = ""
+    if comment_value:
+        comment_block = f"📝 <b>Comment</b>:\n       {escape_html(comment_value)}\n"
 
     if participants:
         participants_lines = []
@@ -430,6 +439,7 @@ def _build_subscription_detail_text(
         f"💰 <b>Amount</b>:\n"
         f"       {subscription['amount']:.2f} {escape_html(subscription['currency'])}\n"
         f"       ≈ {per_person:.2f} {escape_html(subscription['currency'])} per share, {share_text}\n"
+        f"{comment_block}"
         f"📅 <b>Next charge</b>:\n"
         f"       {_format_iso_date(subscription['next_charge_at'])}\n"
         f"       {cadence}\n"
