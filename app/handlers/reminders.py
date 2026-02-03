@@ -61,10 +61,14 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
                 await db.update_subscription_fields(subscription["id"], next_charge_at=next_due)
     await callback.answer("Payment recorded. Thank you!")
     if callback.message:
-        await callback.message.edit_text(
-            "Payment recorded."
-            f" Payment for {format_due_date(due_value)} confirmed."
-        )
+        button_count = 0
+        if callback.message.reply_markup and callback.message.reply_markup.inline_keyboard:
+            button_count = sum(len(row) for row in callback.message.reply_markup.inline_keyboard)
+        if button_count <= 1:
+            await callback.message.edit_text(
+                "Payment recorded."
+                f" Payment for {format_due_date(due_value)} confirmed."
+            )
 
     notify_paid = await db.get_setting_bool("notify_admin_paid", True)
     notify_closed = await db.get_setting_bool("notify_admin_closed", True)

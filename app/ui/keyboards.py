@@ -482,6 +482,20 @@ def build_payment_confirmation_keyboard(subscription_id: int, due_date: date | s
     return builder.as_markup()
 
 
+def build_batch_payment_confirmation_keyboard(items: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for item in items:
+        due_date = item.get("due_date")
+        due_str = due_date if isinstance(due_date, str) else due_date.isoformat()
+        label = str(item.get("subscription_label") or item.get("subscription_name") or "Subscription")
+        builder.button(
+            text=f"✅ Paid: {label}",
+            callback_data=ReminderAction(subscription_id=int(item["subscription_id"]), due_date=due_str).pack(),
+        )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def build_test_payment_confirmation_keyboard(subscription_id: int, due_date: date | str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     due_str = due_date if isinstance(due_date, str) else due_date.isoformat()

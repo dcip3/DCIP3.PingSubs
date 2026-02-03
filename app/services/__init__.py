@@ -10,7 +10,11 @@ import aiohttp
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
 
-from app.ui.keyboards import build_payment_confirmation_keyboard, build_test_payment_confirmation_keyboard
+from app.ui.keyboards import (
+    build_batch_payment_confirmation_keyboard,
+    build_payment_confirmation_keyboard,
+    build_test_payment_confirmation_keyboard,
+)
 from app.core.reminders import (
     REMINDER_TIMEZONE,
     calculate_next_charge_date,
@@ -152,11 +156,43 @@ def _build_reminder_message(
     footer: str,
     test_prefix: Optional[str] = None,
 ) -> str:
+    blocks: list[list[str]] = [[f"{person_name},"]]
+    blocks += _build_subscription_blocks(
+        index=None,
+        subscription_name=subscription_name,
+        status_text=status_text,
+        due_date_text=due_date_text,
+        share_text=share_text,
+        amount_text=amount_text,
+        converted_text=converted_text,
+        comment=comment,
+        test_prefix=test_prefix,
+    )
+    if footer:
+        blocks.append([footer])
+    return "\n\n".join("\n".join(block) for block in blocks)
+
+
+def _build_subscription_blocks(
+    *,
+    index: Optional[int],
+    subscription_name: str,
+    status_text: str,
+    due_date_text: str,
+    share_text: str,
+    amount_text: str,
+    converted_text: Optional[str],
+    comment: str,
+    test_prefix: Optional[str] = None,
+) -> list[list[str]]:
     prefix = f"{test_prefix} " if test_prefix else ""
+    if index is None:
+        title = f"🔔 {prefix}Subscription Info:"
+    else:
+        title = f"🔔 {prefix}Subscription {index} Info:"
     blocks: list[list[str]] = [
-        [f"{person_name},"],
         [
-            f"🔔 {prefix}Subscription Info:",
+            title,
             f"🏷️ Name: <code>{subscription_name}</code>",
             f"⏳ Status: <code>{status_text}</code>",
             f"📅 Date: <code>{due_date_text}</code>",
@@ -171,6 +207,30 @@ def _build_reminder_message(
         blocks[-1].append(f"≈ <code>{converted_text}</code>")
     if comment:
         blocks.append(["📝 Comment:", f"<code>{comment}</code>"])
+    return blocks
+
+
+def _build_batch_reminder_message(
+    *,
+    person_name: str,
+    items: list[dict[str, object]],
+    total_text: Optional[str],
+    footer: str,
+) -> str:
+    blocks: list[list[str]] = [[f"{person_name},"]]
+    for idx, item in enumerate(items, 1):
+        blocks += _build_subscription_blocks(
+            index=idx,
+            subscription_name=str(item["subscription_name"]),
+            status_text=str(item["status_text"]),
+            due_date_text=str(item["due_date_text"]),
+            share_text=str(item["share_text"]),
+            amount_text=str(item["amount_text"]),
+            converted_text=item.get("converted_text"),
+            comment=str(item.get("comment") or ""),
+        )
+    if total_text:
+        blocks.append(["==============================", "💳 Total:", f"💰 Amount: <code>{total_text}</code>"])
     if footer:
         blocks.append([footer])
     return "\n\n".join("\n".join(block) for block in blocks)
@@ -288,6 +348,7 @@ async def _run_reminder_pass(
     notify_admin_reminders = await db.get_setting_bool("notify_admin_reminders", True)
     admin_ids: set[int] = set(await db.list_admin_ids()) if notify_admin_reminders else set()
     sent_count = 0
+    pending: dict[tuple[int, str], list[dict[str, object]]] = {}
 
     subscriptions = await db.fetch_subscriptions_for_reminders()
     for item in subscriptions:
@@ -304,6 +365,7 @@ async def _run_reminder_pass(
         reminder_time = parse_time_string(item.get("reminder_time"))
         if enforce_time and current_time < reminder_time:
             continue
+        reminder_time_label = reminder_time.strftime("%H:%M")
 
         participants = item.get("participants", [])
         participant_ids = {p["telegram_id"] for p in participants}
@@ -319,7 +381,6 @@ async def _run_reminder_pass(
         }
 
         async def dispatch(context_text: str, due_date_value: date) -> None:
-            nonlocal sent_count
             admin_note: Optional[str] = None
             if participants:
                 target_participants = participants
@@ -354,8 +415,7 @@ async def _run_reminder_pass(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Conversion failed for subscription %s: %s", item["id"], exc)
                     share_amount_rub = None
-
-                keyboard = build_payment_confirmation_keyboard(item["id"], due_date_value)
+                status_text, due_date_text = _format_status_and_date(due_date_value, today)
                 for person in unpaid:
                     weight = int(person.get("share_weight") or 1)
                     share_text, amount_text, share_amount_value, converted_value, converted_display = _build_share_line(
@@ -367,45 +427,29 @@ async def _run_reminder_pass(
                         rounding_mode=rounding_mode,
                         target_currency=converter.target_currency,
                     )
-                    status_text, due_date_text = _format_status_and_date(due_date_value, today)
-                    message_text = _build_reminder_message(
-                        person_name=escape_html(person["full_name"]),
-                        subscription_name=safe_name,
-                        status_text=status_text,
-                        due_date_text=due_date_text,
-                        share_text=share_text,
-                        amount_text=amount_text,
-                        converted_text=converted_display,
-                        comment=safe_comment,
-                        footer="Tap “Paid” when the bill is covered.",
+                    base_amount_value: Optional[float] = converted_value
+                    if base_amount_value is None and safe_currency == converter.target_currency:
+                        base_amount_value = float(share_amount_value)
+                    key = (int(person["telegram_id"]), reminder_time_label)
+                    pending.setdefault(key, []).append(
+                        {
+                            "person_name": escape_html(person["full_name"]),
+                            "subscription_id": int(item["id"]),
+                            "due_date": due_date_value,
+                            "subscription_name": safe_name,
+                            "subscription_label": str(item.get("name", "")),
+                            "status_text": status_text,
+                            "due_date_text": due_date_text,
+                            "share_text": share_text,
+                            "amount_text": amount_text,
+                            "converted_text": converted_display,
+                            "comment": safe_comment,
+                            "share_amount_value": share_amount_value,
+                            "share_currency": str(item["currency"]),
+                            "converted_value": converted_value,
+                            "base_amount_value": base_amount_value,
+                        }
                     )
-                    message_id = await _send_message_with_retry(
-                        bot,
-                        person["telegram_id"],
-                        message_text,
-                        reply_markup=keyboard,
-                        logger=logger,
-                    )
-                    if message_id is not None:
-                        sent_count += 1
-                        await db.record_reminder_message(
-                            subscription_id=int(item["id"]),
-                            due_date=due_date_value,
-                            telegram_id=person["telegram_id"],
-                            message_id=message_id,
-                            share_amount=share_amount_value,
-                            share_currency=str(item["currency"]),
-                            converted_amount=converted_value,
-                            converted_currency=converter.target_currency if converted_display else None,
-                            converted_display=converted_display,
-                        )
-                        if record_manual_suppressions:
-                            await db.register_reminder_suppression(
-                                int(item["id"]),
-                                due_date_value,
-                                person["telegram_id"],
-                                today,
-                            )
 
                 if admin_ids:
                     admin_comment = f"\nComment: {safe_comment}" if safe_comment else ""
@@ -457,6 +501,93 @@ async def _run_reminder_pass(
                         continue
                 context = _format_context_text(cycle_due, today)
                 await dispatch(context, cycle_due)
+
+    for (telegram_id, _reminder_time), items in pending.items():
+        if not items:
+            continue
+        person_name = str(items[0].get("person_name") or "")
+        if len(items) == 1:
+            item = items[0]
+            message_text = _build_reminder_message(
+                person_name=person_name,
+                subscription_name=str(item["subscription_name"]),
+                status_text=str(item["status_text"]),
+                due_date_text=str(item["due_date_text"]),
+                share_text=str(item["share_text"]),
+                amount_text=str(item["amount_text"]),
+                converted_text=item.get("converted_text"),
+                comment=str(item.get("comment") or ""),
+                footer="Tap “Paid” when the bill is covered.",
+            )
+            keyboard = build_payment_confirmation_keyboard(
+                int(item["subscription_id"]),
+                item["due_date"],
+            )
+            message_id = await _send_message_with_retry(
+                bot,
+                telegram_id,
+                message_text,
+                reply_markup=keyboard,
+                logger=logger,
+            )
+            if message_id is not None:
+                sent_count += 1
+                await db.record_reminder_message(
+                    subscription_id=int(item["subscription_id"]),
+                    due_date=item["due_date"],
+                    telegram_id=telegram_id,
+                    message_id=message_id,
+                    share_amount=float(item["share_amount_value"]),
+                    share_currency=str(item["share_currency"]),
+                    converted_amount=item.get("converted_value"),
+                    converted_currency=converter.target_currency if item.get("converted_text") else None,
+                    converted_display=item.get("converted_text"),
+                )
+                if record_manual_suppressions:
+                    await db.register_reminder_suppression(
+                        int(item["subscription_id"]),
+                        item["due_date"],
+                        telegram_id,
+                        today,
+                    )
+            continue
+
+        total_value = 0.0
+        total_ready = True
+        for item in items:
+            base_value = item.get("base_amount_value")
+            if base_value is None:
+                total_ready = False
+                break
+            total_value += float(base_value)
+        total_text = None
+        if total_ready:
+            total_text = format_converted_amount(total_value, converter.target_currency, rounding_mode)
+
+        message_text = _build_batch_reminder_message(
+            person_name=person_name,
+            items=items,
+            total_text=total_text,
+            footer="Tap “Paid” when the bill is covered.",
+        )
+        keyboard = build_batch_payment_confirmation_keyboard(items)
+        message_id = await _send_message_with_retry(
+            bot,
+            telegram_id,
+            message_text,
+            reply_markup=keyboard,
+            logger=logger,
+        )
+        if message_id is not None:
+            sent_count += 1
+            if record_manual_suppressions:
+                for item in items:
+                    await db.register_reminder_suppression(
+                        int(item["subscription_id"]),
+                        item["due_date"],
+                        telegram_id,
+                        today,
+                    )
 
     return sent_count
 
