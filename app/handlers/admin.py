@@ -23,14 +23,17 @@ from app.ui.helpers import (
     send_public_subscription_payment_report,
     send_public_user_payment_report,
     send_member_list,
+    send_settings_tests_menu,
     send_subscription_list,
+    send_test_subscription_list,
+    send_test_reminder_targets,
     send_user_subscription_list,
 )
-from app.ui.states import FriendForm, PublicReminderForm, SettingsForm, SubscriptionAction
+from app.ui.states import FriendForm, PublicReminderForm, SettingsForm, SubscriptionAction, TestSendAction
 from app.core.constants import DEFAULT_CURRENCIES
 from app.core.config import Settings
 from app.storage.db import Database
-from app.services import CurrencyConverter
+from app.services import CurrencyConverter, send_test_reminders
 
 from . import admin_router, public_router
 
@@ -414,6 +417,47 @@ async def handle_settings_notifications(callback: CallbackQuery, db: Database) -
             ),
         )
     await callback.answer()
+
+
+@admin_router.callback_query(F.data == "settings:tests")
+async def handle_settings_tests(callback: CallbackQuery, db: Database) -> None:
+    await send_settings_tests_menu(callback, db)
+
+
+@admin_router.callback_query(F.data == "tests:send")
+async def handle_test_send_menu(callback: CallbackQuery, db: Database) -> None:
+    await send_test_subscription_list(callback, db)
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "test_select"))
+async def handle_test_subscription_select(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+) -> None:
+    await send_test_reminder_targets(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(TestSendAction.filter())
+async def handle_test_reminder_send(
+    callback: CallbackQuery,
+    callback_data: TestSendAction,
+    bot: Bot,
+    settings: Settings,
+    db: Database,
+    converter: CurrencyConverter,
+) -> None:
+    target_id = callback_data.telegram_id or None
+    sent_count = await send_test_reminders(
+        bot,
+        db,
+        converter,
+        subscription_id=callback_data.subscription_id,
+        rounding_mode=settings.currency_rounding,
+        target_telegram_id=target_id,
+    )
+    await callback.answer(f"Sent {sent_count} test notification(s).")
+    await send_test_reminder_targets(callback, db, callback_data.subscription_id)
 
 
 @admin_router.callback_query(F.data.startswith("settings_notify:"))

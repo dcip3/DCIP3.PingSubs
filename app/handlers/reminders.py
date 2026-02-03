@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery
 
 from app.core.reminders import format_due_date
 from app.services import calculate_share_base
-from app.ui.states import ReminderAction
+from app.ui.states import ReminderAction, TestPaidAction
 from app.storage.db import Database
 from app.ui.text import escape_html
 from app.core.reminders import calculate_next_charge_date
@@ -109,3 +109,8 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         for admin_id in admin_ids:
             with contextlib.suppress(Exception):
                     await callback.bot.send_message(admin_id, close_note)
+
+
+@public_router.callback_query(TestPaidAction.filter())
+async def handle_test_reminder_paid(callback: CallbackQuery, callback_data: TestPaidAction) -> None:
+    await callback.answer("Test only: no payment recorded.", show_alert=True)

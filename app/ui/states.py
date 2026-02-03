@@ -65,6 +65,16 @@ class ReminderSendAction(CallbackData, prefix="remsend"):
     telegram_id: int
 
 
+class TestSendAction(CallbackData, prefix="testsend"):
+    subscription_id: int
+    telegram_id: int
+
+
+class TestPaidAction(CallbackData, prefix="testpaid"):
+    subscription_id: int
+    due_date: str
+
+
 class MemberAction(CallbackData, prefix="member"):
     action: str
     friend_id: int

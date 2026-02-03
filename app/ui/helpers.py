@@ -28,8 +28,11 @@ from app.ui.keyboards import (
     public_subscription_report_keyboard,
     reminder_settings_keyboard,
     reminder_send_targets_keyboard,
+    settings_tests_keyboard,
     subscription_report_keyboard,
     subscription_detail_keyboard,
+    tests_menu_keyboard,
+    test_reminder_targets_keyboard,
 )
 from app.ui.states import Responder, SubscriptionAction
 from app.core.reminders import calculate_next_charge_date, format_offsets_for_display, parse_offsets
@@ -564,6 +567,65 @@ async def send_reminder_send_menu(target: Responder, db: Database, subscription_
         target,
         text,
         reply_markup=reminder_send_targets_keyboard(subscription_id, participants),
+    )
+
+
+async def send_settings_tests_menu(target: Responder, db: Database) -> None:
+    text = "Tests:"
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=tests_menu_keyboard(),
+    )
+
+
+async def send_test_subscription_list(target: Responder, db: Database) -> None:
+    subs = await db.list_subscriptions()
+    if not subs:
+        await respond_with_markup(
+            target,
+            "No subscriptions yet. Create one first.",
+            reply_markup=settings_tests_keyboard([]),
+        )
+        return
+
+    text = "Choose a subscription to send test reminders:"
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=settings_tests_keyboard(subs),
+    )
+
+
+async def send_test_reminder_targets(target: Responder, db: Database, subscription_id: int) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        subs = await db.list_subscriptions()
+        await respond_with_markup(
+            target,
+            "This subscription no longer exists.",
+            reply_markup=settings_tests_keyboard(subs),
+        )
+        return
+
+    participants = await db.list_subscription_participants(subscription_id)
+    if not participants:
+        subs = await db.list_subscriptions()
+        await respond_with_markup(
+            target,
+            "No users are assigned yet. Add them via 📋 Subscriptions.",
+            reply_markup=settings_tests_keyboard(subs),
+        )
+        return
+
+    text = (
+        f"<b>{escape_html(subscription['name'])}</b>\n"
+        "Choose who should receive the test reminder."
+    )
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=test_reminder_targets_keyboard(subscription_id, participants),
     )
 
 

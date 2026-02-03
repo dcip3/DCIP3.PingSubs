@@ -10,7 +10,7 @@ import aiohttp
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
 
-from app.ui.keyboards import build_payment_confirmation_keyboard
+from app.ui.keyboards import build_payment_confirmation_keyboard, build_test_payment_confirmation_keyboard
 from app.core.reminders import (
     REMINDER_TIMEZONE,
     calculate_next_charge_date,
@@ -413,6 +413,90 @@ async def send_reminders_now(
         target_telegram_id=target_telegram_id,
         record_manual_suppressions=suppress_auto_today,
     )
+
+
+async def send_test_reminders(
+    bot: Bot,
+    db: Database,
+    converter: CurrencyConverter,
+    subscription_id: int,
+    rounding_mode: str = "precise",
+    target_telegram_id: Optional[int] = None,
+) -> int:
+    logger = logging.getLogger("test_reminder_sender")
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        return 0
+
+    participants = await db.list_subscription_participants(subscription_id)
+    target_participants = participants
+    if target_telegram_id is not None:
+        target_participants = [
+            person for person in participants
+            if person.get("telegram_id") == target_telegram_id
+        ]
+    if not target_participants:
+        return 0
+
+    try:
+        due_date = _parse_due_date(str(subscription["next_charge_at"]))
+    except (KeyError, ValueError):
+        return 0
+
+    safe_name = escape_html(subscription.get("name", ""))
+    safe_currency = escape_html(subscription.get("currency", ""))
+    today = datetime.now(REMINDER_TIMEZONE).date()
+    due_display = format_due_date(due_date.isoformat())
+    if due_date > today:
+        days_left = (due_date - today).days
+        context_text = f"'{safe_name}' is due in {days_left} day(s) ({due_display})."
+    elif due_date == today:
+        context_text = f"'{safe_name}' is due today ({due_display})."
+    else:
+        days_overdue = (today - due_date).days
+        context_text = f"'{safe_name}' was due {days_overdue} day(s) ago ({due_display})."
+
+    share_base = calculate_share_base(subscription, participants)
+    share_amount = subscription["amount"] / share_base
+    try:
+        share_amount_converted = await converter.convert(share_amount, subscription["currency"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Conversion failed for subscription %s: %s", subscription_id, exc)
+        share_amount_converted = None
+
+    sent_count = 0
+    for person in target_participants:
+        weight = int(person.get("share_weight") or 1)
+        weight_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
+        share_amount_value = share_amount * weight
+        share_line = f"Your share ({weight_text}): {share_amount_value:.2f} {safe_currency}"
+        if share_amount_converted is not None:
+            converted = share_amount_converted * weight
+            converted_display = format_converted_amount(
+                converted,
+                converter.target_currency,
+                rounding_mode,
+            )
+            share_line += f" (≈ {converted_display})"
+        message_text = (
+            f"{escape_html(person['full_name'])},\n"
+            "🧪 Test reminder\n"
+            f"🔔 {context_text}\n"
+            f"💳 {share_line}\n"
+            "This is a test reminder. Tapping “Paid” will not record anything."
+        )
+        keyboard = build_test_payment_confirmation_keyboard(subscription_id, due_date)
+        message_id = await _send_message_with_retry(
+            bot,
+            int(person["telegram_id"]),
+            message_text,
+            reply_markup=keyboard,
+            logger=logger,
+        )
+        if message_id is not None:
+            sent_count += 1
+
+    return sent_count
 
 
 async def reminder_worker(

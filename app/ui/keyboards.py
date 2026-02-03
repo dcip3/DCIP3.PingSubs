@@ -6,7 +6,15 @@ from typing import Dict, Iterable, Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.ui.states import MemberAction, ParticipantAction, ReminderAction, ReminderSendAction, SubscriptionAction
+from app.ui.states import (
+    MemberAction,
+    ParticipantAction,
+    ReminderAction,
+    ReminderSendAction,
+    SubscriptionAction,
+    TestPaidAction,
+    TestSendAction,
+)
 
 
 def admin_reply_keyboard() -> ReplyKeyboardMarkup:
@@ -256,6 +264,58 @@ def reminder_send_targets_keyboard(
     return builder.as_markup()
 
 
+def settings_tests_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for sub in subs:
+        label = f"{sub['name']} ({sub['amount']:.2f} {sub['currency']})"
+        builder.button(
+            text=label,
+            callback_data=SubscriptionAction(action="test_select", subscription_id=sub["id"]).pack(),
+        )
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:tests"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    return builder.as_markup()
+
+
+def tests_menu_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📬 Send test reminders", callback_data="tests:send")
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    return builder.as_markup()
+
+
+def test_reminder_targets_keyboard(
+    subscription_id: int,
+    participants: Sequence[Dict[str, object]],
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="📬 All",
+        callback_data=TestSendAction(subscription_id=subscription_id, telegram_id=0).pack(),
+    )
+    for person in participants:
+        builder.button(
+            text=str(person.get("full_name") or "Unknown"),
+            callback_data=TestSendAction(
+                subscription_id=subscription_id,
+                telegram_id=int(person["telegram_id"]),
+            ).pack(),
+        )
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="tests:send"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    return builder.as_markup()
+
+
 def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
@@ -327,6 +387,7 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="💱 Base currency", callback_data="settings:currency")
     builder.button(text="🔢 Rounding", callback_data="settings:rounding")
     builder.button(text="🔔 Notifications", callback_data="settings:notifications")
+    builder.button(text="🧪 Tests", callback_data="settings:tests")
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
@@ -415,6 +476,17 @@ def build_payment_confirmation_keyboard(subscription_id: int, due_date: date | s
     builder.button(
         text="✅ Paid",
         callback_data=ReminderAction(subscription_id=subscription_id, due_date=due_str).pack(),
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_test_payment_confirmation_keyboard(subscription_id: int, due_date: date | str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    due_str = due_date if isinstance(due_date, str) else due_date.isoformat()
+    builder.button(
+        text="✅ Paid",
+        callback_data=TestPaidAction(subscription_id=subscription_id, due_date=due_str).pack(),
     )
     builder.adjust(1)
     return builder.as_markup()
