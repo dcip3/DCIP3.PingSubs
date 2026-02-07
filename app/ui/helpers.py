@@ -887,17 +887,11 @@ async def send_pricing_settings(target: Responder, db: Database, subscription_id
         await respond_with_markup(target, "This subscription no longer exists.")
         return
 
-    participants = await db.list_subscription_participants(subscription_id)
-    share_base, share_text = _share_details(subscription, participants)
-    per_person = subscription["amount"] / share_base
-
     text = (
         "💰 Pricing:\n"
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
         "\n"
-        f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"➗ Split limit: <code>{escape_html(share_text)}</code>"
+        f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>"
     )
 
     await respond_with_markup(
@@ -985,20 +979,20 @@ async def require_edit_subscription_id(message: Message, state: FSMContext) -> O
 
 def currency_prompt() -> Tuple[str, InlineKeyboardMarkup]:
     return (
-        "💱 Currency:\n💱 Choose a currency or type your own (3 letters).",
+        "💱 Currency:\nChoose a currency or type your own (3 letters).",
         build_currency_keyboard(DEFAULT_CURRENCIES),
     )
 
 
 def period_prompt() -> Tuple[str, InlineKeyboardMarkup]:
     return (
-        "🔁 Period:\n🔁 Repeat period in days (default 30). Choose a preset or send your own number.",
+        "🔁 Period:\nRepeat period in days (default 30). Choose a preset or send your own number.",
         build_period_keyboard(),
     )
 
 
 def share_limit_prompt() -> Tuple[str, InlineKeyboardMarkup]:
     return (
-        "➗ Split limit:\n➗ Send the number of users who split this subscription or tap “Split across all”.",
+        "➗ Split limit:\nSend the number of users who split this subscription or tap “Split across all”.",
         build_share_limit_keyboard(),
     )

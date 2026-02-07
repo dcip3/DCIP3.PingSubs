@@ -594,7 +594,7 @@ async def handle_public_subscription_reminder_time(
         await callback.message.answer(
             "⏰ Reminder time:\n"
             f"🌍 Timezone: <code>{user_timezone}</code>\n"
-            "⏰ Send time in <code>HH:MM</code>.\n"
+            "Send time in <code>HH:MM</code>.\n"
             "\n"
             f"🏷️ Current: <code>{effective_time}</code>.",
             reply_markup=public_subscription_reminder_time_keyboard(
