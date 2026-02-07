@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 
 import aiosqlite
 
+from app.core.constants import MONTHLY_PERIOD_SENTINEL
+
 
 class Database:
     def __init__(self, path: Path) -> None:
@@ -131,7 +133,17 @@ class Database:
                 subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
                 due_date TEXT NOT NULL,
                 closed_at TEXT,
+                participants_snapshot_ready INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (subscription_id, due_date)
+            );
+
+            CREATE TABLE IF NOT EXISTS subscription_cycle_participants (
+                subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                due_date TEXT NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                full_name TEXT NOT NULL,
+                share_weight INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (subscription_id, due_date, telegram_id)
             );
             """
         )
@@ -142,7 +154,9 @@ class Database:
             """
         )
         await self._ensure_subscription_columns()
+        await self._ensure_cycle_columns()
         await self._ensure_participant_columns()
+        await self._backfill_monthly_anchor_days()
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -170,12 +184,43 @@ class Database:
             "comment",
             "TEXT NOT NULL DEFAULT ''",
         )
+        await self._ensure_column(
+            "subscriptions",
+            "monthly_anchor_day",
+            "INTEGER",
+        )
 
     async def _ensure_participant_columns(self) -> None:
         await self._ensure_column(
             "subscription_participants",
             "share_weight",
             "INTEGER NOT NULL DEFAULT 1",
+        )
+
+    async def _ensure_cycle_columns(self) -> None:
+        await self._ensure_column(
+            "subscription_cycles",
+            "participants_snapshot_ready",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+
+    async def _backfill_monthly_anchor_days(self) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            UPDATE subscriptions
+            SET monthly_anchor_day = COALESCE(
+                (
+                    SELECT MAX(CAST(strftime('%d', due_date) AS INTEGER))
+                    FROM subscription_cycles
+                    WHERE subscription_id = subscriptions.id
+                ),
+                CAST(strftime('%d', next_charge_at) AS INTEGER)
+            )
+            WHERE period_days = ?
+              AND (monthly_anchor_day IS NULL OR monthly_anchor_day < 1 OR monthly_anchor_day > 31)
+            """,
+            (MONTHLY_PERIOD_SENTINEL,),
         )
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
@@ -264,9 +309,10 @@ class Database:
                 next_charge_at,
                 period_days,
                 share_limit,
-                reminder_time
+                reminder_time,
+                monthly_anchor_day
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -276,6 +322,7 @@ class Database:
                 period_days,
                 share_limit,
                 "",
+                due_date.day if period_days == MONTHLY_PERIOD_SENTINEL else None,
             ),
         )
         await self._conn.commit()
@@ -417,7 +464,7 @@ class Database:
         cursor = await self._conn.execute(
             """
             SELECT id, name, amount, currency, next_charge_at, period_days, share_limit,
-                   reminder_time, reminder_offsets, remind_after_due, comment
+                   reminder_time, reminder_offsets, remind_after_due, comment, monthly_anchor_day
             FROM subscriptions
             """,
         )
@@ -848,6 +895,7 @@ class Database:
             """,
             (subscription_id, due_value),
         )
+        await self._ensure_cycle_participant_snapshot_exists(subscription_id, due_value)
         await self._conn.commit()
 
     async def close_cycle(self, subscription_id: int, due_date: date | str) -> None:
@@ -896,3 +944,147 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def _snapshot_cycle_participants(self, subscription_id: int, due_value: str) -> None:
+        assert self._conn is not None, "Database is not connected"
+        participants_cursor = await self._conn.execute(
+            """
+            SELECT f.telegram_id, f.full_name, sp.share_weight
+            FROM subscription_participants sp
+            JOIN friends f ON f.id = sp.friend_id
+            WHERE sp.subscription_id = ?
+            """,
+            (subscription_id,),
+        )
+        participants = await participants_cursor.fetchall()
+        if not participants:
+            return
+        await self._conn.executemany(
+            """
+            INSERT OR IGNORE INTO subscription_cycle_participants (
+                subscription_id,
+                due_date,
+                telegram_id,
+                full_name,
+                share_weight
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    subscription_id,
+                    due_value,
+                    int(row["telegram_id"]),
+                    str(row["full_name"]),
+                    int(row["share_weight"] or 1),
+                )
+                for row in participants
+            ],
+        )
+
+    async def _ensure_cycle_participant_snapshot_exists(self, subscription_id: int, due_value: str) -> None:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT participants_snapshot_ready
+            FROM subscription_cycles
+            WHERE subscription_id = ? AND due_date = ?
+            """,
+            (subscription_id, due_value),
+        )
+        cycle_row = await cursor.fetchone()
+        if not cycle_row:
+            return
+        if int(cycle_row["participants_snapshot_ready"] or 0) == 1:
+            return
+        await self._snapshot_cycle_participants(subscription_id, due_value)
+        await self._conn.execute(
+            """
+            UPDATE subscription_cycles
+            SET participants_snapshot_ready = 1
+            WHERE subscription_id = ? AND due_date = ?
+            """,
+            (subscription_id, due_value),
+        )
+
+    async def is_cycle_participant_snapshot_ready(self, subscription_id: int, due_date: date | str) -> bool:
+        assert self._conn is not None, "Database is not connected"
+        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
+        cursor = await self._conn.execute(
+            """
+            SELECT participants_snapshot_ready
+            FROM subscription_cycles
+            WHERE subscription_id = ? AND due_date = ?
+            LIMIT 1
+            """,
+            (subscription_id, due_value),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return False
+        return int(row["participants_snapshot_ready"] or 0) == 1
+
+    async def list_cycle_participants(self, subscription_id: int, due_date: date | str) -> List[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
+        cursor = await self._conn.execute(
+            """
+            SELECT telegram_id, full_name, share_weight
+            FROM subscription_cycle_participants
+            WHERE subscription_id = ? AND due_date = ?
+            ORDER BY full_name
+            """,
+            (subscription_id, due_value),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def list_cycle_participants_for_due_dates(
+        self,
+        subscription_id: int,
+        due_dates: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        if not due_dates:
+            return {}
+        placeholders = ",".join(["?"] * len(due_dates))
+        cursor = await self._conn.execute(
+            f"""
+            SELECT c.due_date,
+                   c.participants_snapshot_ready,
+                   cp.telegram_id,
+                   cp.full_name,
+                   cp.share_weight
+            FROM subscription_cycles c
+            LEFT JOIN subscription_cycle_participants cp
+              ON cp.subscription_id = c.subscription_id
+             AND cp.due_date = c.due_date
+            WHERE c.subscription_id = ? AND c.due_date IN ({placeholders})
+            ORDER BY c.due_date, cp.full_name
+            """,
+            [subscription_id, *due_dates],
+        )
+        rows = await cursor.fetchall()
+        result: Dict[str, Dict[str, Any]] = {
+            value: {
+                "participants": [],
+                "snapshot_ready": False,
+            }
+            for value in due_dates
+        }
+        for row in rows:
+            due_value = str(row["due_date"])
+            state = result.get(due_value)
+            if state is None:
+                continue
+            if int(row["participants_snapshot_ready"] or 0) == 1:
+                state["snapshot_ready"] = True
+            if row["telegram_id"] is not None:
+                state["participants"].append(
+                    {
+                        "telegram_id": int(row["telegram_id"]),
+                        "full_name": str(row["full_name"]),
+                        "share_weight": int(row["share_weight"] or 1),
+                    }
+                )
+        return result

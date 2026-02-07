@@ -5,7 +5,7 @@ from datetime import datetime
 
 from aiogram.types import CallbackQuery
 
-from app.core.reminders import format_due_date
+from app.core.reminders import format_due_date, normalize_monthly_anchor_day
 from app.services import calculate_share_base
 from app.ui.states import ReminderAction, TestPaidAction
 from app.storage.db import Database
@@ -29,11 +29,15 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         await callback.answer("This payment cycle is already closed.", show_alert=True)
         return
 
+    cycle_participants = await db.list_cycle_participants(subscription["id"], due_value)
+    snapshot_ready = await db.is_cycle_participant_snapshot_ready(subscription["id"], due_value)
+    if not cycle_participants and not snapshot_ready:
+        cycle_participants = await db.list_subscription_participants(subscription["id"])
+
     user_id = callback.from_user.id if callback.from_user else None
     is_authorized = False
     if user_id is not None:
-        participants = await db.list_subscription_participants(subscription["id"])
-        participant_ids = {person["telegram_id"] for person in participants}
+        participant_ids = {int(person["telegram_id"]) for person in cycle_participants}
         if user_id in participant_ids or await db.is_admin(user_id):
             is_authorized = True
     if not is_authorized:
@@ -46,8 +50,7 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         due_date = datetime.today().date()
 
     await db.log_payment(subscription["id"], due_date, user_id)
-    participants = await db.list_subscription_participants(subscription["id"])
-    participant_ids = {p["telegram_id"] for p in participants}
+    participant_ids = {int(p["telegram_id"]) for p in cycle_participants}
     cycle_closed = False
     if participant_ids:
         payments = await db.list_payments_for_cycles(subscription["id"], [due_value])
@@ -57,7 +60,8 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
             cycle_closed = True
             if str(subscription.get("next_charge_at")) == str(due_value):
                 period_days = int(subscription.get("period_days") or 30)
-                next_due = calculate_next_charge_date(due_date, period_days)
+                monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
+                next_due = calculate_next_charge_date(due_date, period_days, monthly_anchor_day)
                 await db.update_subscription_fields(subscription["id"], next_charge_at=next_due)
     await callback.answer("Payment recorded. Thank you!")
     if callback.message:
@@ -87,9 +91,13 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
             if converted_display:
                 amount_line += f" (≈ {escape_html(converted_display)})"
         else:
-            share_base = calculate_share_base(subscription, participants)
+            share_base = calculate_share_base(subscription, cycle_participants)
             weight = next(
-                (int(p.get("share_weight") or 1) for p in participants if p["telegram_id"] == user_id),
+                (
+                    int(p.get("share_weight") or 1)
+                    for p in cycle_participants
+                    if int(p["telegram_id"]) == user_id
+                ),
                 share_base,
             )
             paid_amount = float(subscription["amount"]) * weight / share_base

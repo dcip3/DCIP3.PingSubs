@@ -45,6 +45,7 @@ from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
     format_offsets_for_display,
+    normalize_monthly_anchor_day,
     normalize_time_string,
     normalize_timezone_name,
     parse_offsets,
@@ -277,9 +278,14 @@ async def send_public_subscription_detail(
     next_charge_value = str(subscription["next_charge_at"])
     if user_id is not None and (next_charge_value, user_id) in paid_due_map:
         period_days = int(subscription.get("period_days") or 30)
+        monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
         try:
             current_due = datetime.strptime(next_charge_value, "%Y-%m-%d").date()
-            next_charge_value = calculate_next_charge_date(current_due, period_days).isoformat()
+            next_charge_value = calculate_next_charge_date(
+                current_due,
+                period_days,
+                monthly_anchor_day,
+            ).isoformat()
         except ValueError:
             pass
     next_charge = _format_iso_date(next_charge_value)
@@ -481,8 +487,9 @@ async def _build_subscription_payment_report_text(
     due_date = datetime.strptime(subscription["next_charge_at"], "%Y-%m-%d").date()
     await db.ensure_cycle(subscription_id, due_date)
     period_days = int(subscription.get("period_days") or 30)
+    monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
     while due_date < today:
-        due_date = calculate_next_charge_date(due_date, period_days)
+        due_date = calculate_next_charge_date(due_date, period_days, monthly_anchor_day)
         await db.ensure_cycle(subscription_id, due_date)
 
     open_cycles = await db.list_open_cycles(subscription_id)

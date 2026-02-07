@@ -30,6 +30,7 @@ from app.ui.states import ReminderSendAction, Responder, SubscriptionAction, Sub
 from app.core.reminders import (
     DEFAULT_REMINDER_OFFSETS,
     format_offsets_for_display,
+    normalize_monthly_anchor_day,
     normalize_time_string,
     parse_offsets,
     parse_time_string,
@@ -296,7 +297,25 @@ async def handle_period_quick_select(
         if sub_id is None:
             await callback.answer("Session expired. Reopen the subscription.", show_alert=True)
             return
-        await db.update_subscription_fields(sub_id, period_days=days)
+        subscription = await db.get_subscription(sub_id)
+        monthly_anchor_day: Optional[int] = None
+        if days == MONTHLY_PERIOD_SENTINEL:
+            monthly_anchor_day = normalize_monthly_anchor_day(
+                subscription.get("monthly_anchor_day") if subscription else None
+            )
+            if monthly_anchor_day is None and subscription:
+                try:
+                    monthly_anchor_day = datetime.strptime(
+                        str(subscription["next_charge_at"]),
+                        "%Y-%m-%d",
+                    ).date().day
+                except (KeyError, TypeError, ValueError):
+                    monthly_anchor_day = None
+        await db.update_subscription_fields(
+            sub_id,
+            period_days=days,
+            monthly_anchor_day=monthly_anchor_day,
+        )
         await state.clear()
         label = "monthly" if days == MONTHLY_PERIOD_SENTINEL else f"{days} day(s)"
         await callback.answer(f"Period set to {label}")
@@ -827,7 +846,11 @@ async def edit_subscription_due_date(message: Message, state: FSMContext, db: Da
         await message.answer("Date must be in DD.MM.YYYY format. Try again.")
         return
 
-    await db.update_subscription_fields(sub_id, next_charge_at=due_date)
+    subscription = await db.get_subscription(sub_id)
+    update_fields: Dict[str, object] = {"next_charge_at": due_date}
+    if subscription and int(subscription.get("period_days") or 30) == MONTHLY_PERIOD_SENTINEL:
+        update_fields["monthly_anchor_day"] = due_date.day
+    await db.update_subscription_fields(sub_id, **update_fields)
     await state.clear()
     await message.answer("Next charge date updated.", reply_markup=admin_reply_keyboard())
     await send_subscription_detail(message, db, sub_id)
@@ -852,7 +875,25 @@ async def edit_subscription_period(message: Message, state: FSMContext, db: Data
         await message.answer("Period must be a positive integer or 'monthly'.")
         return
 
-    await db.update_subscription_fields(sub_id, period_days=period)
+    subscription = await db.get_subscription(sub_id)
+    monthly_anchor_day: Optional[int] = None
+    if period == MONTHLY_PERIOD_SENTINEL:
+        monthly_anchor_day = normalize_monthly_anchor_day(
+            subscription.get("monthly_anchor_day") if subscription else None
+        )
+        if monthly_anchor_day is None and subscription:
+            try:
+                monthly_anchor_day = datetime.strptime(
+                    str(subscription["next_charge_at"]),
+                    "%Y-%m-%d",
+                ).date().day
+            except (KeyError, TypeError, ValueError):
+                monthly_anchor_day = None
+    await db.update_subscription_fields(
+        sub_id,
+        period_days=period,
+        monthly_anchor_day=monthly_anchor_day,
+    )
     await state.clear()
     await message.answer("Period updated.", reply_markup=admin_reply_keyboard())
     await send_subscription_detail(message, db, sub_id)

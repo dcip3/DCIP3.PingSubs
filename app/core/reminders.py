@@ -13,10 +13,22 @@ DEFAULT_REMINDER_OFFSETS = [-1, 0]
 REMINDER_TIMEZONE = ZoneInfo(DEFAULT_REMINDER_TIMEZONE)
 
 
-def _add_month_same_day(current: date) -> date:
+def normalize_monthly_anchor_day(value: object | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        day = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= day <= 31:
+        return day
+    return None
+
+
+def _add_month_same_day(current: date, anchor_day: int | None = None) -> date:
     year = current.year + (1 if current.month == 12 else 0)
     month = 1 if current.month == 12 else current.month + 1
-    day = current.day
+    day = normalize_monthly_anchor_day(anchor_day) or current.day
     while True:
         try:
             return date(year, month, day)
@@ -26,9 +38,13 @@ def _add_month_same_day(current: date) -> date:
                 return date(year, month, 1)
 
 
-def calculate_next_charge_date(current: date, period_days: int) -> date:
+def calculate_next_charge_date(
+    current: date,
+    period_days: int,
+    monthly_anchor_day: int | None = None,
+) -> date:
     if period_days == MONTHLY_PERIOD_SENTINEL:
-        return _add_month_same_day(current)
+        return _add_month_same_day(current, monthly_anchor_day)
     period = period_days or 30
     return current + timedelta(days=period)
 

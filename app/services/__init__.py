@@ -15,10 +15,12 @@ from app.ui.keyboards import (
     build_payment_confirmation_keyboard,
     build_test_payment_confirmation_keyboard,
 )
+from app.core.constants import MONTHLY_PERIOD_SENTINEL
 from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
     format_due_date,
+    normalize_monthly_anchor_day,
     normalize_time_string,
     normalize_timezone_name,
     parse_offsets,
@@ -315,10 +317,14 @@ async def _ensure_open_cycles(
     await db.ensure_cycle(subscription_id, due_date)
 
     period_days = int(subscription.get("period_days") or 30)
+    monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
+    if period_days == MONTHLY_PERIOD_SENTINEL and monthly_anchor_day is None:
+        monthly_anchor_day = due_date.day
+        await db.update_subscription_fields(subscription_id, monthly_anchor_day=monthly_anchor_day)
     updated = False
     if today > due_date:
         while due_date < today:
-            due_date = calculate_next_charge_date(due_date, period_days)
+            due_date = calculate_next_charge_date(due_date, period_days, monthly_anchor_day)
             await db.ensure_cycle(subscription_id, due_date)
             updated = True
     if updated:
@@ -331,17 +337,18 @@ async def _ensure_open_cycles(
 async def _auto_mark_admin_payments(
     db: Database,
     subscription_id: int,
-    open_cycles: list[date],
-    participant_ids: set[int],
+    participant_ids_by_cycle: dict[date, set[int]],
     notify_admin_reminders: bool,
 ) -> None:
     if notify_admin_reminders:
         return
     admin_ids = set(await db.list_admin_ids())
-    target_ids = admin_ids.intersection(participant_ids)
-    if not target_ids:
+    if not admin_ids:
         return
-    for cycle_due in open_cycles:
+    for cycle_due, participant_ids in participant_ids_by_cycle.items():
+        target_ids = admin_ids.intersection(participant_ids)
+        if not target_ids:
+            continue
         for admin_id in target_ids:
             await db.log_payment(subscription_id, cycle_due, admin_id)
 
@@ -394,131 +401,125 @@ async def _run_reminder_pass(
             continue
 
         participants = item.get("participants", [])
-        participant_ids = {p["telegram_id"] for p in participants}
         offsets = parse_offsets(item.get("reminder_offsets"))
         open_cycles = await _ensure_open_cycles(db, item, today)
-        await _auto_mark_admin_payments(db, int(item["id"]), open_cycles, participant_ids, notify_admin_reminders)
-        due_dates = [cycle.isoformat() for cycle in open_cycles]
-        payment_rows = await db.list_payments_for_cycles(item["id"], due_dates)
+        cycle_due_values = [cycle.isoformat() for cycle in open_cycles]
+        cycle_participants_state = await db.list_cycle_participants_for_due_dates(
+            int(item["id"]),
+            cycle_due_values,
+        )
+        participants_by_cycle: dict[date, list[dict[str, object]]] = {}
+        participant_ids_by_cycle: dict[date, set[int]] = {}
+        for cycle_due in open_cycles:
+            due_key = cycle_due.isoformat()
+            cycle_state = cycle_participants_state.get(due_key) or {}
+            cycle_participants = list(cycle_state.get("participants") or [])
+            snapshot_ready = bool(cycle_state.get("snapshot_ready"))
+            if not cycle_participants and not snapshot_ready:
+                cycle_participants = participants
+            if target_telegram_id is not None:
+                cycle_participants = [
+                    person
+                    for person in cycle_participants
+                    if int(person.get("telegram_id") or 0) == target_telegram_id
+                ]
+            participants_by_cycle[cycle_due] = cycle_participants
+            participant_ids_by_cycle[cycle_due] = {
+                int(person.get("telegram_id") or 0)
+                for person in cycle_participants
+                if int(person.get("telegram_id") or 0) > 0
+            }
+        await _auto_mark_admin_payments(
+            db,
+            int(item["id"]),
+            participant_ids_by_cycle,
+            notify_admin_reminders,
+        )
+        payment_rows = await db.list_payments_for_cycles(item["id"], cycle_due_values)
         paid_map = {
             (row["due_date"], row["paid_by_telegram_id"])
             for row in payment_rows
             if row.get("paid_by_telegram_id") is not None
         }
-        if participants:
-            target_participants = participants
-            if target_telegram_id is not None:
-                target_participants = [
-                    person for person in participants
-                    if person.get("telegram_id") == target_telegram_id
-                ]
-            if not target_participants:
-                continue
-
-            queued_events_for_admin: set[tuple[date, int]] = set()
+        has_cycle_participants = any(participants_by_cycle.values())
+        if target_telegram_id is not None and not has_cycle_participants:
+            continue
+        if has_cycle_participants:
+            queued_events_for_admin: dict[tuple[date, int], int] = {}
             user_base_time_cache: dict[int, str] = {}
             user_subscription_time_cache: dict[int, Optional[str]] = {}
             user_timezone_cache: dict[int, str] = {}
             user_time_now_cache: dict[int, tuple[date, time]] = {}
             user_suppressed_cache: dict[tuple[str, date], set[int]] = {}
             user_currency_cache: dict[int, str] = {}
-            converted_share_cache: dict[str, Optional[float]] = {}
-            share_base = calculate_share_base(item, participants)
-            share_amount = item["amount"] / share_base
+            converted_share_cache: dict[tuple[str, int], Optional[float]] = {}
             source_currency = raw_currency.upper()
-            for person in target_participants:
-                telegram_id = int(person["telegram_id"])
-                if telegram_id not in user_subscription_time_cache:
-                    raw_user_sub_time = await db.get_user_subscription_setting(
-                        telegram_id,
-                        int(item["id"]),
-                        "reminder_time",
-                    )
-                    user_subscription_time_cache[telegram_id] = normalize_time_string(raw_user_sub_time)
-
-                effective_time = user_subscription_time_cache[telegram_id]
-                if effective_time is None:
-                    if subscription_override_time:
-                        effective_time = subscription_override_time
-                    else:
-                        base_time = user_base_time_cache.get(telegram_id)
-                        if base_time is None:
-                            base_time = parse_time_string(
-                                await db.get_effective_user_base_reminder_time(
-                                    telegram_id,
-                                    admin_base_time,
-                                ),
-                                admin_base_time,
-                            ).strftime("%H:%M")
-                            user_base_time_cache[telegram_id] = base_time
-                        effective_time = base_time
-
-                effective_timezone = user_timezone_cache.get(telegram_id)
-                if effective_timezone is None:
-                    raw_user_timezone = await db.get_effective_user_timezone(
-                        telegram_id,
-                        admin_timezone_name,
-                    )
-                    effective_timezone = normalize_timezone_name(
-                        raw_user_timezone,
-                        admin_timezone_name,
-                    ) or admin_timezone_name
-                    user_timezone_cache[telegram_id] = effective_timezone
-                local_today, local_current_time = user_time_now_cache.get(telegram_id, (today, current_time))
-                if telegram_id not in user_time_now_cache:
-                    local_now = now_utc.astimezone(parse_timezone(effective_timezone))
-                    local_today, local_current_time = local_now.date(), local_now.time()
-                    user_time_now_cache[telegram_id] = (local_today, local_current_time)
-
-                if enforce_time and local_current_time < parse_time_string(effective_time, admin_base_time):
+            for cycle_due in open_cycles:
+                cycle_participants = participants_by_cycle.get(cycle_due, [])
+                if not cycle_participants:
                     continue
-
-                target_currency = user_currency_cache.get(telegram_id)
-                if target_currency is None:
-                    target_currency = await db.get_effective_target_currency(
-                        telegram_id,
-                        converter.target_currency,
-                    )
-                    user_currency_cache[telegram_id] = target_currency
-
-                converted_base = converted_share_cache.get(target_currency)
-                if target_currency not in converted_share_cache:
-                    if source_currency == target_currency:
-                        converted_base = None
-                    else:
-                        try:
-                            converted_base = await converter.convert_to(
-                                share_amount,
-                                source_currency,
-                                target_currency,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "Conversion failed for subscription %s and currency %s: %s",
-                                item["id"],
-                                target_currency,
-                                exc,
-                            )
-                            converted_base = None
-                    converted_share_cache[target_currency] = converted_base
-
-                weight = int(person.get("share_weight") or 1)
-                share_text, amount_text, share_amount_value, converted_value, converted_display = _build_share_line(
-                    share_amount=share_amount,
-                    weight=weight,
-                    share_base=share_base,
-                    safe_currency=raw_currency,
-                    converted_base=converted_base,
-                    rounding_mode=rounding_mode,
-                    target_currency=target_currency,
-                )
-                base_amount_value: Optional[float] = converted_value
-                if base_amount_value is None and source_currency == target_currency:
-                    base_amount_value = float(share_amount_value)
-
-                for cycle_due in open_cycles:
-                    due_key = cycle_due.isoformat()
+                share_base = calculate_share_base(item, cycle_participants)
+                share_amount = item["amount"] / share_base
+                due_key = cycle_due.isoformat()
+                for person in cycle_participants:
+                    telegram_id = int(person.get("telegram_id") or 0)
+                    if telegram_id <= 0:
+                        continue
                     if (due_key, telegram_id) in paid_map:
+                        continue
+                    if telegram_id not in user_subscription_time_cache:
+                        raw_user_sub_time = await db.get_user_subscription_setting(
+                            telegram_id,
+                            int(item["id"]),
+                            "reminder_time",
+                        )
+                        user_subscription_time_cache[telegram_id] = normalize_time_string(raw_user_sub_time)
+
+                    effective_time = user_subscription_time_cache[telegram_id]
+                    if effective_time is None:
+                        if subscription_override_time:
+                            effective_time = subscription_override_time
+                        else:
+                            base_time = user_base_time_cache.get(telegram_id)
+                            if base_time is None:
+                                base_time = parse_time_string(
+                                    await db.get_effective_user_base_reminder_time(
+                                        telegram_id,
+                                        admin_base_time,
+                                    ),
+                                    admin_base_time,
+                                ).strftime("%H:%M")
+                                user_base_time_cache[telegram_id] = base_time
+                            effective_time = base_time
+
+                    effective_timezone = user_timezone_cache.get(telegram_id)
+                    if effective_timezone is None:
+                        raw_user_timezone = await db.get_effective_user_timezone(
+                            telegram_id,
+                            admin_timezone_name,
+                        )
+                        effective_timezone = normalize_timezone_name(
+                            raw_user_timezone,
+                            admin_timezone_name,
+                        ) or admin_timezone_name
+                        user_timezone_cache[telegram_id] = effective_timezone
+                    local_today, local_current_time = user_time_now_cache.get(telegram_id, (today, current_time))
+                    if telegram_id not in user_time_now_cache:
+                        local_now = now_utc.astimezone(parse_timezone(effective_timezone))
+                        local_today, local_current_time = local_now.date(), local_now.time()
+                        user_time_now_cache[telegram_id] = (local_today, local_current_time)
+
+                    if enforce_time and local_current_time < parse_time_string(effective_time, admin_base_time):
+                        continue
+
+                    event_offsets = {
+                        offset
+                        for offset in offsets
+                        if cycle_due + timedelta(days=offset) == local_today
+                    }
+                    if item.get("remind_after_due") and local_today > cycle_due:
+                        event_offsets.add((local_today - cycle_due).days)
+                    if not event_offsets:
                         continue
 
                     if register_reminders:
@@ -536,16 +537,49 @@ async def _run_reminder_pass(
                         if telegram_id in suppressed_ids:
                             continue
 
-                    event_offsets = {
-                        offset
-                        for offset in offsets
-                        if cycle_due + timedelta(days=offset) == local_today
-                    }
-                    if item.get("remind_after_due") and local_today > cycle_due:
-                        event_offsets.add((local_today - cycle_due).days)
-                    if not event_offsets:
-                        continue
+                    target_currency = user_currency_cache.get(telegram_id)
+                    if target_currency is None:
+                        target_currency = await db.get_effective_target_currency(
+                            telegram_id,
+                            converter.target_currency,
+                        )
+                        user_currency_cache[telegram_id] = target_currency
 
+                    converted_cache_key = (target_currency, share_base)
+                    converted_base = converted_share_cache.get(converted_cache_key)
+                    if converted_cache_key not in converted_share_cache:
+                        if source_currency == target_currency:
+                            converted_base = None
+                        else:
+                            try:
+                                converted_base = await converter.convert_to(
+                                    share_amount,
+                                    source_currency,
+                                    target_currency,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "Conversion failed for subscription %s and currency %s: %s",
+                                    item["id"],
+                                    target_currency,
+                                    exc,
+                                )
+                                converted_base = None
+                        converted_share_cache[converted_cache_key] = converted_base
+
+                    weight = int(person.get("share_weight") or 1)
+                    share_text, amount_text, share_amount_value, converted_value, converted_display = _build_share_line(
+                        share_amount=share_amount,
+                        weight=weight,
+                        share_base=share_base,
+                        safe_currency=raw_currency,
+                        converted_base=converted_base,
+                        rounding_mode=rounding_mode,
+                        target_currency=target_currency,
+                    )
+                    base_amount_value: Optional[float] = converted_value
+                    if base_amount_value is None and source_currency == target_currency:
+                        base_amount_value = float(share_amount_value)
                     status_text, due_date_text = _format_status_and_date(cycle_due, local_today)
                     for event_offset in sorted(event_offsets):
                         if register_reminders:
@@ -560,7 +594,7 @@ async def _run_reminder_pass(
                         key = (telegram_id, effective_time)
                         pending.setdefault(key, []).append(
                             {
-                                "person_name": str(person["full_name"]),
+                                "person_name": str(person.get("full_name") or f"User {telegram_id}"),
                                 "subscription_id": int(item["id"]),
                                 "due_date": cycle_due,
                                 "subscription_name": raw_name,
@@ -579,11 +613,11 @@ async def _run_reminder_pass(
                                 "sent_on": local_today,
                             }
                         )
-                        queued_events_for_admin.add((cycle_due, event_offset))
+                        queued_events_for_admin[(cycle_due, event_offset)] = len(cycle_participants)
 
             if admin_ids and queued_events_for_admin:
                 admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
-                for due_date_value, event_offset in sorted(queued_events_for_admin):
+                for (due_date_value, event_offset), queued_count in sorted(queued_events_for_admin.items()):
                     if register_reminders:
                         if not await db.register_reminder_if_new(
                             int(item["id"]),
@@ -595,11 +629,12 @@ async def _run_reminder_pass(
                     admin_note = (
                         f"🔔 {safe_name}\n"
                         f"{context_text}\n"
-                        f"Total: {item['amount']:.2f} {safe_currency} | Users: {len(participants)}"
+                        f"Total: {item['amount']:.2f} {safe_currency} | Users: {queued_count}"
                         f"{admin_comment}"
                     )
+                    event_participant_ids = participant_ids_by_cycle.get(due_date_value, set())
                     for admin_id in admin_ids:
-                        if admin_id in participant_ids:
+                        if admin_id in event_participant_ids:
                             continue
                         sent = await _send_message_with_retry(
                             bot,
@@ -875,8 +910,10 @@ async def reminder_worker(
     rounding_mode: str = "precise",
 ) -> None:
     logger = logging.getLogger("reminder_worker")
+    poll_interval = max(5.0, min(float(interval_seconds), 60.0))
     try:
         while True:
+            started = asyncio.get_running_loop().time()
             await _run_reminder_pass(
                 bot,
                 db,
@@ -887,8 +924,8 @@ async def reminder_worker(
                 enforce_time=True,
                 register_reminders=True,
             )
-
-            await asyncio.sleep(interval_seconds)
+            elapsed = asyncio.get_running_loop().time() - started
+            await asyncio.sleep(max(1.0, poll_interval - elapsed))
     except asyncio.CancelledError:  # pragma: no cover - service shutdown
         logger.info("Reminder worker stopped")
         raise
