@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Tuple
 
 from dotenv import load_dotenv
+from app.core.reminders import DEFAULT_REMINDER_TIME, normalize_time_string
 
 
 @dataclass
@@ -15,6 +16,7 @@ class Settings:
     reminder_check_interval: int
     target_currency: str
     currency_rounding: str
+    base_reminder_time: str
     admin_ids: Tuple[int, ...]
 
     @classmethod
@@ -41,6 +43,10 @@ class Settings:
         if rounding_mode not in {"precise", "floor", "round", "ceil"}:
             rounding_mode = "precise"
 
+        base_reminder_time = normalize_time_string(os.getenv("BASE_REMINDER_TIME"))
+        if base_reminder_time is None:
+            base_reminder_time = DEFAULT_REMINDER_TIME
+
         admin_ids_raw = os.getenv("ADMIN_IDS", "").strip()
         admin_ids: Tuple[int, ...] = ()
         if admin_ids_raw:
@@ -61,5 +67,6 @@ class Settings:
             reminder_check_interval=reminder_interval,
             target_currency=target_currency,
             currency_rounding=rounding_mode,
+            base_reminder_time=base_reminder_time,
             admin_ids=admin_ids,
         )

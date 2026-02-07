@@ -32,6 +32,7 @@ def public_reply_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         keyboard=[
             [KeyboardButton(text="📋 Subscriptions"), KeyboardButton(text="📊 Payments report")],
+            [KeyboardButton(text="⚙️ Settings")],
         ],
     )
 
@@ -170,7 +171,7 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
 def public_subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="⏰ Reminder time",
+        text="⏰ My reminder time",
         callback_data=SubscriptionAction(action="public_remindertime", subscription_id=subscription_id).pack(),
     )
     builder.button(
@@ -386,6 +387,7 @@ def build_currency_keyboard(options: Iterable[str]) -> InlineKeyboardMarkup:
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💱 Base currency", callback_data="settings:currency")
+    builder.button(text="⏰ Base time", callback_data="settings:time")
     builder.button(text="🔢 Rounding", callback_data="settings:rounding")
     builder.button(text="🔔 Notifications", callback_data="settings:notifications")
     builder.button(text="🧪 Tests", callback_data="settings:tests")
@@ -404,6 +406,74 @@ def settings_currency_keyboard(options: Iterable[str]) -> InlineKeyboardMarkup:
     builder.adjust(3, 2)
     builder.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    return builder.as_markup()
+
+
+def settings_time_keyboard(current_time: str) -> InlineKeyboardMarkup:
+    presets = ("09:00", "12:00", "16:00", "20:00")
+    builder = InlineKeyboardBuilder()
+    for time_value in presets:
+        prefix = "✅ " if time_value == current_time else ""
+        builder.button(text=f"{prefix}{time_value}", callback_data=f"settings_time:{time_value}")
+    builder.button(text="Other", callback_data="settings:time_other")
+    builder.adjust(2, 2, 1)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    return builder.as_markup()
+
+
+def public_settings_keyboard(
+    current_currency: str,
+    has_currency_override: bool,
+    current_time: str,
+    has_time_override: bool,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"💱 Base currency: {current_currency}", callback_data="public_settings:currency")
+    builder.button(text=f"⏰ Base time: {current_time}", callback_data="public_settings:time")
+    if has_currency_override:
+        builder.button(text="↩️ Currency: use admin default", callback_data="public_settings:currency_reset")
+    if has_time_override:
+        builder.button(text="↩️ Time: use admin default", callback_data="public_settings:time_reset")
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    return builder.as_markup()
+
+
+def public_settings_currency_keyboard(
+    options: Iterable[str],
+    current_currency: str,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for code in options:
+        code_upper = code.upper()
+        prefix = "✅ " if code_upper == current_currency.upper() else ""
+        builder.button(text=f"{prefix}{code_upper}", callback_data=f"public_settings_currency:{code_upper}")
+    builder.button(text="Other", callback_data="public_settings:currency_other")
+    builder.adjust(3, 2)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    return builder.as_markup()
+
+
+def public_settings_time_keyboard(current_time: str) -> InlineKeyboardMarkup:
+    presets = ("09:00", "12:00", "16:00", "20:00")
+    builder = InlineKeyboardBuilder()
+    for time_value in presets:
+        prefix = "✅ " if time_value == current_time else ""
+        builder.button(text=f"{prefix}{time_value}", callback_data=f"public_settings_time:{time_value}")
+    builder.button(text="Other", callback_data="public_settings:time_other")
+    builder.adjust(2, 2, 1)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()

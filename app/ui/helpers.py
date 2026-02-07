@@ -5,7 +5,13 @@ from typing import Dict, Optional, Sequence, Tuple, Union
 
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardMarkup,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
@@ -35,8 +41,16 @@ from app.ui.keyboards import (
     test_reminder_targets_keyboard,
 )
 from app.ui.states import Responder, SubscriptionAction
-from app.core.reminders import calculate_next_charge_date, format_offsets_for_display, parse_offsets
+from app.core.reminders import (
+    calculate_next_charge_date,
+    format_offsets_for_display,
+    normalize_time_string,
+    parse_offsets,
+    parse_time_string,
+)
 from app.ui.text import escape_html, format_display_name
+
+MAX_TELEGRAM_MESSAGE_LEN = 3900
 
 
 def _format_iso_date(value: str) -> str:
@@ -61,6 +75,108 @@ async def respond_with_markup(
         await target.answer()
     else:
         await target.answer(text, reply_markup=reply_markup)
+
+
+def _split_plain_block(block: str, limit: int) -> list[str]:
+    parts: list[str] = []
+    remaining = block
+    while remaining:
+        parts.append(remaining[:limit])
+        remaining = remaining[limit:]
+    return parts
+
+
+def _split_pre_block(block: str, limit: int) -> list[str]:
+    if "<pre>" not in block or "</pre>" not in block:
+        return _split_plain_block(block, limit)
+
+    prefix, suffix_part = block.split("<pre>", 1)
+    pre_content, suffix = suffix_part.split("</pre>", 1)
+    head = f"{prefix}<pre>"
+    tail = f"</pre>{suffix}"
+    available = limit - len(head) - len(tail)
+    if available <= 0:
+        return _split_plain_block(block, limit)
+
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    for line in pre_content.splitlines():
+        candidate_lines = current_lines + [line]
+        candidate = head + "\n".join(candidate_lines) + tail
+        if len(candidate) <= limit:
+            current_lines = candidate_lines
+            continue
+
+        if current_lines:
+            chunks.append(head + "\n".join(current_lines) + tail)
+            current_lines = []
+
+        if len(line) <= available:
+            current_lines = [line]
+            continue
+
+        pieces = _split_plain_block(line, available)
+        for piece in pieces:
+            chunks.append(head + piece + tail)
+
+    if current_lines:
+        chunks.append(head + "\n".join(current_lines) + tail)
+    return chunks
+
+
+def split_text_chunks(text: str, limit: int = MAX_TELEGRAM_MESSAGE_LEN) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+
+    blocks = text.split("\n\n")
+    chunks: list[str] = []
+    current = ""
+    for block in blocks:
+        candidate = block if not current else f"{current}\n\n{block}"
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+
+        if current:
+            chunks.append(current)
+            current = ""
+
+        if len(block) <= limit:
+            current = block
+            continue
+
+        chunks.extend(_split_pre_block(block, limit))
+
+    if current:
+        chunks.append(current)
+    return chunks or [text]
+
+
+async def send_chunked_responder_text(
+    target: Responder,
+    text: str,
+    *,
+    reply_markup: Optional[Union[InlineKeyboardMarkup, ReplyKeyboardMarkup]] = None,
+) -> None:
+    chunks = split_text_chunks(text)
+    if isinstance(target, CallbackQuery):
+        if not target.message:
+            await target.answer("Unable to show the report right now.", show_alert=True)
+            return
+        if len(chunks) == 1:
+            inline_markup = reply_markup if isinstance(reply_markup, InlineKeyboardMarkup) else None
+            await respond_with_markup(target, chunks[0], reply_markup=inline_markup)
+            return
+
+        await respond_with_markup(target, chunks[0], reply_markup=None)
+        for chunk in chunks[1:-1]:
+            await target.message.answer(chunk)
+        await target.message.answer(chunks[-1], reply_markup=reply_markup)
+        return
+
+    for index, chunk in enumerate(chunks):
+        markup = reply_markup if index == len(chunks) - 1 else None
+        await target.answer(chunk, reply_markup=markup)
 
 
 async def send_subscription_list(target: Responder, db: Database) -> None:
@@ -173,7 +289,30 @@ async def send_public_subscription_detail(
     else:
         cadence = f"every {subscription['period_days']} days"
 
-    reminder_time = (subscription.get("reminder_time") or "16:00").strip() or "16:00"
+    admin_base_time = parse_time_string(
+        await db.get_effective_base_reminder_time(),
+    ).strftime("%H:%M")
+    subscription_override = normalize_time_string(subscription.get("reminder_time"))
+    reminder_time = subscription_override or admin_base_time
+    reminder_source = "admin base time"
+    if user_id is not None:
+        user_sub_override = normalize_time_string(
+            await db.get_user_subscription_setting(user_id, subscription_id, "reminder_time")
+        )
+        user_base_override = normalize_time_string(
+            await db.get_user_setting(user_id, "base_reminder_time")
+        )
+        if user_sub_override:
+            reminder_time = user_sub_override
+            reminder_source = "your subscription override"
+        elif subscription_override:
+            reminder_time = subscription_override
+            reminder_source = "subscription override by admin"
+        elif user_base_override:
+            reminder_time = user_base_override
+            reminder_source = "your base time"
+    elif subscription_override:
+        reminder_source = "subscription override"
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     comment_value = (subscription.get("comment") or "").strip()
@@ -198,7 +337,7 @@ async def send_public_subscription_detail(
         f"       {next_charge}\n"
         f"       {cadence}\n"
         "🔔 <b>Reminders</b>:\n"
-        f"       {reminder_time} MSK\n"
+        f"       {reminder_time} MSK ({reminder_source})\n"
         f"       Days: {offsets_text}\n"
         f"       Post-due: {overdue_text}\n"
         f"👥 <b>Users</b> ({len(participants)}):\n"
@@ -235,7 +374,7 @@ async def send_subscription_payment_report(
         participants,
         scope="all",
     )
-    await respond_with_markup(
+    await send_chunked_responder_text(
         target,
         text,
         reply_markup=subscription_report_keyboard(subscription_id),
@@ -270,7 +409,7 @@ async def send_public_subscription_payment_report(
         scope="user",
         user_id=telegram_id,
     )
-    await respond_with_markup(
+    await send_chunked_responder_text(
         target,
         text,
         reply_markup=public_subscription_report_keyboard(subscription_id),
@@ -286,7 +425,7 @@ async def send_public_user_payment_report(
     if not blocks:
         await message.answer("No payments to report yet.")
         return
-    await message.answer("\n\n".join(blocks))
+    await send_chunked_responder_text(message, "\n\n".join(blocks))
 
 
 async def _build_user_payment_blocks(db: Database, telegram_id: int) -> list[str]:
@@ -405,6 +544,7 @@ def _share_details(
 def _build_subscription_detail_text(
     subscription: Dict[str, object],
     participants: Sequence[Dict[str, object]],
+    base_time: str,
 ) -> str:
     share_base, share_text = _share_details(subscription, participants)
     per_person = subscription["amount"] / share_base
@@ -430,7 +570,11 @@ def _build_subscription_detail_text(
     else:
         cadence = f"every {subscription['period_days']} days"
 
-    reminder_time = (subscription.get("reminder_time") or "16:00").strip() or "16:00"
+    override_time = normalize_time_string(subscription.get("reminder_time"))
+    if override_time:
+        reminder_time = f"{override_time} MSK (subscription override)"
+    else:
+        reminder_time = f"{base_time} MSK (admin base time)"
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
 
@@ -444,7 +588,7 @@ def _build_subscription_detail_text(
         f"       {_format_iso_date(subscription['next_charge_at'])}\n"
         f"       {cadence}\n"
         f"🔔 <b>Reminders</b>:\n"
-        f"       {reminder_time} MSK\n"
+        f"       {reminder_time}\n"
         f"       Days: {offsets_text}\n"
         f"       Post-due: {overdue_text}\n"
         f"👥 <b>Users</b> ({len(participants)}):\n"
@@ -459,7 +603,8 @@ async def send_subscription_detail(target: Responder, db: Database, subscription
         return
 
     participants = await db.list_subscription_participants(subscription_id)
-    text = _build_subscription_detail_text(subscription, participants)
+    base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
+    text = _build_subscription_detail_text(subscription, participants, base_time)
 
     await respond_with_markup(
         target,
@@ -523,7 +668,7 @@ async def send_member_report(target: Responder, db: Database, friend_id: int) ->
             reply_markup=member_report_keyboard(friend_id),
         )
         return
-    await respond_with_markup(
+    await send_chunked_responder_text(
         target,
         "\n\n".join(blocks),
         reply_markup=member_report_keyboard(friend_id),
@@ -536,13 +681,18 @@ async def send_reminder_settings(target: Responder, db: Database, subscription_i
         await respond_with_markup(target, "This subscription no longer exists.")
         return
 
-    reminder_time = (subscription.get("reminder_time") or "16:00").strip() or "16:00"
+    base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
+    override_time = normalize_time_string(subscription.get("reminder_time"))
+    if override_time:
+        reminder_line = f"{override_time} MSK (subscription override)"
+    else:
+        reminder_line = f"default ({base_time} MSK)"
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     text = (
         f"<b>{escape_html(subscription['name'])}</b>\n"
         "🔔 <b>Reminders</b>:\n"
-        f"       ⏰ Time: {reminder_time} MSK\n"
+        f"       ⏰ Time: {reminder_line}\n"
         f"       🔔 Days: {offsets_text}\n"
         f"       📣 Post-due alerts: {overdue_text}"
     )

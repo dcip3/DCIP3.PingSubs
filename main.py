@@ -13,6 +13,7 @@ from aiogram.types import BotCommand
 from app.handlers import admin_router, public_router
 from app.infrastructure import AdminFilter, SettingsMiddleware
 from app.core.config import Settings
+from app.core.reminders import parse_time_string
 from app.storage.db import Database
 from app.services import CurrencyConverter, reminder_worker
 
@@ -35,6 +36,16 @@ async def main() -> None:
         settings.currency_rounding = stored_rounding
     else:
         await db.set_setting("currency_rounding", settings.currency_rounding)
+    stored_base_time = await db.get_setting("base_reminder_time")
+    if stored_base_time:
+        settings.base_reminder_time = parse_time_string(
+            stored_base_time,
+            settings.base_reminder_time,
+        ).strftime("%H:%M")
+        if settings.base_reminder_time != stored_base_time:
+            await db.set_setting("base_reminder_time", settings.base_reminder_time)
+    else:
+        await db.set_setting("base_reminder_time", settings.base_reminder_time)
     converter = CurrencyConverter(settings.target_currency)
 
     bot = Bot(

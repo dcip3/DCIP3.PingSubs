@@ -68,6 +68,18 @@ class Database:
         )
         await self._conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS reminder_user_logs (
+                subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                due_date TEXT NOT NULL,
+                offset INTEGER NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (subscription_id, due_date, offset, telegram_id)
+            );
+            """
+        )
+        await self._conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS reminder_suppressions (
                 subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
                 due_date TEXT NOT NULL,
@@ -245,8 +257,16 @@ class Database:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
             """
-            INSERT INTO subscriptions (name, amount, currency, next_charge_at, period_days, share_limit)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO subscriptions (
+                name,
+                amount,
+                currency,
+                next_charge_at,
+                period_days,
+                share_limit,
+                reminder_time
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -255,6 +275,7 @@ class Database:
                 due_date.isoformat(),
                 period_days,
                 share_limit,
+                "",
             ),
         )
         await self._conn.commit()
@@ -274,6 +295,7 @@ class Database:
         )
         if "next_charge_at" in fields:
             await self._conn.execute("DELETE FROM reminder_logs WHERE subscription_id = ?", (subscription_id,))
+            await self._conn.execute("DELETE FROM reminder_user_logs WHERE subscription_id = ?", (subscription_id,))
         await self._conn.commit()
 
     async def delete_subscription(self, subscription_id: int) -> None:
@@ -437,12 +459,26 @@ class Database:
             (next_charge.isoformat(), subscription_id),
         )
         await self._conn.execute("DELETE FROM reminder_logs WHERE subscription_id = ?", (subscription_id,))
+        await self._conn.execute("DELETE FROM reminder_user_logs WHERE subscription_id = ?", (subscription_id,))
         await self._conn.commit()
 
     async def has_admins(self) -> bool:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute("SELECT 1 FROM admins LIMIT 1")
         return await cursor.fetchone() is not None
+
+    async def ensure_first_admin(self, telegram_id: int, full_name: str) -> bool:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            INSERT INTO admins (telegram_id, full_name)
+            SELECT ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM admins)
+            """,
+            (telegram_id, full_name),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
 
     async def add_admin(self, telegram_id: int, full_name: str) -> None:
         assert self._conn is not None, "Database is not connected"
@@ -472,6 +508,27 @@ class Database:
             await self._conn.execute(
                 "INSERT INTO reminder_logs (subscription_id, due_date, offset) VALUES (?, ?, ?)",
                 (subscription_id, due_date.isoformat(), offset),
+            )
+            await self._conn.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+    async def register_user_reminder_if_new(
+        self,
+        subscription_id: int,
+        due_date: date,
+        offset: int,
+        telegram_id: int,
+    ) -> bool:
+        assert self._conn is not None, "Database is not connected"
+        try:
+            await self._conn.execute(
+                """
+                INSERT INTO reminder_user_logs (subscription_id, due_date, offset, telegram_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                (subscription_id, due_date.isoformat(), offset, telegram_id),
             )
             await self._conn.commit()
             return True
@@ -579,6 +636,7 @@ class Database:
     async def clear_reminder_logs(self, subscription_id: int) -> None:
         assert self._conn is not None, "Database is not connected"
         await self._conn.execute("DELETE FROM reminder_logs WHERE subscription_id = ?", (subscription_id,))
+        await self._conn.execute("DELETE FROM reminder_user_logs WHERE subscription_id = ?", (subscription_id,))
         await self._conn.commit()
 
     async def get_setting(self, key: str) -> Optional[str]:
@@ -586,6 +644,95 @@ class Database:
         cursor = await self._conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
         row = await cursor.fetchone()
         return str(row[0]) if row else None
+
+    @staticmethod
+    def _user_setting_key(telegram_id: int, key: str) -> str:
+        return f"user:{telegram_id}:{key}"
+
+    @staticmethod
+    def _user_subscription_setting_key(telegram_id: int, subscription_id: int, key: str) -> str:
+        return f"user:{telegram_id}:subscription:{subscription_id}:{key}"
+
+    async def get_user_setting(self, telegram_id: int, key: str) -> Optional[str]:
+        return await self.get_setting(self._user_setting_key(telegram_id, key))
+
+    async def set_user_setting(self, telegram_id: int, key: str, value: str) -> None:
+        await self.set_setting(self._user_setting_key(telegram_id, key), value)
+
+    async def delete_user_setting(self, telegram_id: int, key: str) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            "DELETE FROM settings WHERE key = ?",
+            (self._user_setting_key(telegram_id, key),),
+        )
+        await self._conn.commit()
+
+    async def get_user_subscription_setting(
+        self,
+        telegram_id: int,
+        subscription_id: int,
+        key: str,
+    ) -> Optional[str]:
+        return await self.get_setting(
+            self._user_subscription_setting_key(telegram_id, subscription_id, key)
+        )
+
+    async def set_user_subscription_setting(
+        self,
+        telegram_id: int,
+        subscription_id: int,
+        key: str,
+        value: str,
+    ) -> None:
+        await self.set_setting(
+            self._user_subscription_setting_key(telegram_id, subscription_id, key),
+            value,
+        )
+
+    async def delete_user_subscription_setting(
+        self,
+        telegram_id: int,
+        subscription_id: int,
+        key: str,
+    ) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            "DELETE FROM settings WHERE key = ?",
+            (self._user_subscription_setting_key(telegram_id, subscription_id, key),),
+        )
+        await self._conn.commit()
+
+    async def get_effective_target_currency(
+        self,
+        telegram_id: int,
+        default_currency: str = "RUB",
+    ) -> str:
+        user_value = await self.get_user_setting(telegram_id, "target_currency")
+        if user_value:
+            return user_value.strip().upper()
+        global_value = await self.get_setting("target_currency")
+        if global_value:
+            return global_value.strip().upper()
+        return default_currency.strip().upper() or "RUB"
+
+    async def get_effective_base_reminder_time(
+        self,
+        default_time: str = "16:00",
+    ) -> str:
+        raw_value = await self.get_setting("base_reminder_time")
+        if raw_value:
+            return raw_value.strip()
+        return default_time.strip() or "16:00"
+
+    async def get_effective_user_base_reminder_time(
+        self,
+        telegram_id: int,
+        default_time: str = "16:00",
+    ) -> str:
+        user_value = await self.get_user_setting(telegram_id, "base_reminder_time")
+        if user_value:
+            return user_value.strip()
+        return await self.get_effective_base_reminder_time(default_time)
 
     async def set_setting(self, key: str, value: str) -> None:
         assert self._conn is not None, "Database is not connected"

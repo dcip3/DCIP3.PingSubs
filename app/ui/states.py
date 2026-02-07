@@ -14,6 +14,12 @@ class FriendForm(StatesGroup):
 
 class SettingsForm(StatesGroup):
     base_currency = State()
+    base_time = State()
+
+
+class PublicSettingsForm(StatesGroup):
+    base_currency = State()
+    base_time = State()
 
 
 class PublicReminderForm(StatesGroup):

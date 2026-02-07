@@ -32,10 +32,21 @@ def calculate_next_charge_date(current: date, period_days: int) -> date:
     return current + timedelta(days=period)
 
 
-def parse_time_string(value: str | None) -> time:
-    raw = (value or DEFAULT_REMINDER_TIME).strip() or DEFAULT_REMINDER_TIME
+def normalize_time_string(value: str | None) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
     try:
         parsed = datetime.strptime(raw, "%H:%M")
+    except ValueError:
+        return None
+    return parsed.strftime("%H:%M")
+
+
+def parse_time_string(value: str | None, default: str = DEFAULT_REMINDER_TIME) -> time:
+    normalized = normalize_time_string(value) or normalize_time_string(default) or DEFAULT_REMINDER_TIME
+    try:
+        parsed = datetime.strptime(normalized, "%H:%M")
     except ValueError:
         parsed = datetime.strptime(DEFAULT_REMINDER_TIME, "%H:%M")
     return parsed.time()

@@ -30,6 +30,16 @@ Create the local data directory for SQLite:
 mkdir -p data
 ```
 
+### Git commit message policy
+
+The repository includes a `commit-msg` hook that allows commit messages only in English.
+
+Enable repository hooks once:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ### Environment variables
 
 Required:
@@ -38,6 +48,7 @@ Required:
 Optional:
 - `DATABASE_PATH` - path to SQLite database (default: `data/app.db`)
 - `REMINDER_CHECK_INTERVAL` - reminder check interval in seconds (default: `3600`)
+- `BASE_REMINDER_TIME` - default reminder time in `HH:MM` (Moscow time, default: `16:00`)
 - `TARGET_CURRENCY` - base currency for conversions (default: `RUB`)
 - `CURRENCY_ROUNDING` - rounding mode for conversions: `precise`, `floor`, `round`, `ceil` (default: `precise`)
 - `ADMIN_IDS` - comma-separated Telegram IDs that should be admins on startup
@@ -68,6 +79,10 @@ docker compose up -d --build
 - Admins manage subscriptions and members via the admin menu
 - Members can view their subscriptions and mark payments as completed
 - Reminders are sent automatically based on the configured schedule
+- On first launch without `ADMIN_IDS`, the first user who sends `/start` becomes admin automatically
+- Members can set a personal base currency in `⚙️ Settings`; if not set, the admin base currency is used
+- Both admin and members can set base reminder time in `⚙️ Settings`
+- Reminder time precedence is: personal subscription override -> subscription override (admin) -> personal base time -> admin base time
 
 
 ## Project structure

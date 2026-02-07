@@ -19,6 +19,7 @@ from app.core.reminders import (
     REMINDER_TIMEZONE,
     calculate_next_charge_date,
     format_due_date,
+    normalize_time_string,
     parse_offsets,
     parse_time_string,
 )
@@ -29,7 +30,7 @@ from app.storage.db import Database
 class CurrencyConverter:
     def __init__(self, target_currency: str = "RUB") -> None:
         self.target_currency = target_currency.upper()
-        self._cache: Dict[str, tuple[float, datetime]] = {}
+        self._cache: Dict[tuple[str, str], tuple[float, datetime]] = {}
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def close(self) -> None:
@@ -37,16 +38,21 @@ class CurrencyConverter:
             await self._session.close()
 
     async def convert(self, amount: float, source_currency: str) -> float:
+        return await self.convert_to(amount, source_currency, self.target_currency)
+
+    async def convert_to(self, amount: float, source_currency: str, target_currency: str) -> float:
         currency = source_currency.upper()
-        if currency == self.target_currency:
+        target = target_currency.upper()
+        if currency == target:
             return amount
 
-        rate = await self._get_rate(currency)
+        rate = await self._get_rate(currency, target)
         return amount * rate
 
-    async def _get_rate(self, source_currency: str) -> float:
+    async def _get_rate(self, source_currency: str, target_currency: str) -> float:
         now = datetime.now(timezone.utc)
-        cached = self._cache.get(source_currency)
+        cache_key = (source_currency, target_currency)
+        cached = self._cache.get(cache_key)
         if cached and (now - cached[1]) < timedelta(hours=6):
             return cached[0]
 
@@ -56,11 +62,11 @@ class CurrencyConverter:
             response.raise_for_status()
             payload = await response.json()
             rates = payload.get("rates") or {}
-            result = rates.get(self.target_currency)
+            result = rates.get(target_currency)
             if result is None:
                 raise RuntimeError("Currency API did not return a conversion rate")
 
-        self._cache[source_currency] = (result, now)
+        self._cache[cache_key] = (result, now)
         return result
 
     def set_target_currency(self, target_currency: str) -> None:
@@ -356,6 +362,7 @@ async def _run_reminder_pass(
     current_time = now.time()
     notify_admin_reminders = await db.get_setting_bool("notify_admin_reminders", True)
     admin_ids: set[int] = set(await db.list_admin_ids()) if notify_admin_reminders else set()
+    admin_base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
     sent_count = 0
     pending: dict[tuple[int, str], list[dict[str, object]]] = {}
 
@@ -368,15 +375,11 @@ async def _run_reminder_pass(
         raw_comment = str(item.get("comment", "")).strip()
         safe_name = escape_html(raw_name)
         safe_currency = escape_html(raw_currency)
+        subscription_override_time = normalize_time_string(item.get("reminder_time"))
         try:
             _parse_due_date(item["next_charge_at"])
         except (KeyError, ValueError):
             continue
-
-        reminder_time = parse_time_string(item.get("reminder_time"))
-        if enforce_time and current_time < reminder_time:
-            continue
-        reminder_time_label = reminder_time.strftime("%H:%M")
 
         participants = item.get("participants", [])
         participant_ids = {p["telegram_id"] for p in participants}
@@ -391,8 +394,14 @@ async def _run_reminder_pass(
             if row.get("paid_by_telegram_id") is not None
         }
 
-        async def dispatch(context_text: str, due_date_value: date) -> None:
+        async def dispatch(context_text: str, due_date_value: date, event_offset: int) -> None:
+            nonlocal sent_count
             admin_note: Optional[str] = None
+            has_queued_users = False
+            user_base_time_cache: dict[int, str] = {}
+            user_subscription_time_cache: dict[int, Optional[str]] = {}
+            user_currency_cache: dict[int, str] = {}
+            converted_share_cache: dict[str, Optional[float]] = {}
             if participants:
                 target_participants = participants
                 if target_telegram_id is not None:
@@ -421,27 +430,90 @@ async def _run_reminder_pass(
                     return
                 share_base = calculate_share_base(item, participants)
                 share_amount = item["amount"] / share_base
-                try:
-                    share_amount_rub = await converter.convert(share_amount, item["currency"])
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Conversion failed for subscription %s: %s", item["id"], exc)
-                    share_amount_rub = None
+                source_currency = raw_currency.upper()
                 status_text, due_date_text = _format_status_and_date(due_date_value, today)
                 for person in unpaid:
+                    telegram_id = int(person["telegram_id"])
+                    if telegram_id not in user_subscription_time_cache:
+                        raw_user_sub_time = await db.get_user_subscription_setting(
+                            telegram_id,
+                            int(item["id"]),
+                            "reminder_time",
+                        )
+                        user_subscription_time_cache[telegram_id] = normalize_time_string(raw_user_sub_time)
+
+                    effective_time = user_subscription_time_cache[telegram_id]
+                    if effective_time is None:
+                        if subscription_override_time:
+                            effective_time = subscription_override_time
+                        else:
+                            base_time = user_base_time_cache.get(telegram_id)
+                            if base_time is None:
+                                base_time = parse_time_string(
+                                    await db.get_effective_user_base_reminder_time(
+                                        telegram_id,
+                                        admin_base_time,
+                                    ),
+                                    admin_base_time,
+                                ).strftime("%H:%M")
+                                user_base_time_cache[telegram_id] = base_time
+                            effective_time = base_time
+
+                    if enforce_time and current_time < parse_time_string(effective_time, admin_base_time):
+                        continue
+
+                    if register_reminders:
+                        if not await db.register_user_reminder_if_new(
+                            int(item["id"]),
+                            due_date_value,
+                            event_offset,
+                            telegram_id,
+                        ):
+                            continue
+
+                    target_currency = user_currency_cache.get(telegram_id)
+                    if target_currency is None:
+                        target_currency = await db.get_effective_target_currency(
+                            telegram_id,
+                            converter.target_currency,
+                        )
+                        user_currency_cache[telegram_id] = target_currency
+
+                    converted_base = converted_share_cache.get(target_currency)
+                    if target_currency not in converted_share_cache:
+                        if source_currency == target_currency:
+                            converted_base = None
+                        else:
+                            try:
+                                converted_base = await converter.convert_to(
+                                    share_amount,
+                                    source_currency,
+                                    target_currency,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "Conversion failed for subscription %s and currency %s: %s",
+                                    item["id"],
+                                    target_currency,
+                                    exc,
+                                )
+                                converted_base = None
+                        converted_share_cache[target_currency] = converted_base
+
                     weight = int(person.get("share_weight") or 1)
                     share_text, amount_text, share_amount_value, converted_value, converted_display = _build_share_line(
                         share_amount=share_amount,
                         weight=weight,
                         share_base=share_base,
                         safe_currency=raw_currency,
-                        converted_base=share_amount_rub,
+                        converted_base=converted_base,
                         rounding_mode=rounding_mode,
-                        target_currency=converter.target_currency,
+                        target_currency=target_currency,
                     )
                     base_amount_value: Optional[float] = converted_value
-                    if base_amount_value is None and raw_currency == converter.target_currency:
+                    if base_amount_value is None and source_currency == target_currency:
                         base_amount_value = float(share_amount_value)
-                    key = (int(person["telegram_id"]), reminder_time_label)
+                    key = (telegram_id, effective_time)
                     pending.setdefault(key, []).append(
                         {
                             "person_name": str(person["full_name"]),
@@ -459,10 +531,12 @@ async def _run_reminder_pass(
                             "share_currency": str(item["currency"]),
                             "converted_value": converted_value,
                             "base_amount_value": base_amount_value,
+                            "target_currency": target_currency,
                         }
                     )
+                    has_queued_users = True
 
-                if admin_ids:
+                if admin_ids and has_queued_users:
                     admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
                     admin_note = (
                         f"🔔 {safe_name}\n"
@@ -471,6 +545,9 @@ async def _run_reminder_pass(
                         f"{admin_comment}"
                     )
             elif admin_ids:
+                dispatch_time = subscription_override_time or admin_base_time
+                if enforce_time and current_time < parse_time_string(dispatch_time, admin_base_time):
+                    return
                 admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
                 admin_note = (
                     f"🔔 {safe_name}\n"
@@ -480,6 +557,9 @@ async def _run_reminder_pass(
                 )
 
             if admin_note and admin_ids:
+                if register_reminders:
+                    if not await db.register_reminder_if_new(int(item["id"]), due_date_value, event_offset):
+                        return
                 for admin_id in admin_ids:
                     if admin_id in participant_ids:
                         continue
@@ -498,20 +578,14 @@ async def _run_reminder_pass(
                 target_date = cycle_due + timedelta(days=offset)
                 if target_date != today:
                     continue
-                if register_reminders:
-                    if not await db.register_reminder_if_new(item["id"], cycle_due, offset):
-                        continue
 
                 context = _format_context_text(cycle_due, today)
-                await dispatch(context, cycle_due)
+                await dispatch(context, cycle_due, offset)
 
             if item.get("remind_after_due") and today > cycle_due:
                 overdue_offset = (today - cycle_due).days
-                if register_reminders:
-                    if not await db.register_reminder_if_new(item["id"], cycle_due, overdue_offset):
-                        continue
                 context = _format_context_text(cycle_due, today)
-                await dispatch(context, cycle_due)
+                await dispatch(context, cycle_due, overdue_offset)
 
     for (telegram_id, _reminder_time), items in pending.items():
         if not items:
@@ -551,7 +625,7 @@ async def _run_reminder_pass(
                     share_amount=float(item["share_amount_value"]),
                     share_currency=str(item["share_currency"]),
                     converted_amount=item.get("converted_value"),
-                    converted_currency=converter.target_currency if item.get("converted_text") else None,
+                    converted_currency=str(item.get("target_currency")) if item.get("converted_text") else None,
                     converted_display=item.get("converted_text"),
                 )
                 if record_manual_suppressions:
@@ -573,7 +647,8 @@ async def _run_reminder_pass(
             total_value += float(base_value)
         total_text = None
         if total_ready:
-            total_text = format_converted_amount(total_value, converter.target_currency, rounding_mode)
+            total_currency = str(items[0].get("target_currency") or converter.target_currency)
+            total_text = format_converted_amount(total_value, total_currency, rounding_mode)
 
         message_text = _build_batch_reminder_message(
             person_name=person_name,
@@ -658,26 +733,47 @@ async def send_test_reminders(
     raw_name = str(subscription.get("name", ""))
     raw_currency = str(subscription.get("currency", ""))
     raw_comment = str(subscription.get("comment", "")).strip()
+    source_currency = raw_currency.upper()
     today = datetime.now(REMINDER_TIMEZONE).date()
     share_base = calculate_share_base(subscription, participants)
     share_amount = subscription["amount"] / share_base
-    try:
-        share_amount_converted = await converter.convert(share_amount, subscription["currency"])
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Conversion failed for subscription %s: %s", subscription_id, exc)
-        share_amount_converted = None
 
     sent_count = 0
+    target_currency_cache: dict[int, str] = {}
+    converted_share_cache: dict[str, Optional[float]] = {}
     for person in target_participants:
+        telegram_id = int(person["telegram_id"])
+        target_currency = target_currency_cache.get(telegram_id)
+        if target_currency is None:
+            target_currency = await db.get_effective_target_currency(telegram_id, converter.target_currency)
+            target_currency_cache[telegram_id] = target_currency
+
+        converted_base = converted_share_cache.get(target_currency)
+        if target_currency not in converted_share_cache:
+            if source_currency == target_currency:
+                converted_base = None
+            else:
+                try:
+                    converted_base = await converter.convert_to(share_amount, source_currency, target_currency)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Conversion failed for test reminder %s and currency %s: %s",
+                        subscription_id,
+                        target_currency,
+                        exc,
+                    )
+                    converted_base = None
+            converted_share_cache[target_currency] = converted_base
+
         weight = int(person.get("share_weight") or 1)
         share_text, amount_text, _, _, converted_display = _build_share_line(
             share_amount=share_amount,
             weight=weight,
             share_base=share_base,
             safe_currency=raw_currency,
-            converted_base=share_amount_converted,
+            converted_base=converted_base,
             rounding_mode=rounding_mode,
-            target_currency=converter.target_currency,
+            target_currency=target_currency,
         )
         status_text, due_date_text = _format_status_and_date(due_date, today)
         message_text = _build_reminder_message(
@@ -694,7 +790,7 @@ async def send_test_reminders(
         keyboard = build_test_payment_confirmation_keyboard(subscription_id, due_date)
         message_id = await _send_message_with_retry(
             bot,
-            int(person["telegram_id"]),
+            telegram_id,
             message_text,
             reply_markup=keyboard,
             logger=logger,
