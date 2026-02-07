@@ -127,7 +127,7 @@ class Database:
             );
             """
         )
-        await self._conn.execute(
+        await self._conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS subscription_cycles (
                 subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
