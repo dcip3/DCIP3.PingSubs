@@ -8,8 +8,9 @@ from zoneinfo import ZoneInfo
 from app.core.constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
 
 DEFAULT_REMINDER_TIME = "16:00"
+DEFAULT_REMINDER_TIMEZONE = "Europe/Moscow"
 DEFAULT_REMINDER_OFFSETS = [-1, 0]
-REMINDER_TIMEZONE = ZoneInfo("Europe/Moscow")
+REMINDER_TIMEZONE = ZoneInfo(DEFAULT_REMINDER_TIMEZONE)
 
 
 def _add_month_same_day(current: date) -> date:
@@ -41,6 +42,22 @@ def normalize_time_string(value: str | None) -> str | None:
     except ValueError:
         return None
     return parsed.strftime("%H:%M")
+
+
+def normalize_timezone_name(value: str | None, default: str | None = None) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return default
+    try:
+        ZoneInfo(raw)
+    except Exception:  # noqa: BLE001
+        return default
+    return raw
+
+
+def parse_timezone(value: str | None, default: str = DEFAULT_REMINDER_TIMEZONE) -> ZoneInfo:
+    name = normalize_timezone_name(value, default) or DEFAULT_REMINDER_TIMEZONE
+    return ZoneInfo(name)
 
 
 def parse_time_string(value: str | None, default: str = DEFAULT_REMINDER_TIME) -> time:

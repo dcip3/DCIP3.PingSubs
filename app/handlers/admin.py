@@ -14,11 +14,13 @@ from app.ui.keyboards import (
     public_settings_currency_keyboard,
     public_settings_keyboard,
     public_settings_time_keyboard,
+    public_settings_timezone_keyboard,
     public_reply_keyboard,
     settings_currency_keyboard,
     settings_notifications_keyboard,
     settings_rounding_keyboard,
     settings_time_keyboard,
+    settings_timezone_keyboard,
 )
 from app.ui.helpers import (
     _build_subscription_payment_report_text,
@@ -35,6 +37,7 @@ from app.ui.helpers import (
 )
 from app.ui.states import (
     FriendForm,
+    MemberEditForm,
     PublicReminderForm,
     PublicSettingsForm,
     SettingsForm,
@@ -43,7 +46,12 @@ from app.ui.states import (
 )
 from app.core.constants import DEFAULT_CURRENCIES
 from app.core.config import Settings
-from app.core.reminders import normalize_time_string, parse_time_string
+from app.core.reminders import (
+    DEFAULT_REMINDER_TIMEZONE,
+    normalize_time_string,
+    normalize_timezone_name,
+    parse_time_string,
+)
 from app.storage.db import Database
 from app.services import CurrencyConverter, send_test_reminders
 
@@ -58,7 +66,7 @@ async def _public_settings_snapshot(
     db: Database,
     settings: Settings,
     telegram_id: int,
-) -> tuple[str, str, bool, str, str, bool]:
+) -> tuple[str, str, bool, str, str, bool, str, str, bool]:
     admin_currency_raw = await db.get_setting("target_currency")
     admin_currency = (admin_currency_raw or settings.target_currency).strip().upper() or "RUB"
     user_currency_raw = await db.get_user_setting(telegram_id, "target_currency")
@@ -69,6 +77,11 @@ async def _public_settings_snapshot(
     user_time_raw = await db.get_user_setting(telegram_id, "base_reminder_time")
     has_time_override = bool(normalize_time_string(user_time_raw))
     current_time = parse_time_string(user_time_raw, admin_time).strftime("%H:%M")
+    admin_timezone_raw = await db.get_setting("base_timezone")
+    admin_timezone = normalize_timezone_name(admin_timezone_raw, settings.base_timezone) or DEFAULT_REMINDER_TIMEZONE
+    user_timezone_raw = await db.get_user_setting(telegram_id, "timezone")
+    has_timezone_override = bool(normalize_timezone_name(user_timezone_raw))
+    current_timezone = normalize_timezone_name(user_timezone_raw, admin_timezone) or admin_timezone
     return (
         current_currency,
         admin_currency,
@@ -76,6 +89,9 @@ async def _public_settings_snapshot(
         current_time,
         admin_time,
         has_time_override,
+        current_timezone,
+        admin_timezone,
+        has_timezone_override,
     )
 
 
@@ -86,17 +102,24 @@ def _public_settings_text(
     current_time: str,
     admin_time: str,
     has_time_override: bool,
+    current_timezone: str,
+    admin_timezone: str,
+    has_timezone_override: bool,
 ) -> str:
     currency_source = "personal override" if has_currency_override else "admin default"
     time_source = "personal override" if has_time_override else "admin default"
+    timezone_source = "personal override" if has_timezone_override else "admin default"
     return (
         "Settings:\n"
         f"Base currency: {current_currency}\n"
         f"Currency default by admin: {admin_currency}\n"
         f"Currency source: {currency_source}\n\n"
-        f"Base time: {current_time} MSK\n"
-        f"Time default by admin: {admin_time} MSK\n"
-        f"Time source: {time_source}"
+        f"Base time: {current_time} ({current_timezone})\n"
+        f"Time default by admin: {admin_time} ({admin_timezone})\n"
+        f"Time source: {time_source}\n\n"
+        f"Timezone: {current_timezone}\n"
+        f"Timezone default by admin: {admin_timezone}\n"
+        f"Timezone source: {timezone_source}"
     )
 
 
@@ -111,22 +134,30 @@ async def _show_public_settings_menu(
         admin_currency,
         has_currency_override,
         current_time,
-        _admin_time,
+        admin_time,
         has_time_override,
+        current_timezone,
+        admin_timezone,
+        has_timezone_override,
     ) = await _public_settings_snapshot(db, settings, telegram_id)
     text = _public_settings_text(
         current_currency,
         admin_currency,
         has_currency_override,
         current_time,
-        _admin_time,
+        admin_time,
         has_time_override,
+        current_timezone,
+        admin_timezone,
+        has_timezone_override,
     )
     markup = public_settings_keyboard(
         current_currency,
         has_currency_override,
         current_time,
         has_time_override,
+        current_timezone,
+        has_timezone_override,
     )
     if isinstance(callback, CallbackQuery):
         if callback.message:
@@ -186,12 +217,15 @@ async def handle_public_help(message: Message, db: Database) -> None:
 
 
 @public_router.message(F.text.func(_is_cancel_text))
-async def handle_public_cancel(message: Message, state: FSMContext) -> None:
+async def handle_public_cancel(message: Message, state: FSMContext, db: Database) -> None:
+    reply_markup = public_reply_keyboard()
+    if message.from_user and await db.is_admin(message.from_user.id):
+        reply_markup = admin_reply_keyboard()
     if await state.get_state() is None:
-        await message.answer("There is no active dialog to cancel.", reply_markup=public_reply_keyboard())
+        await message.answer("There is no active dialog to cancel.", reply_markup=reply_markup)
         return
     await state.clear()
-    await message.answer("Dialog canceled.", reply_markup=public_reply_keyboard())
+    await message.answer("Dialog canceled.", reply_markup=reply_markup)
 
 
 @public_router.message(F.text == "📋 Subscriptions")
@@ -260,7 +294,7 @@ async def handle_public_settings_currency(
     if not callback.from_user:
         await callback.answer("Unable to identify your account.", show_alert=True)
         return
-    current_currency, _, _, _, _, _ = await _public_settings_snapshot(db, settings, callback.from_user.id)
+    current_currency, _, _, _, _, _, _, _, _ = await _public_settings_snapshot(db, settings, callback.from_user.id)
     if callback.message:
         await callback.message.edit_text(
             f"Choose a base currency. Current value: {current_currency}.",
@@ -321,10 +355,14 @@ async def handle_public_settings_time(
     if not callback.from_user:
         await callback.answer("Unable to identify your account.", show_alert=True)
         return
-    _, _, _, current_time, _, _ = await _public_settings_snapshot(db, settings, callback.from_user.id)
+    _, _, _, current_time, _, _, current_timezone, _, _ = await _public_settings_snapshot(
+        db,
+        settings,
+        callback.from_user.id,
+    )
     if callback.message:
         await callback.message.edit_text(
-            f"Choose a base time (MSK). Current value: {current_time}.",
+            f"Choose a base time. Current value: {current_time} ({current_timezone}).",
             reply_markup=public_settings_time_keyboard(current_time),
         )
     await callback.answer()
@@ -335,7 +373,7 @@ async def handle_public_settings_time_other(callback: CallbackQuery, state: FSMC
     await state.set_state(PublicSettingsForm.base_time)
     if callback.message:
         await callback.message.answer(
-            "Send base reminder time in HH:MM (Moscow time).",
+            "Send base reminder time in HH:MM.",
             reply_markup=dialog_keyboard(),
         )
     await callback.answer()
@@ -371,6 +409,72 @@ async def handle_public_settings_time_reset(
         return
     await db.delete_user_setting(callback.from_user.id, "base_reminder_time")
     await callback.answer("Using admin default time now.")
+    await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
+
+
+@public_router.callback_query(F.data == "public_settings:timezone")
+async def handle_public_settings_timezone(
+    callback: CallbackQuery,
+    db: Database,
+    settings: Settings,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    _, _, _, _, _, _, current_timezone, _, _ = await _public_settings_snapshot(
+        db,
+        settings,
+        callback.from_user.id,
+    )
+    if callback.message:
+        await callback.message.edit_text(
+            f"Choose timezone. Current value: {current_timezone}.",
+            reply_markup=public_settings_timezone_keyboard(current_timezone),
+        )
+    await callback.answer()
+
+
+@public_router.callback_query(F.data == "public_settings:timezone_other")
+async def handle_public_settings_timezone_other(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(PublicSettingsForm.base_timezone)
+    if callback.message:
+        await callback.message.answer(
+            "Send timezone in IANA format, for example Europe/Moscow or America/New_York.",
+            reply_markup=dialog_keyboard(),
+        )
+    await callback.answer()
+
+
+@public_router.callback_query(F.data.startswith("public_settings_timezone:"))
+async def handle_public_settings_timezone_select(
+    callback: CallbackQuery,
+    db: Database,
+    settings: Settings,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    raw_value = callback.data.split(":", 1)[1].strip()
+    normalized = normalize_timezone_name(raw_value)
+    if normalized is None:
+        await callback.answer("Unsupported timezone.", show_alert=True)
+        return
+    await db.set_user_setting(callback.from_user.id, "timezone", normalized)
+    await callback.answer(f"Timezone set to {normalized}")
+    await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
+
+
+@public_router.callback_query(F.data == "public_settings:timezone_reset")
+async def handle_public_settings_timezone_reset(
+    callback: CallbackQuery,
+    db: Database,
+    settings: Settings,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    await db.delete_user_setting(callback.from_user.id, "timezone")
+    await callback.answer("Using admin default timezone now.")
     await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
 
 
@@ -444,12 +548,16 @@ async def handle_public_subscription_reminder_time(
             settings.base_reminder_time,
         )
     ).strftime("%H:%M")
+    user_timezone = normalize_timezone_name(
+        await db.get_effective_user_timezone(callback.from_user.id, settings.base_timezone),
+        settings.base_timezone,
+    ) or settings.base_timezone
     effective_time = user_override_time or subscription_time_raw or user_base_time
     await state.set_state(PublicReminderForm.reminder_time)
     await state.update_data(subscription_id=callback_data.subscription_id)
     if callback.message:
         await callback.message.answer(
-            "Send your reminder time for this subscription in HH:MM (Moscow time).\n"
+            f"Send your reminder time for this subscription in HH:MM (timezone: {user_timezone}).\n"
             "Send `default` to use your Base time from ⚙️ Settings.\n"
             f"Current effective value: {effective_time}.",
             reply_markup=dialog_keyboard(),
@@ -489,8 +597,12 @@ async def handle_public_reminder_time_input(
                 settings.base_reminder_time,
             )
         ).strftime("%H:%M")
+        user_timezone = normalize_timezone_name(
+            await db.get_effective_user_timezone(message.from_user.id, settings.base_timezone),
+            settings.base_timezone,
+        ) or settings.base_timezone
         await message.answer(
-            f"Personal override cleared. Using base time {effective_time}.",
+            f"Personal override cleared. Using base time {effective_time} ({user_timezone}).",
             reply_markup=public_reply_keyboard(),
         )
         return
@@ -556,6 +668,28 @@ async def handle_public_settings_time_input(
     await _show_public_settings_menu(message, db, settings, message.from_user.id)
 
 
+@public_router.message(PublicSettingsForm.base_timezone)
+async def handle_public_settings_timezone_input(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    settings: Settings,
+) -> None:
+    if not message.from_user:
+        await state.clear()
+        await message.answer("Unable to identify your account.")
+        return
+    raw_value = (message.text or "").strip()
+    normalized = normalize_timezone_name(raw_value)
+    if normalized is None:
+        await message.answer("Unsupported timezone. Example: Europe/Moscow.")
+        return
+    await db.set_user_setting(message.from_user.id, "timezone", normalized)
+    await state.clear()
+    await message.answer("Timezone updated.", reply_markup=public_reply_keyboard())
+    await _show_public_settings_menu(message, db, settings, message.from_user.id)
+
+
 async def send_admin_help(message: Message) -> None:
     text = (
         "ℹ️ PingSubs helps you manage shared subscriptions, users, and payment reminders.\n\n"
@@ -585,13 +719,20 @@ async def handle_menu_close(callback: CallbackQuery) -> None:
 
 
 @admin_router.message(F.text.func(_is_cancel_text))
-async def handle_cancel(message: Message, state: FSMContext) -> None:
-    if await state.get_state() is None:
+async def handle_cancel(message: Message, state: FSMContext, db: Database) -> None:
+    current_state = await state.get_state()
+    if current_state is None:
         await message.answer("There is no active dialog to cancel.", reply_markup=admin_reply_keyboard())
         return
 
     await state.clear()
     await message.answer("Dialog canceled.", reply_markup=admin_reply_keyboard())
+    if current_state in {
+        FriendForm.telegram_id.state,
+        FriendForm.full_name.state,
+        MemberEditForm.full_name.state,
+    }:
+        await send_member_list(message, db)
 
 
 
@@ -661,7 +802,8 @@ async def _settings_menu_text(settings: Settings) -> str:
     return (
         "Settings:\n"
         f"Base currency: {settings.target_currency}\n"
-        f"Base time: {settings.base_reminder_time} MSK\n"
+        f"Base time: {settings.base_reminder_time}\n"
+        f"Timezone: {settings.base_timezone}\n"
         f"Rounding: {_rounding_label(settings.currency_rounding)}"
     )
 
@@ -713,7 +855,7 @@ async def handle_settings_currency_other(callback: CallbackQuery, state: FSMCont
 @admin_router.callback_query(F.data == "settings:time")
 async def handle_settings_time(callback: CallbackQuery, settings: Settings) -> None:
     text = (
-        "Choose a base reminder time (Moscow time):\n"
+        f"Choose a base reminder time (timezone: {settings.base_timezone}):\n"
         f"Current value: {settings.base_reminder_time}."
     )
     if callback.message:
@@ -729,10 +871,56 @@ async def handle_settings_time_other(callback: CallbackQuery, state: FSMContext)
     await state.set_state(SettingsForm.base_time)
     if callback.message:
         await callback.message.answer(
-            "Send the base reminder time in HH:MM (Moscow time).",
+            "Send the base reminder time in HH:MM.",
             reply_markup=dialog_keyboard(),
         )
     await callback.answer()
+
+
+@admin_router.callback_query(F.data == "settings:timezone")
+async def handle_settings_timezone(callback: CallbackQuery, settings: Settings) -> None:
+    text = (
+        "Choose base timezone:\n"
+        f"Current value: {settings.base_timezone}."
+    )
+    if callback.message:
+        await callback.message.edit_text(
+            text,
+            reply_markup=settings_timezone_keyboard(settings.base_timezone),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "settings:timezone_other")
+async def handle_settings_timezone_other(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingsForm.base_timezone)
+    if callback.message:
+        await callback.message.answer(
+            "Send timezone in IANA format, for example Europe/Moscow or America/New_York.",
+            reply_markup=dialog_keyboard(),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("settings_timezone:"))
+async def handle_settings_timezone_select(
+    callback: CallbackQuery,
+    settings: Settings,
+    db: Database,
+) -> None:
+    raw_value = callback.data.split(":", 1)[1].strip()
+    normalized = normalize_timezone_name(raw_value)
+    if normalized is None:
+        await callback.answer("Unsupported timezone.", show_alert=True)
+        return
+    settings.base_timezone = normalized
+    await db.set_setting("base_timezone", normalized)
+    await callback.answer(f"Timezone set to {normalized}")
+    if callback.message:
+        await callback.message.edit_text(
+            await _settings_menu_text(settings),
+            reply_markup=admin_settings_keyboard(),
+        )
 
 
 @admin_router.callback_query(F.data.startswith("settings_time:"))
@@ -953,5 +1141,26 @@ async def handle_settings_time_input(
     await state.clear()
     await message.answer(
         f"Base time set to {normalized}.",
+        reply_markup=admin_reply_keyboard(),
+    )
+
+
+@admin_router.message(SettingsForm.base_timezone)
+async def handle_settings_timezone_input(
+    message: Message,
+    state: FSMContext,
+    settings: Settings,
+    db: Database,
+) -> None:
+    raw_value = (message.text or "").strip()
+    normalized = normalize_timezone_name(raw_value)
+    if normalized is None:
+        await message.answer("Unsupported timezone. Example: Europe/Moscow.")
+        return
+    settings.base_timezone = normalized
+    await db.set_setting("base_timezone", normalized)
+    await state.clear()
+    await message.answer(
+        f"Timezone set to {normalized}.",
         reply_markup=admin_reply_keyboard(),
     )

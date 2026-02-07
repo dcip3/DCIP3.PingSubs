@@ -13,7 +13,7 @@ from aiogram.types import BotCommand
 from app.handlers import admin_router, public_router
 from app.infrastructure import AdminFilter, SettingsMiddleware
 from app.core.config import Settings
-from app.core.reminders import parse_time_string
+from app.core.reminders import normalize_timezone_name, parse_time_string
 from app.storage.db import Database
 from app.services import CurrencyConverter, reminder_worker
 
@@ -46,6 +46,15 @@ async def main() -> None:
             await db.set_setting("base_reminder_time", settings.base_reminder_time)
     else:
         await db.set_setting("base_reminder_time", settings.base_reminder_time)
+    stored_timezone = await db.get_setting("base_timezone")
+    if stored_timezone:
+        normalized_timezone = normalize_timezone_name(stored_timezone, settings.base_timezone)
+        if normalized_timezone:
+            settings.base_timezone = normalized_timezone
+            if normalized_timezone != stored_timezone:
+                await db.set_setting("base_timezone", normalized_timezone)
+    else:
+        await db.set_setting("base_timezone", settings.base_timezone)
     converter = CurrencyConverter(settings.target_currency)
 
     bot = Bot(

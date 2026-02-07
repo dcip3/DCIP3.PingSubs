@@ -584,7 +584,8 @@ async def handle_subscription_reminder_time_callback(
     else:
         current_label = f"default ({base_time})"
     prompt = (
-        "Send the reminder time in HH:MM (Moscow time).\n"
+        "Send the reminder time in HH:MM.\n"
+        "This clock time is applied in each recipient's timezone.\n"
         "Send `default` to use Base time from ⚙️ Settings.\n"
         f"Current value: {escape_html(current_label)}."
     )

@@ -16,6 +16,20 @@ from app.ui.states import (
     TestSendAction,
 )
 
+COMMON_TIMEZONES = (
+    "Europe/Moscow",
+    "Europe/London",
+    "Europe/Berlin",
+    "Asia/Dubai",
+    "Asia/Almaty",
+    "Asia/Tokyo",
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+    "UTC",
+)
+
 
 def admin_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -388,6 +402,7 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💱 Base currency", callback_data="settings:currency")
     builder.button(text="⏰ Base time", callback_data="settings:time")
+    builder.button(text="🌍 Timezone", callback_data="settings:timezone")
     builder.button(text="🔢 Rounding", callback_data="settings:rounding")
     builder.button(text="🔔 Notifications", callback_data="settings:notifications")
     builder.button(text="🧪 Tests", callback_data="settings:tests")
@@ -426,19 +441,38 @@ def settings_time_keyboard(current_time: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def settings_timezone_keyboard(current_timezone: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for zone in COMMON_TIMEZONES:
+        prefix = "✅ " if zone == current_timezone else ""
+        builder.button(text=f"{prefix}{zone}", callback_data=f"settings_timezone:{zone}")
+    builder.button(text="Other", callback_data="settings:timezone_other")
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    return builder.as_markup()
+
+
 def public_settings_keyboard(
     current_currency: str,
     has_currency_override: bool,
     current_time: str,
     has_time_override: bool,
+    current_timezone: str,
+    has_timezone_override: bool,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text=f"💱 Base currency: {current_currency}", callback_data="public_settings:currency")
     builder.button(text=f"⏰ Base time: {current_time}", callback_data="public_settings:time")
+    builder.button(text=f"🌍 Timezone: {current_timezone}", callback_data="public_settings:timezone")
     if has_currency_override:
         builder.button(text="↩️ Currency: use admin default", callback_data="public_settings:currency_reset")
     if has_time_override:
         builder.button(text="↩️ Time: use admin default", callback_data="public_settings:time_reset")
+    if has_timezone_override:
+        builder.button(text="↩️ Timezone: use admin default", callback_data="public_settings:timezone_reset")
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
@@ -472,6 +506,20 @@ def public_settings_time_keyboard(current_time: str) -> InlineKeyboardMarkup:
         builder.button(text=f"{prefix}{time_value}", callback_data=f"public_settings_time:{time_value}")
     builder.button(text="Other", callback_data="public_settings:time_other")
     builder.adjust(2, 2, 1)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    return builder.as_markup()
+
+
+def public_settings_timezone_keyboard(current_timezone: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for zone in COMMON_TIMEZONES:
+        prefix = "✅ " if zone == current_timezone else ""
+        builder.button(text=f"{prefix}{zone}", callback_data=f"public_settings_timezone:{zone}")
+    builder.button(text="Other", callback_data="public_settings:timezone_other")
+    builder.adjust(1)
     builder.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),

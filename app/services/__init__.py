@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Dict, Optional
 
@@ -16,12 +16,14 @@ from app.ui.keyboards import (
     build_test_payment_confirmation_keyboard,
 )
 from app.core.reminders import (
-    REMINDER_TIMEZONE,
+    DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
     format_due_date,
     normalize_time_string,
+    normalize_timezone_name,
     parse_offsets,
     parse_time_string,
+    parse_timezone,
 )
 from app.ui.text import escape_html
 from app.storage.db import Database
@@ -358,8 +360,18 @@ async def _run_reminder_pass(
     record_manual_suppressions: bool = False,
 ) -> int:
     logger = logging.getLogger("reminder_runner")
-    today = now.date()
-    current_time = now.time()
+    if now.tzinfo is None:
+        now_utc = now.replace(tzinfo=timezone.utc)
+    else:
+        now_utc = now.astimezone(timezone.utc)
+    admin_timezone_name = normalize_timezone_name(
+        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
+        DEFAULT_REMINDER_TIMEZONE,
+    ) or DEFAULT_REMINDER_TIMEZONE
+    admin_timezone = parse_timezone(admin_timezone_name)
+    admin_now = now_utc.astimezone(admin_timezone)
+    today = admin_now.date()
+    current_time = admin_now.time()
     notify_admin_reminders = await db.get_setting_bool("notify_admin_reminders", True)
     admin_ids: set[int] = set(await db.list_admin_ids()) if notify_admin_reminders else set()
     admin_base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
@@ -393,176 +405,240 @@ async def _run_reminder_pass(
             for row in payment_rows
             if row.get("paid_by_telegram_id") is not None
         }
+        if participants:
+            target_participants = participants
+            if target_telegram_id is not None:
+                target_participants = [
+                    person for person in participants
+                    if person.get("telegram_id") == target_telegram_id
+                ]
+            if not target_participants:
+                continue
 
-        async def dispatch(context_text: str, due_date_value: date, event_offset: int) -> None:
-            nonlocal sent_count
-            admin_note: Optional[str] = None
-            has_queued_users = False
+            queued_events_for_admin: set[tuple[date, int]] = set()
             user_base_time_cache: dict[int, str] = {}
             user_subscription_time_cache: dict[int, Optional[str]] = {}
+            user_timezone_cache: dict[int, str] = {}
+            user_time_now_cache: dict[int, tuple[date, time]] = {}
+            user_suppressed_cache: dict[tuple[str, date], set[int]] = {}
             user_currency_cache: dict[int, str] = {}
             converted_share_cache: dict[str, Optional[float]] = {}
-            if participants:
-                target_participants = participants
-                if target_telegram_id is not None:
-                    target_participants = [
-                        person for person in participants
-                        if person.get("telegram_id") == target_telegram_id
-                    ]
-                    if not target_participants:
-                        return
-                suppressed_ids: set[int] = set()
-                if register_reminders:
-                    suppressed_ids = set(
-                        await db.list_reminder_suppressed_users(
-                            int(item["id"]),
-                            due_date_value,
-                            today,
-                        )
+            share_base = calculate_share_base(item, participants)
+            share_amount = item["amount"] / share_base
+            source_currency = raw_currency.upper()
+            for person in target_participants:
+                telegram_id = int(person["telegram_id"])
+                if telegram_id not in user_subscription_time_cache:
+                    raw_user_sub_time = await db.get_user_subscription_setting(
+                        telegram_id,
+                        int(item["id"]),
+                        "reminder_time",
                     )
-                due_key = due_date_value.isoformat()
-                unpaid = [
-                    person for person in target_participants
-                    if (due_key, person["telegram_id"]) not in paid_map
-                    and person["telegram_id"] not in suppressed_ids
-                ]
-                if not unpaid:
-                    return
-                share_base = calculate_share_base(item, participants)
-                share_amount = item["amount"] / share_base
-                source_currency = raw_currency.upper()
-                status_text, due_date_text = _format_status_and_date(due_date_value, today)
-                for person in unpaid:
-                    telegram_id = int(person["telegram_id"])
-                    if telegram_id not in user_subscription_time_cache:
-                        raw_user_sub_time = await db.get_user_subscription_setting(
-                            telegram_id,
-                            int(item["id"]),
-                            "reminder_time",
-                        )
-                        user_subscription_time_cache[telegram_id] = normalize_time_string(raw_user_sub_time)
+                    user_subscription_time_cache[telegram_id] = normalize_time_string(raw_user_sub_time)
 
-                    effective_time = user_subscription_time_cache[telegram_id]
-                    if effective_time is None:
-                        if subscription_override_time:
-                            effective_time = subscription_override_time
-                        else:
-                            base_time = user_base_time_cache.get(telegram_id)
-                            if base_time is None:
-                                base_time = parse_time_string(
-                                    await db.get_effective_user_base_reminder_time(
-                                        telegram_id,
-                                        admin_base_time,
-                                    ),
+                effective_time = user_subscription_time_cache[telegram_id]
+                if effective_time is None:
+                    if subscription_override_time:
+                        effective_time = subscription_override_time
+                    else:
+                        base_time = user_base_time_cache.get(telegram_id)
+                        if base_time is None:
+                            base_time = parse_time_string(
+                                await db.get_effective_user_base_reminder_time(
+                                    telegram_id,
                                     admin_base_time,
-                                ).strftime("%H:%M")
-                                user_base_time_cache[telegram_id] = base_time
-                            effective_time = base_time
+                                ),
+                                admin_base_time,
+                            ).strftime("%H:%M")
+                            user_base_time_cache[telegram_id] = base_time
+                        effective_time = base_time
 
-                    if enforce_time and current_time < parse_time_string(effective_time, admin_base_time):
+                effective_timezone = user_timezone_cache.get(telegram_id)
+                if effective_timezone is None:
+                    raw_user_timezone = await db.get_effective_user_timezone(
+                        telegram_id,
+                        admin_timezone_name,
+                    )
+                    effective_timezone = normalize_timezone_name(
+                        raw_user_timezone,
+                        admin_timezone_name,
+                    ) or admin_timezone_name
+                    user_timezone_cache[telegram_id] = effective_timezone
+                local_today, local_current_time = user_time_now_cache.get(telegram_id, (today, current_time))
+                if telegram_id not in user_time_now_cache:
+                    local_now = now_utc.astimezone(parse_timezone(effective_timezone))
+                    local_today, local_current_time = local_now.date(), local_now.time()
+                    user_time_now_cache[telegram_id] = (local_today, local_current_time)
+
+                if enforce_time and local_current_time < parse_time_string(effective_time, admin_base_time):
+                    continue
+
+                target_currency = user_currency_cache.get(telegram_id)
+                if target_currency is None:
+                    target_currency = await db.get_effective_target_currency(
+                        telegram_id,
+                        converter.target_currency,
+                    )
+                    user_currency_cache[telegram_id] = target_currency
+
+                converted_base = converted_share_cache.get(target_currency)
+                if target_currency not in converted_share_cache:
+                    if source_currency == target_currency:
+                        converted_base = None
+                    else:
+                        try:
+                            converted_base = await converter.convert_to(
+                                share_amount,
+                                source_currency,
+                                target_currency,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "Conversion failed for subscription %s and currency %s: %s",
+                                item["id"],
+                                target_currency,
+                                exc,
+                            )
+                            converted_base = None
+                    converted_share_cache[target_currency] = converted_base
+
+                weight = int(person.get("share_weight") or 1)
+                share_text, amount_text, share_amount_value, converted_value, converted_display = _build_share_line(
+                    share_amount=share_amount,
+                    weight=weight,
+                    share_base=share_base,
+                    safe_currency=raw_currency,
+                    converted_base=converted_base,
+                    rounding_mode=rounding_mode,
+                    target_currency=target_currency,
+                )
+                base_amount_value: Optional[float] = converted_value
+                if base_amount_value is None and source_currency == target_currency:
+                    base_amount_value = float(share_amount_value)
+
+                for cycle_due in open_cycles:
+                    due_key = cycle_due.isoformat()
+                    if (due_key, telegram_id) in paid_map:
                         continue
 
                     if register_reminders:
-                        if not await db.register_user_reminder_if_new(
+                        suppression_key = (due_key, local_today)
+                        suppressed_ids = user_suppressed_cache.get(suppression_key)
+                        if suppressed_ids is None:
+                            suppressed_ids = set(
+                                await db.list_reminder_suppressed_users(
+                                    int(item["id"]),
+                                    cycle_due,
+                                    local_today,
+                                )
+                            )
+                            user_suppressed_cache[suppression_key] = suppressed_ids
+                        if telegram_id in suppressed_ids:
+                            continue
+
+                    event_offsets = {
+                        offset
+                        for offset in offsets
+                        if cycle_due + timedelta(days=offset) == local_today
+                    }
+                    if item.get("remind_after_due") and local_today > cycle_due:
+                        event_offsets.add((local_today - cycle_due).days)
+                    if not event_offsets:
+                        continue
+
+                    status_text, due_date_text = _format_status_and_date(cycle_due, local_today)
+                    for event_offset in sorted(event_offsets):
+                        if register_reminders:
+                            if not await db.register_user_reminder_if_new(
+                                int(item["id"]),
+                                cycle_due,
+                                event_offset,
+                                telegram_id,
+                            ):
+                                continue
+
+                        key = (telegram_id, effective_time)
+                        pending.setdefault(key, []).append(
+                            {
+                                "person_name": str(person["full_name"]),
+                                "subscription_id": int(item["id"]),
+                                "due_date": cycle_due,
+                                "subscription_name": raw_name,
+                                "subscription_label": str(item.get("name", "")),
+                                "status_text": status_text,
+                                "due_date_text": due_date_text,
+                                "share_text": share_text,
+                                "amount_text": amount_text,
+                                "converted_text": converted_display,
+                                "comment": raw_comment,
+                                "share_amount_value": share_amount_value,
+                                "share_currency": str(item["currency"]),
+                                "converted_value": converted_value,
+                                "base_amount_value": base_amount_value,
+                                "target_currency": target_currency,
+                                "sent_on": local_today,
+                            }
+                        )
+                        queued_events_for_admin.add((cycle_due, event_offset))
+
+            if admin_ids and queued_events_for_admin:
+                admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
+                for due_date_value, event_offset in sorted(queued_events_for_admin):
+                    if register_reminders:
+                        if not await db.register_reminder_if_new(
                             int(item["id"]),
                             due_date_value,
                             event_offset,
-                            telegram_id,
                         ):
                             continue
-
-                    target_currency = user_currency_cache.get(telegram_id)
-                    if target_currency is None:
-                        target_currency = await db.get_effective_target_currency(
-                            telegram_id,
-                            converter.target_currency,
-                        )
-                        user_currency_cache[telegram_id] = target_currency
-
-                    converted_base = converted_share_cache.get(target_currency)
-                    if target_currency not in converted_share_cache:
-                        if source_currency == target_currency:
-                            converted_base = None
-                        else:
-                            try:
-                                converted_base = await converter.convert_to(
-                                    share_amount,
-                                    source_currency,
-                                    target_currency,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "Conversion failed for subscription %s and currency %s: %s",
-                                    item["id"],
-                                    target_currency,
-                                    exc,
-                                )
-                                converted_base = None
-                        converted_share_cache[target_currency] = converted_base
-
-                    weight = int(person.get("share_weight") or 1)
-                    share_text, amount_text, share_amount_value, converted_value, converted_display = _build_share_line(
-                        share_amount=share_amount,
-                        weight=weight,
-                        share_base=share_base,
-                        safe_currency=raw_currency,
-                        converted_base=converted_base,
-                        rounding_mode=rounding_mode,
-                        target_currency=target_currency,
-                    )
-                    base_amount_value: Optional[float] = converted_value
-                    if base_amount_value is None and source_currency == target_currency:
-                        base_amount_value = float(share_amount_value)
-                    key = (telegram_id, effective_time)
-                    pending.setdefault(key, []).append(
-                        {
-                            "person_name": str(person["full_name"]),
-                            "subscription_id": int(item["id"]),
-                            "due_date": due_date_value,
-                            "subscription_name": raw_name,
-                            "subscription_label": str(item.get("name", "")),
-                            "status_text": status_text,
-                            "due_date_text": due_date_text,
-                            "share_text": share_text,
-                            "amount_text": amount_text,
-                            "converted_text": converted_display,
-                            "comment": raw_comment,
-                            "share_amount_value": share_amount_value,
-                            "share_currency": str(item["currency"]),
-                            "converted_value": converted_value,
-                            "base_amount_value": base_amount_value,
-                            "target_currency": target_currency,
-                        }
-                    )
-                    has_queued_users = True
-
-                if admin_ids and has_queued_users:
-                    admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
+                    context_text = _format_context_text(due_date_value, today)
                     admin_note = (
                         f"🔔 {safe_name}\n"
                         f"{context_text}\n"
                         f"Total: {item['amount']:.2f} {safe_currency} | Users: {len(participants)}"
                         f"{admin_comment}"
                     )
-            elif admin_ids:
-                dispatch_time = subscription_override_time or admin_base_time
-                if enforce_time and current_time < parse_time_string(dispatch_time, admin_base_time):
-                    return
-                admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
+                    for admin_id in admin_ids:
+                        if admin_id in participant_ids:
+                            continue
+                        sent = await _send_message_with_retry(
+                            bot,
+                            admin_id,
+                            admin_note,
+                            reply_markup=None,
+                            logger=logger,
+                        )
+                        if sent is not None:
+                            sent_count += 1
+            continue
+
+        if not admin_ids:
+            continue
+
+        dispatch_time = subscription_override_time or admin_base_time
+        if enforce_time and current_time < parse_time_string(dispatch_time, admin_base_time):
+            continue
+        admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
+        for cycle_due in open_cycles:
+            event_offsets = {
+                offset
+                for offset in offsets
+                if cycle_due + timedelta(days=offset) == today
+            }
+            if item.get("remind_after_due") and today > cycle_due:
+                event_offsets.add((today - cycle_due).days)
+            for event_offset in sorted(event_offsets):
+                if register_reminders:
+                    if not await db.register_reminder_if_new(int(item["id"]), cycle_due, event_offset):
+                        continue
+                context_text = _format_context_text(cycle_due, today)
                 admin_note = (
                     f"🔔 {safe_name}\n"
                     f"{context_text}\n"
                     "No users are assigned yet. Add them via 📋 Subscriptions."
                     f"{admin_comment}"
                 )
-
-            if admin_note and admin_ids:
-                if register_reminders:
-                    if not await db.register_reminder_if_new(int(item["id"]), due_date_value, event_offset):
-                        return
                 for admin_id in admin_ids:
-                    if admin_id in participant_ids:
-                        continue
                     sent = await _send_message_with_retry(
                         bot,
                         admin_id,
@@ -572,20 +648,6 @@ async def _run_reminder_pass(
                     )
                     if sent is not None:
                         sent_count += 1
-
-        for cycle_due in open_cycles:
-            for offset in offsets:
-                target_date = cycle_due + timedelta(days=offset)
-                if target_date != today:
-                    continue
-
-                context = _format_context_text(cycle_due, today)
-                await dispatch(context, cycle_due, offset)
-
-            if item.get("remind_after_due") and today > cycle_due:
-                overdue_offset = (today - cycle_due).days
-                context = _format_context_text(cycle_due, today)
-                await dispatch(context, cycle_due, overdue_offset)
 
     for (telegram_id, _reminder_time), items in pending.items():
         if not items:
@@ -633,7 +695,7 @@ async def _run_reminder_pass(
                         int(item["subscription_id"]),
                         item["due_date"],
                         telegram_id,
-                        today,
+                        item["sent_on"],
                     )
             continue
 
@@ -672,7 +734,7 @@ async def _run_reminder_pass(
                         int(item["subscription_id"]),
                         item["due_date"],
                         telegram_id,
-                        today,
+                        item["sent_on"],
                     )
 
     return sent_count
@@ -687,7 +749,7 @@ async def send_reminders_now(
     target_telegram_id: Optional[int] = None,
     suppress_auto_today: bool = True,
 ) -> int:
-    now = datetime.now(REMINDER_TIMEZONE)
+    now = datetime.now(timezone.utc)
     return await _run_reminder_pass(
         bot,
         db,
@@ -734,7 +796,11 @@ async def send_test_reminders(
     raw_currency = str(subscription.get("currency", ""))
     raw_comment = str(subscription.get("comment", "")).strip()
     source_currency = raw_currency.upper()
-    today = datetime.now(REMINDER_TIMEZONE).date()
+    admin_timezone_name = normalize_timezone_name(
+        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
+        DEFAULT_REMINDER_TIMEZONE,
+    ) or DEFAULT_REMINDER_TIMEZONE
+    today = datetime.now(parse_timezone(admin_timezone_name)).date()
     share_base = calculate_share_base(subscription, participants)
     share_amount = subscription["amount"] / share_base
 
@@ -816,7 +882,7 @@ async def reminder_worker(
                 db,
                 converter,
                 subscription_id=None,
-                now=datetime.now(REMINDER_TIMEZONE),
+                now=datetime.now(timezone.utc),
                 rounding_mode=rounding_mode,
                 enforce_time=True,
                 register_reminders=True,

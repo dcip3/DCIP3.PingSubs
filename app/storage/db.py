@@ -734,6 +734,25 @@ class Database:
             return user_value.strip()
         return await self.get_effective_base_reminder_time(default_time)
 
+    async def get_effective_base_timezone(
+        self,
+        default_timezone: str = "Europe/Moscow",
+    ) -> str:
+        raw_value = await self.get_setting("base_timezone")
+        if raw_value:
+            return raw_value.strip()
+        return default_timezone.strip() or "Europe/Moscow"
+
+    async def get_effective_user_timezone(
+        self,
+        telegram_id: int,
+        default_timezone: str = "Europe/Moscow",
+    ) -> str:
+        user_value = await self.get_user_setting(telegram_id, "timezone")
+        if user_value:
+            return user_value.strip()
+        return await self.get_effective_base_timezone(default_timezone)
+
     async def set_setting(self, key: str, value: str) -> None:
         assert self._conn is not None, "Database is not connected"
         await self._conn.execute(

@@ -42,11 +42,14 @@ from app.ui.keyboards import (
 )
 from app.ui.states import Responder, SubscriptionAction
 from app.core.reminders import (
+    DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
     format_offsets_for_display,
     normalize_time_string,
+    normalize_timezone_name,
     parse_offsets,
     parse_time_string,
+    parse_timezone,
 )
 from app.ui.text import escape_html, format_display_name
 
@@ -235,7 +238,6 @@ async def send_public_subscription_detail(
         return
 
     participants = await db.list_subscription_participants(subscription_id)
-    today = datetime.today().date()
     open_cycles = await db.list_open_cycles(subscription_id)
     unpaid_overdue = []
     paid_due_map = set()
@@ -244,6 +246,18 @@ async def send_public_subscription_detail(
         user_id = target.from_user.id
     elif isinstance(target, Message) and target.from_user:
         user_id = target.from_user.id
+
+    admin_timezone = normalize_timezone_name(
+        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
+        DEFAULT_REMINDER_TIMEZONE,
+    ) or DEFAULT_REMINDER_TIMEZONE
+    reminder_timezone = admin_timezone
+    if user_id is not None:
+        reminder_timezone = normalize_timezone_name(
+            await db.get_effective_user_timezone(user_id, admin_timezone),
+            admin_timezone,
+        ) or admin_timezone
+    today = datetime.now(parse_timezone(reminder_timezone)).date()
 
     if user_id is not None:
         payments_for_open = await db.list_payments_for_cycles(subscription_id, open_cycles)
@@ -337,7 +351,7 @@ async def send_public_subscription_detail(
         f"       {next_charge}\n"
         f"       {cadence}\n"
         "🔔 <b>Reminders</b>:\n"
-        f"       {reminder_time} MSK ({reminder_source})\n"
+        f"       {reminder_time} ({reminder_timezone}, {reminder_source})\n"
         f"       Days: {offsets_text}\n"
         f"       Post-due: {overdue_text}\n"
         f"👥 <b>Users</b> ({len(participants)}):\n"
@@ -545,6 +559,7 @@ def _build_subscription_detail_text(
     subscription: Dict[str, object],
     participants: Sequence[Dict[str, object]],
     base_time: str,
+    base_timezone: str,
 ) -> str:
     share_base, share_text = _share_details(subscription, participants)
     per_person = subscription["amount"] / share_base
@@ -572,9 +587,9 @@ def _build_subscription_detail_text(
 
     override_time = normalize_time_string(subscription.get("reminder_time"))
     if override_time:
-        reminder_time = f"{override_time} MSK (subscription override)"
+        reminder_time = f"{override_time} ({base_timezone}, subscription override)"
     else:
-        reminder_time = f"{base_time} MSK (admin base time)"
+        reminder_time = f"{base_time} ({base_timezone}, admin base time)"
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
 
@@ -604,7 +619,11 @@ async def send_subscription_detail(target: Responder, db: Database, subscription
 
     participants = await db.list_subscription_participants(subscription_id)
     base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
-    text = _build_subscription_detail_text(subscription, participants, base_time)
+    base_timezone = normalize_timezone_name(
+        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
+        DEFAULT_REMINDER_TIMEZONE,
+    ) or DEFAULT_REMINDER_TIMEZONE
+    text = _build_subscription_detail_text(subscription, participants, base_time, base_timezone)
 
     await respond_with_markup(
         target,
@@ -682,11 +701,15 @@ async def send_reminder_settings(target: Responder, db: Database, subscription_i
         return
 
     base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
+    base_timezone = normalize_timezone_name(
+        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
+        DEFAULT_REMINDER_TIMEZONE,
+    ) or DEFAULT_REMINDER_TIMEZONE
     override_time = normalize_time_string(subscription.get("reminder_time"))
     if override_time:
-        reminder_line = f"{override_time} MSK (subscription override)"
+        reminder_line = f"{override_time} ({base_timezone}, subscription override)"
     else:
-        reminder_line = f"default ({base_time} MSK)"
+        reminder_line = f"default ({base_time} {base_timezone})"
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     text = (
