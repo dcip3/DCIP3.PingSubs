@@ -204,8 +204,8 @@ async def send_subscription_list(target: Responder, db: Database) -> None:
         lines.extend(
             [
                 f"{idx}. <code>{escape_html(sub['name'])}</code>",
-                f"💰 Amount: <code>{sub['amount']:.2f} {escape_html(sub['currency'])}</code>",
-                f"👥 Users: <code>{escape_html(audience_text)}</code>",
+                f"Amount: <code>{sub['amount']:.2f} {escape_html(sub['currency'])}</code>",
+                f"Users: <code>{escape_html(audience_text)}</code>",
                 "",
             ]
         )
@@ -231,8 +231,8 @@ async def send_user_subscription_list(message: Message, db: Database, telegram_i
         lines.extend(
             [
                 f"{idx}. <code>{escape_html(sub['name'])}</code>",
-                f"💰 Amount: <code>{sub['amount']:.2f} {escape_html(sub['currency'])}</code>",
-                f"📅 Next charge: <code>{escape_html(due)}</code>",
+                f"Amount: <code>{sub['amount']:.2f} {escape_html(sub['currency'])}</code>",
+                f"Next charge: <code>{escape_html(due)}</code>",
                 "",
             ]
         )
@@ -985,20 +985,20 @@ async def require_edit_subscription_id(message: Message, state: FSMContext) -> O
 
 def currency_prompt() -> Tuple[str, InlineKeyboardMarkup]:
     return (
-        "Currency:\nChoose a currency or type your own (3 letters).",
+        "💱 Currency:\n💱 Choose a currency or type your own (3 letters).",
         build_currency_keyboard(DEFAULT_CURRENCIES),
     )
 
 
 def period_prompt() -> Tuple[str, InlineKeyboardMarkup]:
     return (
-        "Period:\nRepeat period in days (default 30). Choose a preset or send your own number.",
+        "🔁 Period:\n🔁 Repeat period in days (default 30). Choose a preset or send your own number.",
         build_period_keyboard(),
     )
 
 
 def share_limit_prompt() -> Tuple[str, InlineKeyboardMarkup]:
     return (
-        "Split Limit:\nSend the number of users who split this subscription or tap “Split across all”.",
+        "➗ Split limit:\n➗ Send the number of users who split this subscription or tap “Split across all”.",
         build_share_limit_keyboard(),
     )

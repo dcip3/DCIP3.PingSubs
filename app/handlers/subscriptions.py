@@ -400,9 +400,10 @@ async def handle_subscription_rename_callback(
     if not subscription:
         return
     prompt = (
-        "Subscription Name:\n"
+        "✏️ Rename:\n"
+        "✏️ Send new subscription name.\n"
+        "\n"
         f"🏷️ Current: <code>{escape_html(subscription['name'])}</code>\n"
-        "Send new value:"
     )
     await start_subscription_edit_flow(
         callback,
@@ -435,9 +436,10 @@ async def handle_subscription_amount_callback(
     if not subscription:
         return
     prompt = (
-        "Amount:\n"
+        "💰 Amount:\n"
+        "💰 Send new value (example: <code>149.99</code>).\n"
+        "\n"
         f"🏷️ Current: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        "Send new value (example: <code>149.99</code>):"
     )
     await start_subscription_edit_flow(
         callback,
@@ -460,9 +462,10 @@ async def handle_subscription_currency_callback(
         return
     _, prompt_markup = currency_prompt()
     prompt_text = (
-        "Currency:\n"
+        "💱 Currency:\n"
+        "💱 Choose a value or send your own (3 letters).\n"
+        "\n"
         f"🏷️ Current: <code>{escape_html(subscription['currency'])}</code>\n"
-        "Choose a value or send your own (3 letters)."
     )
     await start_subscription_edit_flow(
         callback,
@@ -489,9 +492,10 @@ async def handle_subscription_due_callback(
     except (KeyError, ValueError):
         current = subscription.get("next_charge_at", "unknown")
     prompt = (
-        "Next Charge Date:\n"
+        "📅 Next charge:\n"
+        "📅 Send new date in <code>DD.MM.YYYY</code>.\n"
+        "\n"
         f"🏷️ Current: <code>{escape_html(current)}</code>\n"
-        "Send new date in <code>DD.MM.YYYY</code>."
     )
     await start_subscription_edit_flow(
         callback,
@@ -518,7 +522,7 @@ async def handle_subscription_period_callback(
         current_label = "monthly"
     else:
         current_label = f"{current_period} day(s)"
-    prompt = f"{period_text}\n🏷️ Current: <code>{escape_html(current_label)}</code>"
+    prompt = f"{period_text}\n\n🏷️ Current: <code>{escape_html(current_label)}</code>"
     await start_subscription_edit_flow(
         callback,
         state,
@@ -600,9 +604,10 @@ async def handle_subscription_share_callback(
     current_share = subscription.get("share_limit")
     current_label = f"{current_share} user(s)" if current_share else "all users"
     prompt_text = (
-        "Split Limit:\n"
+        "➗ Split limit:\n"
+        "➗ Send number of users or tap “Split across all”.\n"
+        "\n"
         f"🏷️ Current: <code>{escape_html(current_label)}</code>\n"
-        "Send number of users or tap “Split across all”."
     )
     await start_subscription_edit_flow(
         callback,
@@ -631,9 +636,10 @@ async def handle_subscription_reminder_time_callback(
     else:
         current_label = f"default ({base_time})"
     prompt = (
-        "Reminder Time:\n"
+        "⏰ Reminder time:\n"
         "⏰ Send time in <code>HH:MM</code>.\n"
         "🌍 Applied in each recipient timezone.\n"
+        "\n"
         f"🏷️ Current: <code>{escape_html(current_label)}</code>."
     )
     prompt_markup = subscription_reminder_time_edit_keyboard(callback_data.subscription_id) if current_override else None
@@ -674,9 +680,10 @@ async def handle_subscription_reminder_days_callback(
         parse_offsets(subscription.get("reminder_offsets"))
     )
     prompt = (
-        "Reminder Days:\n"
+        "🔔 Reminder days:\n"
         "🔔 Send offsets separated by commas or spaces (example: <code>-1 0 1</code>).\n"
         "Negative means before due date, positive means after.\n"
+        "\n"
         f"🏷️ Current: <code>{escape_html(current_offsets)}</code>."
     )
     await start_subscription_edit_flow(
@@ -689,9 +696,9 @@ async def handle_subscription_reminder_days_callback(
 
 
 def _comment_prompt_text(current_value: str) -> str:
-    base = "Comment:\n📝 Send text to attach to reminders."
+    base = "📝 Comment:\n📝 Send text to attach to reminders."
     if current_value:
-        return f"{base}\n🏷️ Current: <code>{escape_html(current_value)}</code>."
+        return f"{base}\n\n🏷️ Current: <code>{escape_html(current_value)}</code>."
     return base
 
 
