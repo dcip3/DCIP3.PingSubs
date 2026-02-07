@@ -134,6 +134,14 @@ class Database:
                 due_date TEXT NOT NULL,
                 closed_at TEXT,
                 participants_snapshot_ready INTEGER NOT NULL DEFAULT 0,
+                settings_snapshot_ready INTEGER NOT NULL DEFAULT 0,
+                amount_snapshot REAL,
+                currency_snapshot TEXT,
+                share_limit_snapshot INTEGER,
+                comment_snapshot TEXT,
+                reminder_time_snapshot TEXT,
+                reminder_offsets_snapshot TEXT,
+                remind_after_due_snapshot INTEGER,
                 PRIMARY KEY (subscription_id, due_date)
             );
 
@@ -202,6 +210,46 @@ class Database:
             "subscription_cycles",
             "participants_snapshot_ready",
             "INTEGER NOT NULL DEFAULT 0",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "settings_snapshot_ready",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "amount_snapshot",
+            "REAL",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "currency_snapshot",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "share_limit_snapshot",
+            "INTEGER",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "comment_snapshot",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "reminder_time_snapshot",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "reminder_offsets_snapshot",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "remind_after_due_snapshot",
+            "INTEGER",
         )
 
     async def _backfill_monthly_anchor_days(self) -> None:
@@ -895,6 +943,7 @@ class Database:
             """,
             (subscription_id, due_value),
         )
+        await self._ensure_cycle_settings_snapshot_exists(subscription_id, due_value)
         await self._ensure_cycle_participant_snapshot_exists(subscription_id, due_value)
         await self._conn.commit()
 
@@ -1007,6 +1056,47 @@ class Database:
             (subscription_id, due_value),
         )
 
+    async def _ensure_cycle_settings_snapshot_exists(self, subscription_id: int, due_value: str) -> None:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT settings_snapshot_ready
+            FROM subscription_cycles
+            WHERE subscription_id = ? AND due_date = ?
+            """,
+            (subscription_id, due_value),
+        )
+        cycle_row = await cursor.fetchone()
+        if not cycle_row:
+            return
+        if int(cycle_row["settings_snapshot_ready"] or 0) == 1:
+            return
+        await self._conn.execute(
+            """
+            UPDATE subscription_cycles
+            SET amount_snapshot = (SELECT amount FROM subscriptions WHERE id = ?),
+                currency_snapshot = (SELECT currency FROM subscriptions WHERE id = ?),
+                share_limit_snapshot = (SELECT share_limit FROM subscriptions WHERE id = ?),
+                comment_snapshot = (SELECT comment FROM subscriptions WHERE id = ?),
+                reminder_time_snapshot = (SELECT reminder_time FROM subscriptions WHERE id = ?),
+                reminder_offsets_snapshot = (SELECT reminder_offsets FROM subscriptions WHERE id = ?),
+                remind_after_due_snapshot = (SELECT remind_after_due FROM subscriptions WHERE id = ?),
+                settings_snapshot_ready = 1
+            WHERE subscription_id = ? AND due_date = ?
+            """,
+            (
+                subscription_id,
+                subscription_id,
+                subscription_id,
+                subscription_id,
+                subscription_id,
+                subscription_id,
+                subscription_id,
+                subscription_id,
+                due_value,
+            ),
+        )
+
     async def is_cycle_participant_snapshot_ready(self, subscription_id: int, due_date: date | str) -> bool:
         assert self._conn is not None, "Database is not connected"
         due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
@@ -1052,6 +1142,14 @@ class Database:
             f"""
             SELECT c.due_date,
                    c.participants_snapshot_ready,
+                   c.settings_snapshot_ready,
+                   c.amount_snapshot,
+                   c.currency_snapshot,
+                   c.share_limit_snapshot,
+                   c.comment_snapshot,
+                   c.reminder_time_snapshot,
+                   c.reminder_offsets_snapshot,
+                   c.remind_after_due_snapshot,
                    cp.telegram_id,
                    cp.full_name,
                    cp.share_weight
@@ -1069,6 +1167,14 @@ class Database:
             value: {
                 "participants": [],
                 "snapshot_ready": False,
+                "settings_snapshot_ready": False,
+                "amount": None,
+                "currency": None,
+                "share_limit": None,
+                "comment": "",
+                "reminder_time": "",
+                "reminder_offsets": None,
+                "remind_after_due": None,
             }
             for value in due_dates
         }
@@ -1079,6 +1185,15 @@ class Database:
                 continue
             if int(row["participants_snapshot_ready"] or 0) == 1:
                 state["snapshot_ready"] = True
+            if int(row["settings_snapshot_ready"] or 0) == 1:
+                state["settings_snapshot_ready"] = True
+                state["amount"] = row["amount_snapshot"]
+                state["currency"] = row["currency_snapshot"]
+                state["share_limit"] = row["share_limit_snapshot"]
+                state["comment"] = row["comment_snapshot"] or ""
+                state["reminder_time"] = row["reminder_time_snapshot"] or ""
+                state["reminder_offsets"] = row["reminder_offsets_snapshot"]
+                state["remind_after_due"] = row["remind_after_due_snapshot"]
             if row["telegram_id"] is not None:
                 state["participants"].append(
                     {

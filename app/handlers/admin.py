@@ -14,6 +14,7 @@ from app.ui.keyboards import (
     dialog_keyboard,
     public_settings_currency_keyboard,
     public_settings_keyboard,
+    public_subscription_reminder_time_keyboard,
     public_settings_time_keyboard,
     public_settings_timezone_keyboard,
     public_reply_keyboard,
@@ -584,11 +585,37 @@ async def handle_public_subscription_reminder_time(
     if callback.message:
         await callback.message.answer(
             f"Send your reminder time for this subscription in HH:MM (timezone: {user_timezone}).\n"
-            "Send `default` to use your Base time from ⚙️ Settings.\n"
             f"Current effective value: {effective_time}.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=public_subscription_reminder_time_keyboard(
+                callback_data.subscription_id,
+                bool(user_override_time),
+            ),
         )
     await callback.answer()
+
+
+@public_router.callback_query(SubscriptionAction.filter(F.action == "public_remindertime_default"))
+async def handle_public_subscription_reminder_time_default(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    subs = await db.list_subscriptions_for_user(callback.from_user.id)
+    if not any(sub["id"] == callback_data.subscription_id for sub in subs):
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
+        return
+    await db.delete_user_subscription_setting(
+        callback.from_user.id,
+        callback_data.subscription_id,
+        "reminder_time",
+    )
+    await state.clear()
+    await callback.answer("Using your base time now.")
+    await send_public_subscription_detail(callback, db, callback_data.subscription_id)
 
 
 @public_router.message(PublicReminderForm.reminder_time)
@@ -635,7 +662,7 @@ async def handle_public_reminder_time_input(
 
     normalized = normalize_time_string(raw_time)
     if normalized is None:
-        await message.answer("Time must be in HH:MM format (24-hour clock), or send `default`.")
+        await message.answer("Time must be in HH:MM format (24-hour clock).")
         return
 
     await db.set_user_subscription_setting(

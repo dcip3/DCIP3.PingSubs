@@ -252,6 +252,40 @@ def reminder_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def subscription_reminder_time_edit_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="↩️ Default",
+        callback_data=SubscriptionAction(action="remindertime_default", subscription_id=subscription_id).pack(),
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def public_subscription_reminder_time_keyboard(
+    subscription_id: int,
+    has_override: bool,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if has_override:
+        builder.button(
+            text="↩️ Default",
+            callback_data=SubscriptionAction(
+                action="public_remindertime_default",
+                subscription_id=subscription_id,
+            ).pack(),
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="open_public", subscription_id=subscription_id).pack(),
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def reminder_send_targets_keyboard(
     subscription_id: int,
     participants: Sequence[Dict[str, object]],
@@ -604,8 +638,9 @@ def build_batch_payment_confirmation_keyboard(items: Sequence[Dict[str, object]]
         due_date = item.get("due_date")
         due_str = due_date if isinstance(due_date, str) else due_date.isoformat()
         label = str(item.get("subscription_label") or item.get("subscription_name") or "Subscription")
+        due_hint = str(item.get("due_date_text") or due_str)
         builder.button(
-            text=f"✅ Paid: {label}",
+            text=f"✅ {label} · {due_hint}",
             callback_data=ReminderAction(subscription_id=int(item["subscription_id"]), due_date=due_str).pack(),
         )
     builder.adjust(1)

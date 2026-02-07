@@ -29,10 +29,21 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         await callback.answer("This payment cycle is already closed.", show_alert=True)
         return
 
-    cycle_participants = await db.list_cycle_participants(subscription["id"], due_value)
-    snapshot_ready = await db.is_cycle_participant_snapshot_ready(subscription["id"], due_value)
+    cycle_state_map = await db.list_cycle_participants_for_due_dates(subscription["id"], [due_value])
+    cycle_state = cycle_state_map.get(due_value) or {}
+    cycle_participants = list(cycle_state.get("participants") or [])
+    snapshot_ready = bool(cycle_state.get("snapshot_ready"))
+    settings_snapshot_ready = bool(cycle_state.get("settings_snapshot_ready"))
     if not cycle_participants and not snapshot_ready:
         cycle_participants = await db.list_subscription_participants(subscription["id"])
+    cycle_currency = str(cycle_state.get("currency") or subscription["currency"])
+    cycle_share_limit = cycle_state.get("share_limit")
+    try:
+        cycle_amount = float(cycle_state.get("amount") or subscription["amount"])
+    except (TypeError, ValueError):
+        cycle_amount = float(subscription["amount"])
+    if not settings_snapshot_ready:
+        cycle_share_limit = subscription.get("share_limit")
 
     user_id = callback.from_user.id if callback.from_user else None
     is_authorized = False
@@ -91,7 +102,7 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
             if converted_display:
                 amount_line += f" (≈ {escape_html(converted_display)})"
         else:
-            share_base = calculate_share_base(subscription, cycle_participants)
+            share_base = calculate_share_base({"share_limit": cycle_share_limit}, cycle_participants)
             weight = next(
                 (
                     int(p.get("share_weight") or 1)
@@ -100,8 +111,8 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
                 ),
                 share_base,
             )
-            paid_amount = float(subscription["amount"]) * weight / share_base
-            amount_line = f"Amount: {paid_amount:.2f} {escape_html(subscription['currency'])}"
+            paid_amount = cycle_amount * weight / share_base
+            amount_line = f"Amount: {paid_amount:.2f} {escape_html(cycle_currency)}"
         admin_note = (
             f"✅ Payment recorded: {escape_html(subscription['name'])} ({format_due_date(due_value)})\n"
             f"Payer: {escape_html(payer_name)}\n"

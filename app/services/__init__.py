@@ -393,15 +393,15 @@ async def _run_reminder_pass(
         raw_currency = str(item.get("currency", ""))
         raw_comment = str(item.get("comment", "")).strip()
         safe_name = escape_html(raw_name)
-        safe_currency = escape_html(raw_currency)
-        subscription_override_time = normalize_time_string(item.get("reminder_time"))
+        default_subscription_override_time = normalize_time_string(item.get("reminder_time"))
+        default_offsets = parse_offsets(item.get("reminder_offsets"))
+        default_remind_after_due = bool(item.get("remind_after_due"))
         try:
             _parse_due_date(item["next_charge_at"])
         except (KeyError, ValueError):
             continue
 
         participants = item.get("participants", [])
-        offsets = parse_offsets(item.get("reminder_offsets"))
         open_cycles = await _ensure_open_cycles(db, item, today)
         cycle_due_values = [cycle.isoformat() for cycle in open_cycles]
         cycle_participants_state = await db.list_cycle_participants_for_due_dates(
@@ -410,13 +410,49 @@ async def _run_reminder_pass(
         )
         participants_by_cycle: dict[date, list[dict[str, object]]] = {}
         participant_ids_by_cycle: dict[date, set[int]] = {}
+        cycle_meta_by_due: dict[date, dict[str, object]] = {}
         for cycle_due in open_cycles:
             due_key = cycle_due.isoformat()
             cycle_state = cycle_participants_state.get(due_key) or {}
             cycle_participants = list(cycle_state.get("participants") or [])
             snapshot_ready = bool(cycle_state.get("snapshot_ready"))
+            settings_snapshot_ready = bool(cycle_state.get("settings_snapshot_ready"))
             if not cycle_participants and not snapshot_ready:
                 cycle_participants = participants
+
+            amount_source = cycle_state.get("amount") if settings_snapshot_ready else item.get("amount")
+            try:
+                cycle_amount = float(amount_source)
+            except (TypeError, ValueError):
+                cycle_amount = float(item["amount"])
+            currency_source = cycle_state.get("currency") if settings_snapshot_ready else raw_currency
+            cycle_currency = str(currency_source or raw_currency).upper()
+            share_limit_source = cycle_state.get("share_limit") if settings_snapshot_ready else item.get("share_limit")
+            try:
+                cycle_share_limit = int(share_limit_source) if share_limit_source is not None else None
+            except (TypeError, ValueError):
+                cycle_share_limit = None
+            if cycle_share_limit is not None and cycle_share_limit <= 0:
+                cycle_share_limit = None
+            cycle_comment = str(
+                cycle_state.get("comment") if settings_snapshot_ready else raw_comment
+            ).strip()
+            cycle_offsets_raw = cycle_state.get("reminder_offsets") if settings_snapshot_ready else item.get("reminder_offsets")
+            cycle_offsets = parse_offsets(cycle_offsets_raw)
+            remind_after_due_source = cycle_state.get("remind_after_due") if settings_snapshot_ready else item.get("remind_after_due")
+            cycle_remind_after_due = bool(remind_after_due_source)
+            cycle_reminder_time_raw = cycle_state.get("reminder_time") if settings_snapshot_ready else item.get("reminder_time")
+            cycle_override_time = normalize_time_string(cycle_reminder_time_raw)
+            cycle_meta_by_due[cycle_due] = {
+                "settings_snapshot_ready": settings_snapshot_ready,
+                "amount": cycle_amount,
+                "currency": cycle_currency,
+                "share_limit": cycle_share_limit,
+                "comment": cycle_comment,
+                "offsets": cycle_offsets,
+                "remind_after_due": cycle_remind_after_due,
+                "reminder_time": cycle_override_time,
+            }
             if target_telegram_id is not None:
                 cycle_participants = [
                     person
@@ -445,21 +481,29 @@ async def _run_reminder_pass(
         if target_telegram_id is not None and not has_cycle_participants:
             continue
         if has_cycle_participants:
-            queued_events_for_admin: dict[tuple[date, int], int] = {}
+            queued_events_for_admin: dict[tuple[date, int], dict[str, object]] = {}
             user_base_time_cache: dict[int, str] = {}
             user_subscription_time_cache: dict[int, Optional[str]] = {}
             user_timezone_cache: dict[int, str] = {}
             user_time_now_cache: dict[int, tuple[date, time]] = {}
             user_suppressed_cache: dict[tuple[str, date], set[int]] = {}
             user_currency_cache: dict[int, str] = {}
-            converted_share_cache: dict[tuple[str, int], Optional[float]] = {}
-            source_currency = raw_currency.upper()
+            converted_share_cache: dict[tuple[str, str, int, float], Optional[float]] = {}
             for cycle_due in open_cycles:
                 cycle_participants = participants_by_cycle.get(cycle_due, [])
                 if not cycle_participants:
                     continue
-                share_base = calculate_share_base(item, cycle_participants)
-                share_amount = item["amount"] / share_base
+                cycle_meta = cycle_meta_by_due.get(cycle_due, {})
+                cycle_currency = str(cycle_meta.get("currency") or raw_currency).upper()
+                cycle_comment = str(cycle_meta.get("comment") or "")
+                cycle_amount = float(cycle_meta.get("amount") or item["amount"])
+                cycle_share_limit = cycle_meta.get("share_limit")
+                cycle_offsets = list(cycle_meta.get("offsets") or default_offsets)
+                cycle_remind_after_due = bool(cycle_meta.get("remind_after_due"))
+                cycle_override_time = normalize_time_string(cycle_meta.get("reminder_time"))
+                share_base = calculate_share_base({"share_limit": cycle_share_limit}, cycle_participants)
+                share_amount = cycle_amount / share_base
+                source_currency = cycle_currency.upper()
                 due_key = cycle_due.isoformat()
                 for person in cycle_participants:
                     telegram_id = int(person.get("telegram_id") or 0)
@@ -477,8 +521,8 @@ async def _run_reminder_pass(
 
                     effective_time = user_subscription_time_cache[telegram_id]
                     if effective_time is None:
-                        if subscription_override_time:
-                            effective_time = subscription_override_time
+                        if cycle_override_time:
+                            effective_time = cycle_override_time
                         else:
                             base_time = user_base_time_cache.get(telegram_id)
                             if base_time is None:
@@ -514,10 +558,10 @@ async def _run_reminder_pass(
 
                     event_offsets = {
                         offset
-                        for offset in offsets
+                        for offset in cycle_offsets
                         if cycle_due + timedelta(days=offset) == local_today
                     }
-                    if item.get("remind_after_due") and local_today > cycle_due:
+                    if cycle_remind_after_due and local_today > cycle_due:
                         event_offsets.add((local_today - cycle_due).days)
                     if not event_offsets:
                         continue
@@ -545,7 +589,7 @@ async def _run_reminder_pass(
                         )
                         user_currency_cache[telegram_id] = target_currency
 
-                    converted_cache_key = (target_currency, share_base)
+                    converted_cache_key = (source_currency, target_currency, share_base, share_amount)
                     converted_base = converted_share_cache.get(converted_cache_key)
                     if converted_cache_key not in converted_share_cache:
                         if source_currency == target_currency:
@@ -572,7 +616,7 @@ async def _run_reminder_pass(
                         share_amount=share_amount,
                         weight=weight,
                         share_base=share_base,
-                        safe_currency=raw_currency,
+                        safe_currency=cycle_currency,
                         converted_base=converted_base,
                         rounding_mode=rounding_mode,
                         target_currency=target_currency,
@@ -604,20 +648,24 @@ async def _run_reminder_pass(
                                 "share_text": share_text,
                                 "amount_text": amount_text,
                                 "converted_text": converted_display,
-                                "comment": raw_comment,
+                                "comment": cycle_comment,
                                 "share_amount_value": share_amount_value,
-                                "share_currency": str(item["currency"]),
+                                "share_currency": cycle_currency,
                                 "converted_value": converted_value,
                                 "base_amount_value": base_amount_value,
                                 "target_currency": target_currency,
                                 "sent_on": local_today,
                             }
                         )
-                        queued_events_for_admin[(cycle_due, event_offset)] = len(cycle_participants)
+                        queued_events_for_admin[(cycle_due, event_offset)] = {
+                            "count": len(cycle_participants),
+                            "amount": cycle_amount,
+                            "currency": cycle_currency,
+                            "comment": cycle_comment,
+                        }
 
             if admin_ids and queued_events_for_admin:
-                admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
-                for (due_date_value, event_offset), queued_count in sorted(queued_events_for_admin.items()):
+                for (due_date_value, event_offset), details in sorted(queued_events_for_admin.items()):
                     if register_reminders:
                         if not await db.register_reminder_if_new(
                             int(item["id"]),
@@ -625,11 +673,16 @@ async def _run_reminder_pass(
                             event_offset,
                         ):
                             continue
+                    queued_count = int(details.get("count") or 0)
+                    safe_currency = escape_html(str(details.get("currency") or raw_currency))
+                    total_amount = float(details.get("amount") or item["amount"])
+                    admin_comment_value = str(details.get("comment") or "").strip()
+                    admin_comment = f"\nComment: {escape_html(admin_comment_value)}" if admin_comment_value else ""
                     context_text = _format_context_text(due_date_value, today)
                     admin_note = (
                         f"🔔 {safe_name}\n"
                         f"{context_text}\n"
-                        f"Total: {item['amount']:.2f} {safe_currency} | Users: {queued_count}"
+                        f"Total: {total_amount:.2f} {safe_currency} | Users: {queued_count}"
                         f"{admin_comment}"
                     )
                     event_participant_ids = participant_ids_by_cycle.get(due_date_value, set())
@@ -650,26 +703,40 @@ async def _run_reminder_pass(
         if not admin_ids:
             continue
 
-        dispatch_time = subscription_override_time or admin_base_time
-        if enforce_time and current_time < parse_time_string(dispatch_time, admin_base_time):
-            continue
-        admin_comment = f"\nComment: {escape_html(raw_comment)}" if raw_comment else ""
         for cycle_due in open_cycles:
+            cycle_meta = cycle_meta_by_due.get(cycle_due, {})
+            settings_snapshot_ready = bool(cycle_meta.get("settings_snapshot_ready"))
+            cycle_offsets = list(cycle_meta.get("offsets") or default_offsets)
+            cycle_remind_after_due = bool(cycle_meta.get("remind_after_due", default_remind_after_due))
+            cycle_currency = str(cycle_meta.get("currency") or raw_currency).upper()
+            cycle_amount = float(cycle_meta.get("amount") or item["amount"])
+            cycle_comment = str(cycle_meta.get("comment") or raw_comment).strip()
+            cycle_override_time = normalize_time_string(cycle_meta.get("reminder_time"))
+            if settings_snapshot_ready:
+                dispatch_time = cycle_override_time or admin_base_time
+            else:
+                dispatch_time = cycle_override_time or default_subscription_override_time or admin_base_time
+            if enforce_time and current_time < parse_time_string(dispatch_time, admin_base_time):
+                continue
+
             event_offsets = {
                 offset
-                for offset in offsets
+                for offset in cycle_offsets
                 if cycle_due + timedelta(days=offset) == today
             }
-            if item.get("remind_after_due") and today > cycle_due:
+            if cycle_remind_after_due and today > cycle_due:
                 event_offsets.add((today - cycle_due).days)
             for event_offset in sorted(event_offsets):
                 if register_reminders:
                     if not await db.register_reminder_if_new(int(item["id"]), cycle_due, event_offset):
                         continue
+                safe_currency = escape_html(cycle_currency)
+                admin_comment = f"\nComment: {escape_html(cycle_comment)}" if cycle_comment else ""
                 context_text = _format_context_text(cycle_due, today)
                 admin_note = (
                     f"🔔 {safe_name}\n"
                     f"{context_text}\n"
+                    f"Total: {cycle_amount:.2f} {safe_currency}\n"
                     "No users are assigned yet. Add them via 📋 Subscriptions."
                     f"{admin_comment}"
                 )

@@ -25,7 +25,12 @@ from app.ui.helpers import (
     share_limit_prompt,
     start_subscription_edit_flow,
 )
-from app.ui.keyboards import admin_reply_keyboard, comment_edit_keyboard, dialog_keyboard
+from app.ui.keyboards import (
+    admin_reply_keyboard,
+    comment_edit_keyboard,
+    dialog_keyboard,
+    subscription_reminder_time_edit_keyboard,
+)
 from app.ui.states import ReminderSendAction, Responder, SubscriptionAction, SubscriptionEditForm, SubscriptionForm
 from app.core.reminders import (
     DEFAULT_REMINDER_OFFSETS,
@@ -605,16 +610,30 @@ async def handle_subscription_reminder_time_callback(
     prompt = (
         "Send the reminder time in HH:MM.\n"
         "This clock time is applied in each recipient's timezone.\n"
-        "Send `default` to use Base time from ⚙️ Settings.\n"
         f"Current value: {escape_html(current_label)}."
     )
+    prompt_markup = subscription_reminder_time_edit_keyboard(callback_data.subscription_id) if current_override else None
     await start_subscription_edit_flow(
         callback,
         state,
         callback_data.subscription_id,
         SubscriptionEditForm.reminder_time,
         prompt,
+        reply_markup=prompt_markup,
     )
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "remindertime_default"))
+async def handle_subscription_reminder_time_default(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await db.update_subscription_fields(callback_data.subscription_id, reminder_time="")
+    await state.clear()
+    await callback.answer("Using base time now.")
+    await send_subscription_detail(callback, db, callback_data.subscription_id)
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "reminderdays"))
@@ -944,7 +963,7 @@ async def edit_subscription_reminder_time(message: Message, state: FSMContext, d
 
     normalized = normalize_time_string(candidate)
     if normalized is None:
-        await message.answer("Time must be in HH:MM format (24-hour clock), or send `default`.")
+        await message.answer("Time must be in HH:MM format (24-hour clock).")
         return
 
     await db.update_subscription_fields(sub_id, reminder_time=normalized)
