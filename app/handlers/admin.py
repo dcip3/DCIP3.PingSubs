@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from aiogram import F
 import contextlib
 
@@ -98,7 +99,6 @@ async def _public_settings_snapshot(
 def _public_settings_text(
     current_currency: str,
     admin_currency: str,
-    has_currency_override: bool,
     current_time: str,
     admin_time: str,
     has_time_override: bool,
@@ -106,20 +106,22 @@ def _public_settings_text(
     admin_timezone: str,
     has_timezone_override: bool,
 ) -> str:
-    currency_source = "personal override" if has_currency_override else "admin default"
     time_source = "personal override" if has_time_override else "admin default"
     timezone_source = "personal override" if has_timezone_override else "admin default"
+    indent = "       "
     return (
-        "Settings:\n"
-        f"Base currency: {current_currency}\n"
-        f"Currency default by admin: {admin_currency}\n"
-        f"Currency source: {currency_source}\n\n"
-        f"Base time: {current_time} ({current_timezone})\n"
-        f"Time default by admin: {admin_time} ({admin_timezone})\n"
-        f"Time source: {time_source}\n\n"
-        f"Timezone: {current_timezone}\n"
-        f"Timezone default by admin: {admin_timezone}\n"
-        f"Timezone source: {timezone_source}"
+        "⚙️ Settings:\n\n"
+        "💱 Currency:\n"
+        f"{indent}🏷️ Base: <code>{html.escape(current_currency)}</code>\n"
+        f"{indent}🔧 Default: <code>{html.escape(admin_currency)}</code>\n\n"
+        "⏰ Time:\n"
+        f"{indent}🏷️ Base: <code>{html.escape(current_time)} ({html.escape(current_timezone)})</code>\n"
+        f"{indent}🔧 Default: <code>{html.escape(admin_time)} ({html.escape(admin_timezone)})</code>\n"
+        f"{indent}📌 Source: <code>{html.escape(time_source)}</code>\n\n"
+        "🌍 Timezone:\n"
+        f"{indent}🏷️ Base: <code>{html.escape(current_timezone)}</code>\n"
+        f"{indent}🔧 Default: <code>{html.escape(admin_timezone)}</code>\n"
+        f"{indent}📌 Source: <code>{html.escape(timezone_source)}</code>"
     )
 
 
@@ -143,7 +145,6 @@ async def _show_public_settings_menu(
     text = _public_settings_text(
         current_currency,
         admin_currency,
-        has_currency_override,
         current_time,
         admin_time,
         has_time_override,

@@ -483,7 +483,7 @@ def public_settings_currency_keyboard(
         builder.button(text=f"{prefix}{code_upper}", callback_data=f"public_settings_currency:{code_upper}")
     builder.button(text="Other", callback_data="public_settings:currency_other")
     if has_override:
-        builder.button(text="↩️ Use admin default", callback_data="public_settings:currency_reset")
+        builder.button(text="↩️ Default", callback_data="public_settings:currency_reset")
     builder.adjust(3, 2)
     builder.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
@@ -500,7 +500,7 @@ def public_settings_time_keyboard(current_time: str, has_override: bool) -> Inli
         builder.button(text=f"{prefix}{time_value}", callback_data=f"public_settings_time:{time_value}")
     builder.button(text="Other", callback_data="public_settings:time_other")
     if has_override:
-        builder.button(text="↩️ Use admin default", callback_data="public_settings:time_reset")
+        builder.button(text="↩️ Default", callback_data="public_settings:time_reset")
     builder.adjust(2, 2, 1)
     builder.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
@@ -516,7 +516,7 @@ def public_settings_timezone_keyboard(current_timezone: str, has_override: bool)
         builder.button(text=f"{prefix}{zone}", callback_data=f"public_settings_timezone:{zone}")
     builder.button(text="Other", callback_data="public_settings:timezone_other")
     if has_override:
-        builder.button(text="↩️ Use admin default", callback_data="public_settings:timezone_reset")
+        builder.button(text="↩️ Default", callback_data="public_settings:timezone_reset")
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
