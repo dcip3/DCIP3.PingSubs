@@ -196,15 +196,21 @@ async def send_subscription_list(target: Responder, db: Database) -> None:
     lines = [
         "📋 Subscriptions:",
         "Choose a subscription to manage:",
+        "",
     ]
     for idx, sub in enumerate(subs, 1):
         audience = sub["participant_count"]
         audience_text = f"{audience} user(s)" if audience else "no users"
-        lines.append(
-            f"{idx}. <code>{escape_html(sub['name'])}</code>\n"
-            f"Amount: <code>{sub['amount']:.2f} {escape_html(sub['currency'])}</code>\n"
-            f"Users: <code>{escape_html(audience_text)}</code>"
+        lines.extend(
+            [
+                f"{idx}. <code>{escape_html(sub['name'])}</code>",
+                f"💰 Amount: <code>{sub['amount']:.2f} {escape_html(sub['currency'])}</code>",
+                f"👥 Users: <code>{escape_html(audience_text)}</code>",
+                "",
+            ]
         )
+    if lines and not lines[-1]:
+        lines.pop()
 
     await respond_with_markup(
         target,
@@ -219,14 +225,19 @@ async def send_user_subscription_list(message: Message, db: Database, telegram_i
         await message.answer("📋 Subscriptions:\nYou don't have any subscriptions yet.")
         return
 
-    lines = ["📋 Subscriptions:", "Your plans:"]
+    lines = ["📋 Subscriptions:", "Your plans:", ""]
     for idx, sub in enumerate(subs, 1):
         due = _format_iso_date(sub["next_charge_at"])
-        lines.append(
-            f"{idx}. <code>{escape_html(sub['name'])}</code>\n"
-            f"Amount: <code>{sub['amount']:.2f} {escape_html(sub['currency'])}</code>\n"
-            f"Next charge: <code>{escape_html(due)}</code>"
+        lines.extend(
+            [
+                f"{idx}. <code>{escape_html(sub['name'])}</code>",
+                f"💰 Amount: <code>{sub['amount']:.2f} {escape_html(sub['currency'])}</code>",
+                f"📅 Next charge: <code>{escape_html(due)}</code>",
+                "",
+            ]
         )
+    if lines and not lines[-1]:
+        lines.pop()
     await message.answer(
         "\n".join(lines),
         reply_markup=build_public_subscription_list_keyboard(subs),
@@ -769,9 +780,10 @@ async def send_reminder_settings(target: Responder, db: Database, subscription_i
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     text = (
         "🔔 Reminders:\n"
-        f"Name: <code>{escape_html(subscription['name'])}</code>\n"
+        f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
+        "\n"
         f"⏰ Time: <code>{escape_html(reminder_line)}</code>\n"
-        f"Days: <code>{escape_html(offsets_text)}</code>\n"
+        f"🔔 Days: <code>{escape_html(offsets_text)}</code>\n"
         f"📣 Post-due alerts: <code>{escape_html(overdue_text)}</code>"
     )
 
@@ -792,13 +804,14 @@ async def send_reminder_send_menu(target: Responder, db: Database, subscription_
     if not participants:
         await respond_with_markup(
             target,
-            "Reminder Send:\nNo users are assigned yet. Add them via <code>📋 Subscriptions</code>.",
+            "📬 Send reminders now:\nNo users are assigned yet. Add them via <code>📋 Subscriptions</code>.",
             reply_markup=reminder_settings_keyboard(subscription_id),
         )
         return
 
     text = (
-        f"📬 Send reminders now:\nName: <code>{escape_html(subscription['name'])}</code>\n"
+        f"📬 Send reminders now:\n🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
+        "\n"
         "Choose who should receive the reminder."
     )
     await respond_with_markup(
@@ -809,7 +822,7 @@ async def send_reminder_send_menu(target: Responder, db: Database, subscription_
 
 
 async def send_settings_tests_menu(target: Responder, db: Database) -> None:
-    text = "Tests:\nChoose a test action."
+    text = "🧪 Tests:\nChoose a test action."
     await respond_with_markup(
         target,
         text,
@@ -822,12 +835,12 @@ async def send_test_subscription_list(target: Responder, db: Database) -> None:
     if not subs:
         await respond_with_markup(
             target,
-            "Tests:\nNo subscriptions yet. Create one first.",
+            "🧪 Tests:\nNo subscriptions yet. Create one first.",
             reply_markup=settings_tests_keyboard([]),
         )
         return
 
-    text = "Tests:\nChoose a subscription to send test reminders:"
+    text = "🧪 Tests:\nChoose a subscription to send test reminders:"
     await respond_with_markup(
         target,
         text,
@@ -857,7 +870,8 @@ async def send_test_reminder_targets(target: Responder, db: Database, subscripti
         return
 
     text = (
-        f"🧪 Test reminder send:\nName: <code>{escape_html(subscription['name'])}</code>\n"
+        f"🧪 Test reminder send:\n🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
+        "\n"
         "Choose who should receive the test reminder."
     )
     await respond_with_markup(
@@ -879,9 +893,10 @@ async def send_pricing_settings(target: Responder, db: Database, subscription_id
 
     text = (
         "💰 Pricing:\n"
-        f"Name: <code>{escape_html(subscription['name'])}</code>\n"
-        f"Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>\n"
+        f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
+        "\n"
+        f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
+        f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>\n"
         f"➗ Split limit: <code>{escape_html(share_text)}</code>"
     )
 
@@ -901,7 +916,7 @@ async def send_participants_editor(callback: CallbackQuery, db: Database, subscr
             callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
         )
         await callback.message.edit_text(
-            "Participants:\nNo users in the database yet. Add someone first with <code>👥 Users</code>.",
+            "👥 Users:\nNo users in the database yet. Add someone first with <code>👥 Users</code>.",
             reply_markup=builder.as_markup(),
         )
         await callback.answer()
@@ -911,7 +926,7 @@ async def send_participants_editor(callback: CallbackQuery, db: Database, subscr
     selected = sum(1 for friend in friends if friend["is_member"])
     total_shares = sum(int(friend.get("share_weight") or 1) for friend in friends if friend["is_member"])
     text = (
-        "Participants:\n"
+        "👥 Users:\n"
         f"👥 Selected: <code>{selected}</code>\n"
         f"➗ Total shares: <code>{total_shares}</code>\n"
         "Tap <code>xN</code> to change share weight (1-5)."
