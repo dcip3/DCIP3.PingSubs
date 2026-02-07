@@ -153,11 +153,8 @@ async def _show_public_settings_menu(
     )
     markup = public_settings_keyboard(
         current_currency,
-        has_currency_override,
         current_time,
-        has_time_override,
         current_timezone,
-        has_timezone_override,
     )
     if isinstance(callback, CallbackQuery):
         if callback.message:
@@ -294,11 +291,25 @@ async def handle_public_settings_currency(
     if not callback.from_user:
         await callback.answer("Unable to identify your account.", show_alert=True)
         return
-    current_currency, _, _, _, _, _, _, _, _ = await _public_settings_snapshot(db, settings, callback.from_user.id)
+    (
+        current_currency,
+        _,
+        has_currency_override,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+    ) = await _public_settings_snapshot(db, settings, callback.from_user.id)
     if callback.message:
         await callback.message.edit_text(
             f"Choose a base currency. Current value: {current_currency}.",
-            reply_markup=public_settings_currency_keyboard(DEFAULT_CURRENCIES, current_currency),
+            reply_markup=public_settings_currency_keyboard(
+                DEFAULT_CURRENCIES,
+                current_currency,
+                has_currency_override,
+            ),
         )
     await callback.answer()
 
@@ -355,7 +366,17 @@ async def handle_public_settings_time(
     if not callback.from_user:
         await callback.answer("Unable to identify your account.", show_alert=True)
         return
-    _, _, _, current_time, _, _, current_timezone, _, _ = await _public_settings_snapshot(
+    (
+        _,
+        _,
+        _,
+        current_time,
+        _,
+        has_time_override,
+        current_timezone,
+        _,
+        _,
+    ) = await _public_settings_snapshot(
         db,
         settings,
         callback.from_user.id,
@@ -363,7 +384,7 @@ async def handle_public_settings_time(
     if callback.message:
         await callback.message.edit_text(
             f"Choose a base time. Current value: {current_time} ({current_timezone}).",
-            reply_markup=public_settings_time_keyboard(current_time),
+            reply_markup=public_settings_time_keyboard(current_time, has_time_override),
         )
     await callback.answer()
 
@@ -421,7 +442,17 @@ async def handle_public_settings_timezone(
     if not callback.from_user:
         await callback.answer("Unable to identify your account.", show_alert=True)
         return
-    _, _, _, _, _, _, current_timezone, _, _ = await _public_settings_snapshot(
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        current_timezone,
+        _,
+        has_timezone_override,
+    ) = await _public_settings_snapshot(
         db,
         settings,
         callback.from_user.id,
@@ -429,7 +460,10 @@ async def handle_public_settings_timezone(
     if callback.message:
         await callback.message.edit_text(
             f"Choose timezone. Current value: {current_timezone}.",
-            reply_markup=public_settings_timezone_keyboard(current_timezone),
+            reply_markup=public_settings_timezone_keyboard(
+                current_timezone,
+                has_timezone_override,
+            ),
         )
     await callback.answer()
 
