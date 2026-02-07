@@ -74,23 +74,59 @@ def build_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> Inlin
     return builder.as_markup()
 
 
-def build_members_list_keyboard(friends: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="➕ Add user",
-        callback_data=MemberAction(action="add", friend_id=0).pack(),
-    )
-    for friend in friends:
-        label = friend["full_name"]
-        builder.button(
-            text=label,
-            callback_data=MemberAction(action="open", friend_id=friend["id"]).pack(),
+def build_members_list_keyboard(
+    friends: Sequence[Dict[str, object]],
+    *,
+    page: int = 1,
+    total_pages: int = 1,
+    total_users: int = 0,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="➕ Add user",
+                callback_data=MemberAction(action="add", friend_id=0).pack(),
+            )
+        ]
+    ]
+
+    columns = 2 if total_users > 4 else 1
+    friend_buttons = [
+        InlineKeyboardButton(
+            text=str(friend["full_name"]),
+            callback_data=MemberAction(action="open", friend_id=int(friend["id"])).pack(),
         )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+        for friend in friends
+    ]
+    for index in range(0, len(friend_buttons), columns):
+        rows.append(friend_buttons[index : index + columns])
+
+    if total_pages > 1:
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="◀️ Prev",
+                    callback_data=MemberAction(action="page", friend_id=page - 1).pack(),
+                )
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"{page}/{total_pages}",
+                callback_data=MemberAction(action="page", friend_id=page).pack(),
+            )
+        )
+        if page < total_pages:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="Next ▶️",
+                    callback_data=MemberAction(action="page", friend_id=page + 1).pack(),
+                )
+            )
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def member_detail_keyboard(friend_id: int) -> InlineKeyboardMarkup:
@@ -163,15 +199,15 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Rename", callback_data=SubscriptionAction(action="rename", subscription_id=subscription_id).pack())
     builder.button(text="💰 Pricing", callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack())
+    builder.button(text="➗ Split limit", callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack())
     builder.button(text="📅 Next charge", callback_data=SubscriptionAction(action="duedate", subscription_id=subscription_id).pack())
     builder.button(text="🔁 Period", callback_data=SubscriptionAction(action="period", subscription_id=subscription_id).pack())
     builder.button(text="🔔 Reminders", callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack())
-    builder.button(text="👥 Users", callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack())
-    builder.button(text="➗ Split limit", callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack())
     builder.button(text="📝 Comment", callback_data=SubscriptionAction(action="comment", subscription_id=subscription_id).pack())
+    builder.button(text="👥 Users", callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack())
     builder.button(text="📊 Payments report", callback_data=SubscriptionAction(action="report", subscription_id=subscription_id).pack())
     builder.button(text="🗑 Delete", callback_data=SubscriptionAction(action="delete", subscription_id=subscription_id).pack())
-    builder.adjust(2, 2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 2)
     builder.row(
         InlineKeyboardButton(
             text="⬅️ Back",

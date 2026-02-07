@@ -84,7 +84,7 @@ async def start_subscription_creation(responder: Responder, state: FSMContext) -
     await state.set_state(SubscriptionForm.name)
     await target.answer(
         "New Subscription:\n"
-        "🏷️ Name: send subscription name.\n"
+        "Name: send subscription name.\n"
         "Example: <code>Netflix</code>.",
         reply_markup=dialog_keyboard(),
     )

@@ -106,16 +106,13 @@ def _public_settings_text(
     admin_timezone: str,
 ) -> str:
     return (
-        "Settings:\n\n"
-        "Currency:\n"
-        f"🏷️ Base: <code>{html.escape(current_currency)}</code>\n"
-        f"🔧 Default: <code>{html.escape(admin_currency)}</code>\n\n"
-        "Base Time:\n"
-        f"🏷️ Base: <code>{html.escape(current_time)} ({html.escape(current_timezone)})</code>\n"
-        f"🔧 Default: <code>{html.escape(admin_time)} ({html.escape(admin_timezone)})</code>\n\n"
-        "Timezone:\n"
-        f"🏷️ Base: <code>{html.escape(current_timezone)}</code>\n"
-        f"🔧 Default: <code>{html.escape(admin_timezone)}</code>"
+        "⚙️ Settings:\n\n"
+        f"💱 Currency: <code>{html.escape(current_currency)}</code>\n"
+        f"💱 Default: <code>{html.escape(admin_currency)}</code>\n\n"
+        f"⏰ Base time: <code>{html.escape(current_time)} ({html.escape(current_timezone)})</code>\n"
+        f"⏰ Default time: <code>{html.escape(admin_time)} ({html.escape(admin_timezone)})</code>\n\n"
+        f"🌍 Timezone: <code>{html.escape(current_timezone)}</code>\n"
+        f"🌍 Default timezone: <code>{html.escape(admin_timezone)}</code>"
     )
 
 
@@ -297,8 +294,8 @@ async def handle_public_settings_currency(
     ) = await _public_settings_snapshot(db, settings, callback.from_user.id)
     if callback.message:
         await callback.message.edit_text(
-            "Base Currency:\n"
-            f"🏷️ Current: <code>{html.escape(current_currency)}</code>\n"
+            "💱 Base currency:\n"
+            f"Current: <code>{html.escape(current_currency)}</code>\n"
             "Choose a value:",
             reply_markup=public_settings_currency_keyboard(
                 DEFAULT_CURRENCIES,
@@ -314,7 +311,7 @@ async def handle_public_settings_currency_other(callback: CallbackQuery, state: 
     await state.set_state(PublicSettingsForm.base_currency)
     if callback.message:
         await callback.message.answer(
-            "Base Currency:\n"
+            "💱 Base currency:\n"
             "Send a 3-letter currency code.\n"
             "Example: <code>USD</code>.",
             reply_markup=dialog_keyboard(),
@@ -380,8 +377,8 @@ async def handle_public_settings_time(
     )
     if callback.message:
         await callback.message.edit_text(
-            "Base Time:\n"
-            f"🏷️ Current: <code>{current_time} ({current_timezone})</code>\n"
+            "⏰ Base time:\n"
+            f"Current: <code>{current_time} ({current_timezone})</code>\n"
             "Choose a value:",
             reply_markup=public_settings_time_keyboard(current_time, has_time_override),
         )
@@ -393,7 +390,7 @@ async def handle_public_settings_time_other(callback: CallbackQuery, state: FSMC
     await state.set_state(PublicSettingsForm.base_time)
     if callback.message:
         await callback.message.answer(
-            "Base Time:\n"
+            "⏰ Base time:\n"
             "Send time in <code>HH:MM</code>.",
             reply_markup=dialog_keyboard(),
         )
@@ -459,8 +456,8 @@ async def handle_public_settings_timezone(
     )
     if callback.message:
         await callback.message.edit_text(
-            "Timezone:\n"
-            f"🏷️ Current: <code>{current_timezone}</code>\n"
+            "🌍 Timezone:\n"
+            f"Current: <code>{current_timezone}</code>\n"
             "Choose a value:",
             reply_markup=public_settings_timezone_keyboard(
                 current_timezone,
@@ -475,7 +472,7 @@ async def handle_public_settings_timezone_other(callback: CallbackQuery, state: 
     await state.set_state(PublicSettingsForm.base_timezone)
     if callback.message:
         await callback.message.answer(
-            "Timezone:\n"
+            "🌍 Timezone:\n"
             "Send an IANA timezone.\n"
             "Examples: <code>Europe/Moscow</code>, <code>America/New_York</code>.",
             reply_markup=dialog_keyboard(),
@@ -866,11 +863,11 @@ async def handle_payments_report(message: Message, db: Database) -> None:
 
 async def _settings_menu_text(settings: Settings) -> str:
     return (
-        "Settings:\n"
+        "⚙️ Settings:\n"
         f"💱 Currency: <code>{html.escape(settings.target_currency)}</code>\n"
         f"⏰ Base time: <code>{html.escape(settings.base_reminder_time)}</code>\n"
         f"🌍 Timezone: <code>{html.escape(settings.base_timezone)}</code>\n"
-        f"🧮 Rounding: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>"
+        f"🔢 Rounding: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>"
     )
 
 
@@ -899,8 +896,8 @@ async def handle_settings_close(callback: CallbackQuery) -> None:
 @admin_router.callback_query(F.data == "settings:currency")
 async def handle_settings_currency(callback: CallbackQuery, settings: Settings) -> None:
     text = (
-        "Base Currency:\n"
-        f"🏷️ Current: <code>{html.escape(settings.target_currency)}</code>\n"
+        "💱 Base currency:\n"
+        f"Current: <code>{html.escape(settings.target_currency)}</code>\n"
         "Choose a value:"
     )
     if callback.message:
@@ -913,7 +910,7 @@ async def handle_settings_currency_other(callback: CallbackQuery, state: FSMCont
     await state.set_state(SettingsForm.base_currency)
     if callback.message:
         await callback.message.answer(
-            "Base Currency:\n"
+            "💱 Base currency:\n"
             "Send a 3-letter currency code.\n"
             "Example: <code>USD</code>.",
             reply_markup=dialog_keyboard(),
@@ -924,8 +921,8 @@ async def handle_settings_currency_other(callback: CallbackQuery, state: FSMCont
 @admin_router.callback_query(F.data == "settings:time")
 async def handle_settings_time(callback: CallbackQuery, settings: Settings) -> None:
     text = (
-        "Base Time:\n"
-        f"🏷️ Current: <code>{html.escape(settings.base_reminder_time)} ({html.escape(settings.base_timezone)})</code>\n"
+        "⏰ Base time:\n"
+        f"Current: <code>{html.escape(settings.base_reminder_time)} ({html.escape(settings.base_timezone)})</code>\n"
         "Choose a value:"
     )
     if callback.message:
@@ -941,7 +938,7 @@ async def handle_settings_time_other(callback: CallbackQuery, state: FSMContext)
     await state.set_state(SettingsForm.base_time)
     if callback.message:
         await callback.message.answer(
-            "Base Time:\n"
+            "⏰ Base time:\n"
             "Send time in <code>HH:MM</code>.",
             reply_markup=dialog_keyboard(),
         )
@@ -951,8 +948,8 @@ async def handle_settings_time_other(callback: CallbackQuery, state: FSMContext)
 @admin_router.callback_query(F.data == "settings:timezone")
 async def handle_settings_timezone(callback: CallbackQuery, settings: Settings) -> None:
     text = (
-        "Timezone:\n"
-        f"🏷️ Current: <code>{html.escape(settings.base_timezone)}</code>\n"
+        "🌍 Timezone:\n"
+        f"Current: <code>{html.escape(settings.base_timezone)}</code>\n"
         "Choose a value:"
     )
     if callback.message:
@@ -968,7 +965,7 @@ async def handle_settings_timezone_other(callback: CallbackQuery, state: FSMCont
     await state.set_state(SettingsForm.base_timezone)
     if callback.message:
         await callback.message.answer(
-            "Timezone:\n"
+            "🌍 Timezone:\n"
             "Send an IANA timezone.\n"
             "Examples: <code>Europe/Moscow</code>, <code>America/New_York</code>.",
             reply_markup=dialog_keyboard(),
@@ -1031,8 +1028,8 @@ def _rounding_label(mode: str) -> str:
 @admin_router.callback_query(F.data == "settings:rounding")
 async def handle_settings_rounding(callback: CallbackQuery, settings: Settings) -> None:
     text = (
-        "Rounding:\n"
-        f"🏷️ Current: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>\n"
+        "🔢 Rounding:\n"
+        f"Current: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>\n"
         "Choose a mode:"
     )
     if callback.message:

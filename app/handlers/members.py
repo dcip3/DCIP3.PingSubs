@@ -26,8 +26,21 @@ async def handle_members_menu_back(callback: CallbackQuery) -> None:
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "back"))
-async def handle_members_back(callback: CallbackQuery, db: Database) -> None:
-    await send_member_list(callback, db)
+async def handle_members_back(
+    callback: CallbackQuery,
+    callback_data: MemberAction,
+    db: Database,
+) -> None:
+    await send_member_list(callback, db, focus_friend_id=callback_data.friend_id)
+
+
+@admin_router.callback_query(MemberAction.filter(F.action == "page"))
+async def handle_members_page(
+    callback: CallbackQuery,
+    callback_data: MemberAction,
+    db: Database,
+) -> None:
+    await send_member_list(callback, db, page=max(1, callback_data.friend_id))
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "add"))
