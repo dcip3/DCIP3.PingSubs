@@ -83,7 +83,9 @@ async def start_subscription_creation(responder: Responder, state: FSMContext) -
     await state.clear()
     await state.set_state(SubscriptionForm.name)
     await target.answer(
-        "Enter the subscription name (for example, Netflix):",
+        "New Subscription:\n"
+        "🏷️ Name: send subscription name.\n"
+        "Example: <code>Netflix</code>.",
         reply_markup=dialog_keyboard(),
     )
 
@@ -137,7 +139,11 @@ async def subscription_form_title(message: Message, state: FSMContext) -> None:
 
     await state.update_data(subscription_name=title)
     await state.set_state(SubscriptionForm.amount)
-    await message.answer("Charge amount (e.g. 149.99):")
+    await message.answer(
+        "Amount:\n"
+        "💰 Send charge amount.\n"
+        "Example: <code>149.99</code>."
+    )
 
 
 @admin_router.message(SubscriptionForm.amount)
@@ -166,7 +172,10 @@ async def subscription_form_currency(message: Message, state: FSMContext) -> Non
 
     await state.update_data(currency=currency)
     await state.set_state(SubscriptionForm.due_date)
-    await message.answer("Next charge date (DD.MM.YYYY):")
+    await message.answer(
+        "Next Charge Date:\n"
+        "📅 Send date in <code>DD.MM.YYYY</code>."
+    )
 
 
 @admin_router.callback_query(F.data.startswith("currency:"))
@@ -180,7 +189,10 @@ async def handle_currency_quick_select(
     if current_state == SubscriptionForm.currency.state:
         await state.update_data(currency=raw_value)
         await state.set_state(SubscriptionForm.due_date)
-        await callback.message.answer("Next charge date (DD.MM.YYYY):")
+        await callback.message.answer(
+            "Next Charge Date:\n"
+            "📅 Send date in <code>DD.MM.YYYY</code>."
+        )
         await callback.answer(f"Currency set to {raw_value}")
         return
 
@@ -387,7 +399,11 @@ async def handle_subscription_rename_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    prompt = f"Send the new subscription name (current: {escape_html(subscription['name'])})."
+    prompt = (
+        "Subscription Name:\n"
+        f"🏷️ Current: <code>{escape_html(subscription['name'])}</code>\n"
+        "Send new value:"
+    )
     await start_subscription_edit_flow(
         callback,
         state,
@@ -419,8 +435,9 @@ async def handle_subscription_amount_callback(
     if not subscription:
         return
     prompt = (
-        f"Send the new amount (e.g. 149.99). "
-        f"Current value: {subscription['amount']:.2f} {escape_html(subscription['currency'])}."
+        "Amount:\n"
+        f"🏷️ Current: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
+        "Send new value (example: <code>149.99</code>):"
     )
     await start_subscription_edit_flow(
         callback,
@@ -443,8 +460,9 @@ async def handle_subscription_currency_callback(
         return
     _, prompt_markup = currency_prompt()
     prompt_text = (
-        "Choose a currency or type your own (3 letters).\n"
-        f"Current value: {escape_html(subscription['currency'])}."
+        "Currency:\n"
+        f"🏷️ Current: <code>{escape_html(subscription['currency'])}</code>\n"
+        "Choose a value or send your own (3 letters)."
     )
     await start_subscription_edit_flow(
         callback,
@@ -470,7 +488,11 @@ async def handle_subscription_due_callback(
         current = datetime.strptime(subscription["next_charge_at"], "%Y-%m-%d").strftime(DATE_INPUT_FORMAT)
     except (KeyError, ValueError):
         current = subscription.get("next_charge_at", "unknown")
-    prompt = f"Send the next charge date (DD.MM.YYYY). Current date: {escape_html(current)}."
+    prompt = (
+        "Next Charge Date:\n"
+        f"🏷️ Current: <code>{escape_html(current)}</code>\n"
+        "Send new date in <code>DD.MM.YYYY</code>."
+    )
     await start_subscription_edit_flow(
         callback,
         state,
@@ -496,7 +518,7 @@ async def handle_subscription_period_callback(
         current_label = "monthly"
     else:
         current_label = f"{current_period} day(s)"
-    prompt = f"{period_text}\nCurrent value: {current_label}."
+    prompt = f"{period_text}\n🏷️ Current: <code>{escape_html(current_label)}</code>"
     await start_subscription_edit_flow(
         callback,
         state,
@@ -578,8 +600,9 @@ async def handle_subscription_share_callback(
     current_share = subscription.get("share_limit")
     current_label = f"{current_share} user(s)" if current_share else "all users"
     prompt_text = (
-        "Send the number of users who split this subscription or tap “Split across all”.\n"
-        f"Current setting: {escape_html(current_label)}."
+        "Split Limit:\n"
+        f"🏷️ Current: <code>{escape_html(current_label)}</code>\n"
+        "Send number of users or tap “Split across all”."
     )
     await start_subscription_edit_flow(
         callback,
@@ -608,9 +631,10 @@ async def handle_subscription_reminder_time_callback(
     else:
         current_label = f"default ({base_time})"
     prompt = (
-        "Send the reminder time in HH:MM.\n"
-        "This clock time is applied in each recipient's timezone.\n"
-        f"Current value: {escape_html(current_label)}."
+        "Reminder Time:\n"
+        "⏰ Send time in <code>HH:MM</code>.\n"
+        "🌍 Applied in each recipient timezone.\n"
+        f"🏷️ Current: <code>{escape_html(current_label)}</code>."
     )
     prompt_markup = subscription_reminder_time_edit_keyboard(callback_data.subscription_id) if current_override else None
     await start_subscription_edit_flow(
@@ -650,9 +674,10 @@ async def handle_subscription_reminder_days_callback(
         parse_offsets(subscription.get("reminder_offsets"))
     )
     prompt = (
-        "Send reminder offsets as numbers separated by commas or spaces "
-        "(e.g. -1 0 1). Negative = before, positive = after.\n"
-        f"Current schedule: {escape_html(current_offsets)}."
+        "Reminder Days:\n"
+        "🔔 Send offsets separated by commas or spaces (example: <code>-1 0 1</code>).\n"
+        "Negative means before due date, positive means after.\n"
+        f"🏷️ Current: <code>{escape_html(current_offsets)}</code>."
     )
     await start_subscription_edit_flow(
         callback,
@@ -664,9 +689,9 @@ async def handle_subscription_reminder_days_callback(
 
 
 def _comment_prompt_text(current_value: str) -> str:
-    base = "Send the comment text to attach to reminders."
+    base = "Comment:\n📝 Send text to attach to reminders."
     if current_value:
-        return f"{base}\nCurrent value: {escape_html(current_value)}."
+        return f"{base}\n🏷️ Current: <code>{escape_html(current_value)}</code>."
     return base
 
 

@@ -36,7 +36,9 @@ async def handle_member_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(FriendForm.telegram_id)
     if callback.message:
         await callback.message.answer(
-            "Send the user's Telegram ID (numbers only) or forward their message. Use the Cancel button to stop.",
+            "New User:\n"
+            "🆔 Send Telegram ID (numbers only) or forward user's message.\n"
+            "Use <code>Cancel</code> to stop.",
             reply_markup=dialog_keyboard(),
         )
     await callback.answer()
@@ -69,7 +71,7 @@ async def handle_member_rename(
     await state.set_state(MemberEditForm.full_name)
     await state.update_data(edit_member_id=callback_data.friend_id)
     if callback.message:
-        await callback.message.answer("Send the new user name:")
+        await callback.message.answer("Rename User:\n🏷️ Send new name:")
     await callback.answer()
 
 
