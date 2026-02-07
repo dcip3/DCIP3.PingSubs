@@ -101,27 +101,20 @@ def _public_settings_text(
     admin_currency: str,
     current_time: str,
     admin_time: str,
-    has_time_override: bool,
     current_timezone: str,
     admin_timezone: str,
-    has_timezone_override: bool,
 ) -> str:
-    time_source = "personal override" if has_time_override else "admin default"
-    timezone_source = "personal override" if has_timezone_override else "admin default"
-    indent = "       "
     return (
-        "⚙️ Settings:\n\n"
-        "💱 Currency:\n"
-        f"{indent}🏷️ Base: <code>{html.escape(current_currency)}</code>\n"
-        f"{indent}🔧 Default: <code>{html.escape(admin_currency)}</code>\n\n"
-        "⏰ Time:\n"
-        f"{indent}🏷️ Base: <code>{html.escape(current_time)} ({html.escape(current_timezone)})</code>\n"
-        f"{indent}🔧 Default: <code>{html.escape(admin_time)} ({html.escape(admin_timezone)})</code>\n"
-        f"{indent}📌 Source: <code>{html.escape(time_source)}</code>\n\n"
-        "🌍 Timezone:\n"
-        f"{indent}🏷️ Base: <code>{html.escape(current_timezone)}</code>\n"
-        f"{indent}🔧 Default: <code>{html.escape(admin_timezone)}</code>\n"
-        f"{indent}📌 Source: <code>{html.escape(timezone_source)}</code>"
+        "⚙️ Settings\n\n"
+        "💱 Currency\n"
+        f"🏷️ Base: <code>{html.escape(current_currency)}</code>\n"
+        f"🔧 Default: <code>{html.escape(admin_currency)}</code>\n\n"
+        "⏰ Time\n"
+        f"🏷️ Base: <code>{html.escape(current_time)} ({html.escape(current_timezone)})</code>\n"
+        f"🔧 Default: <code>{html.escape(admin_time)} ({html.escape(admin_timezone)})</code>\n\n"
+        "🌍 Timezone\n"
+        f"🏷️ Base: <code>{html.escape(current_timezone)}</code>\n"
+        f"🔧 Default: <code>{html.escape(admin_timezone)}</code>"
     )
 
 
@@ -147,10 +140,8 @@ async def _show_public_settings_menu(
         admin_currency,
         current_time,
         admin_time,
-        has_time_override,
         current_timezone,
         admin_timezone,
-        has_timezone_override,
     )
     markup = public_settings_keyboard(
         current_currency,
