@@ -663,6 +663,7 @@ def build_payment_confirmation_keyboard(subscription_id: int, due_date: date | s
     builder.button(
         text="✅ Paid",
         callback_data=ReminderAction(subscription_id=subscription_id, due_date=due_str).pack(),
+        style="success",
     )
     builder.adjust(1)
     return builder.as_markup()
@@ -678,6 +679,7 @@ def build_batch_payment_confirmation_keyboard(items: Sequence[Dict[str, object]]
         builder.button(
             text=f"✅ {label} · {due_hint}",
             callback_data=ReminderAction(subscription_id=int(item["subscription_id"]), due_date=due_str).pack(),
+            style="success",
         )
     builder.adjust(1)
     return builder.as_markup()
@@ -689,6 +691,7 @@ def build_test_payment_confirmation_keyboard(subscription_id: int, due_date: dat
     builder.button(
         text="✅ Paid",
         callback_data=TestPaidAction(subscription_id=subscription_id, due_date=due_str).pack(),
+        style="success",
     )
     builder.adjust(1)
     return builder.as_markup()
