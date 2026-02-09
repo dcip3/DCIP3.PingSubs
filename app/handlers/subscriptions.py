@@ -797,6 +797,7 @@ async def handle_subscription_delete_prompt(
     builder.button(
         text="⬅️ Back",
         callback_data=SubscriptionAction(action="open", subscription_id=callback_data.subscription_id).pack(),
+        style="primary",
     )
     await callback.message.edit_text(
         "Are you sure you want to delete this subscription?",
