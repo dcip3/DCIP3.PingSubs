@@ -391,6 +391,7 @@ async def _run_reminder_pass(
             continue
         raw_name = str(item.get("name", ""))
         raw_currency = str(item.get("currency", ""))
+        raw_base_currency = str(item.get("base_currency") or converter.target_currency).upper()
         raw_comment = str(item.get("comment", "")).strip()
         safe_name = escape_html(raw_name)
         default_subscription_override_time = normalize_time_string(item.get("reminder_time"))
@@ -427,6 +428,8 @@ async def _run_reminder_pass(
                 cycle_amount = float(item["amount"])
             currency_source = cycle_state.get("currency") if settings_snapshot_ready else raw_currency
             cycle_currency = str(currency_source or raw_currency).upper()
+            base_currency_source = cycle_state.get("base_currency") if settings_snapshot_ready else raw_base_currency
+            cycle_base_currency = str(base_currency_source or raw_base_currency).upper()
             share_limit_source = cycle_state.get("share_limit") if settings_snapshot_ready else item.get("share_limit")
             try:
                 cycle_share_limit = int(share_limit_source) if share_limit_source is not None else None
@@ -447,6 +450,7 @@ async def _run_reminder_pass(
                 "settings_snapshot_ready": settings_snapshot_ready,
                 "amount": cycle_amount,
                 "currency": cycle_currency,
+                "base_currency": cycle_base_currency,
                 "share_limit": cycle_share_limit,
                 "comment": cycle_comment,
                 "offsets": cycle_offsets,
@@ -487,7 +491,7 @@ async def _run_reminder_pass(
             user_timezone_cache: dict[int, str] = {}
             user_time_now_cache: dict[int, tuple[date, time]] = {}
             user_suppressed_cache: dict[tuple[str, date], set[int]] = {}
-            user_currency_cache: dict[int, str] = {}
+            user_currency_cache: dict[tuple[int, str], str] = {}
             converted_share_cache: dict[tuple[str, str, int, float], Optional[float]] = {}
             for cycle_due in open_cycles:
                 cycle_participants = participants_by_cycle.get(cycle_due, [])
@@ -495,6 +499,7 @@ async def _run_reminder_pass(
                     continue
                 cycle_meta = cycle_meta_by_due.get(cycle_due, {})
                 cycle_currency = str(cycle_meta.get("currency") or raw_currency).upper()
+                cycle_base_currency = str(cycle_meta.get("base_currency") or raw_base_currency).upper()
                 cycle_comment = str(cycle_meta.get("comment") or "")
                 cycle_amount = float(cycle_meta.get("amount") or item["amount"])
                 cycle_share_limit = cycle_meta.get("share_limit")
@@ -581,13 +586,16 @@ async def _run_reminder_pass(
                         if telegram_id in suppressed_ids:
                             continue
 
-                    target_currency = user_currency_cache.get(telegram_id)
+                    currency_cache_key = (telegram_id, cycle_base_currency)
+                    target_currency = user_currency_cache.get(currency_cache_key)
                     if target_currency is None:
                         target_currency = await db.get_effective_target_currency(
                             telegram_id,
-                            converter.target_currency,
+                            int(item["id"]),
+                            subscription_default=cycle_base_currency,
+                            default_currency=converter.target_currency,
                         )
-                        user_currency_cache[telegram_id] = target_currency
+                        user_currency_cache[currency_cache_key] = target_currency
 
                     converted_cache_key = (source_currency, target_currency, share_base, share_amount)
                     converted_base = converted_share_cache.get(converted_cache_key)
@@ -913,7 +921,12 @@ async def send_test_reminders(
         telegram_id = int(person["telegram_id"])
         target_currency = target_currency_cache.get(telegram_id)
         if target_currency is None:
-            target_currency = await db.get_effective_target_currency(telegram_id, converter.target_currency)
+            target_currency = await db.get_effective_target_currency(
+                telegram_id,
+                subscription_id,
+                subscription_default=str(subscription.get("base_currency") or converter.target_currency),
+                default_currency=converter.target_currency,
+            )
             target_currency_cache[telegram_id] = target_currency
 
         converted_base = converted_share_cache.get(target_currency)

@@ -225,6 +225,10 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
 def public_subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
+        text="💱 My currency",
+        callback_data=SubscriptionAction(action="public_currency", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
         text="⏰ My reminder time",
         callback_data=SubscriptionAction(action="public_remindertime", subscription_id=subscription_id).pack(),
     )
@@ -421,6 +425,10 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         text="💱 Currency",
         callback_data=SubscriptionAction(action="currency", subscription_id=subscription_id).pack(),
     )
+    builder.button(
+        text="💱 Base currency",
+        callback_data=SubscriptionAction(action="basecurrency", subscription_id=subscription_id).pack(),
+    )
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(
@@ -433,18 +441,65 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def subscription_base_currency_keyboard(
+    subscription_id: int,
+    current_currency: str,
+) -> InlineKeyboardMarkup:
+    options = ("USD", "EUR", "RUB")
+    builder = InlineKeyboardBuilder()
+    for code in options:
+        is_active = code == current_currency.upper()
+        text = f"{'✅ ' if is_active else ''}{code}"
+        if is_active:
+            builder.button(
+                text=text,
+                callback_data=f"sub_base_currency:{subscription_id}:{code}",
+                style="success",
+            )
+        else:
+            builder.button(
+                text=text,
+                callback_data=f"sub_base_currency:{subscription_id}:{code}",
+            )
+    builder.button(
+        text="Other",
+        callback_data=SubscriptionAction(action="basecurrency_other", subscription_id=subscription_id).pack(),
+    )
+    builder.adjust(3, 1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
+            style="primary",
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+    )
+    return builder.as_markup()
+
+
 def build_participants_keyboard(friends: Sequence[Dict[str, object]], subscription_id: int) -> InlineKeyboardMarkup:
     rows = []
     for friend in friends:
         prefix = "✅" if friend["is_member"] else "☐"
-        toggle_button = InlineKeyboardButton(
-            text=f"{prefix} {friend['full_name']}",
-            callback_data=ParticipantAction(
-                action="toggle",
-                subscription_id=subscription_id,
-                friend_id=friend["id"],
-            ).pack(),
-        )
+        if friend["is_member"]:
+            toggle_button = InlineKeyboardButton(
+                text=f"{prefix} {friend['full_name']}",
+                callback_data=ParticipantAction(
+                    action="toggle",
+                    subscription_id=subscription_id,
+                    friend_id=friend["id"],
+                ).pack(),
+                style="success",
+            )
+        else:
+            toggle_button = InlineKeyboardButton(
+                text=f"{prefix} {friend['full_name']}",
+                callback_data=ParticipantAction(
+                    action="toggle",
+                    subscription_id=subscription_id,
+                    friend_id=friend["id"],
+                ).pack(),
+            )
         if friend["is_member"]:
             weight_value = int(friend.get("share_weight") or 1)
             weight_button = InlineKeyboardButton(
@@ -481,7 +536,6 @@ def build_currency_keyboard(options: Iterable[str]) -> InlineKeyboardMarkup:
 
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="💱 Base currency", callback_data="settings:currency")
     builder.button(text="⏰ Base time", callback_data="settings:time")
     builder.button(text="🌍 Timezone", callback_data="settings:timezone")
     builder.button(text="🔢 Rounding", callback_data="settings:rounding")
@@ -494,25 +548,16 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def settings_currency_keyboard(options: Iterable[str]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for code in options:
-        builder.button(text=code.upper(), callback_data=f"settings_currency:{code.upper()}")
-    builder.button(text="Other", callback_data="settings:currency_other")
-    builder.adjust(3, 2)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
-    )
-    return builder.as_markup()
-
-
 def settings_time_keyboard(current_time: str) -> InlineKeyboardMarkup:
     presets = ("09:00", "12:00", "16:00", "20:00")
     builder = InlineKeyboardBuilder()
     for time_value in presets:
-        prefix = "✅ " if time_value == current_time else ""
-        builder.button(text=f"{prefix}{time_value}", callback_data=f"settings_time:{time_value}")
+        is_active = time_value == current_time
+        text = f"{'✅ ' if is_active else ''}{time_value}"
+        if is_active:
+            builder.button(text=text, callback_data=f"settings_time:{time_value}", style="success")
+        else:
+            builder.button(text=text, callback_data=f"settings_time:{time_value}")
     builder.button(text="Other", callback_data="settings:time_other")
     builder.adjust(2, 2, 1)
     builder.row(
@@ -525,8 +570,12 @@ def settings_time_keyboard(current_time: str) -> InlineKeyboardMarkup:
 def settings_timezone_keyboard(current_timezone: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for zone in COMMON_TIMEZONES:
-        prefix = "✅ " if zone == current_timezone else ""
-        builder.button(text=f"{prefix}{zone}", callback_data=f"settings_timezone:{zone}")
+        is_active = zone == current_timezone
+        text = f"{'✅ ' if is_active else ''}{zone}"
+        if is_active:
+            builder.button(text=text, callback_data=f"settings_timezone:{zone}", style="success")
+        else:
+            builder.button(text=text, callback_data=f"settings_timezone:{zone}")
     builder.button(text="Other", callback_data="settings:timezone_other")
     builder.adjust(1)
     builder.row(
@@ -537,12 +586,10 @@ def settings_timezone_keyboard(current_timezone: str) -> InlineKeyboardMarkup:
 
 
 def public_settings_keyboard(
-    current_currency: str,
     current_time: str,
     current_timezone: str,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text=f"💱 Base currency: {current_currency}", callback_data="public_settings:currency")
     builder.button(text=f"⏰ Base time: {current_time}", callback_data="public_settings:time")
     builder.button(text=f"🌍 Timezone: {current_timezone}", callback_data="public_settings:timezone")
     builder.adjust(1)
@@ -552,22 +599,56 @@ def public_settings_keyboard(
     return builder.as_markup()
 
 
-def public_settings_currency_keyboard(
-    options: Iterable[str],
+def public_subscription_currency_keyboard(
+    subscription_id: int,
     current_currency: str,
-    has_override: bool,
+    default_currency: str,
 ) -> InlineKeyboardMarkup:
+    options = ("USD", "EUR", "RUB")
     builder = InlineKeyboardBuilder()
+    normalized_current = current_currency.upper()
+    normalized_default = default_currency.upper()
     for code in options:
-        code_upper = code.upper()
-        prefix = "✅ " if code_upper == current_currency.upper() else ""
-        builder.button(text=f"{prefix}{code_upper}", callback_data=f"public_settings_currency:{code_upper}")
-    builder.button(text="Other", callback_data="public_settings:currency_other")
-    if has_override:
-        builder.button(text="↩️ Default", callback_data="public_settings:currency_reset")
+        is_active = code == normalized_current
+        text = f"{'✅ ' if is_active else ''}{code}"
+        if is_active:
+            builder.button(
+                text=text,
+                callback_data=f"public_sub_currency:{subscription_id}:{code}",
+                style="success",
+            )
+        else:
+            builder.button(
+                text=text,
+                callback_data=f"public_sub_currency:{subscription_id}:{code}",
+            )
+    default_active = normalized_current == normalized_default
+    default_text = f"{'✅ ' if default_active else ''}Default ({normalized_default})"
+    if default_active:
+        builder.button(
+            text=default_text,
+            callback_data=SubscriptionAction(
+                action="public_currency_default",
+                subscription_id=subscription_id,
+            ).pack(),
+            style="success",
+        )
+    else:
+        builder.button(
+            text=default_text,
+            callback_data=SubscriptionAction(
+                action="public_currency_default",
+                subscription_id=subscription_id,
+            ).pack(),
+        )
+    builder.button(text="Other", callback_data=f"public_sub_currency_other:{subscription_id}")
     builder.adjust(3, 2)
     builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu", style="primary"),
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="open_public", subscription_id=subscription_id).pack(),
+            style="primary",
+        ),
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
     )
     return builder.as_markup()
@@ -577,8 +658,12 @@ def public_settings_time_keyboard(current_time: str, has_override: bool) -> Inli
     presets = ("09:00", "12:00", "16:00", "20:00")
     builder = InlineKeyboardBuilder()
     for time_value in presets:
-        prefix = "✅ " if time_value == current_time else ""
-        builder.button(text=f"{prefix}{time_value}", callback_data=f"public_settings_time:{time_value}")
+        is_active = time_value == current_time
+        text = f"{'✅ ' if is_active else ''}{time_value}"
+        if is_active:
+            builder.button(text=text, callback_data=f"public_settings_time:{time_value}", style="success")
+        else:
+            builder.button(text=text, callback_data=f"public_settings_time:{time_value}")
     builder.button(text="Other", callback_data="public_settings:time_other")
     if has_override:
         builder.button(text="↩️ Default", callback_data="public_settings:time_reset")
@@ -593,8 +678,12 @@ def public_settings_time_keyboard(current_time: str, has_override: bool) -> Inli
 def public_settings_timezone_keyboard(current_timezone: str, has_override: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for zone in COMMON_TIMEZONES:
-        prefix = "✅ " if zone == current_timezone else ""
-        builder.button(text=f"{prefix}{zone}", callback_data=f"public_settings_timezone:{zone}")
+        is_active = zone == current_timezone
+        text = f"{'✅ ' if is_active else ''}{zone}"
+        if is_active:
+            builder.button(text=text, callback_data=f"public_settings_timezone:{zone}", style="success")
+        else:
+            builder.button(text=text, callback_data=f"public_settings_timezone:{zone}")
     builder.button(text="Other", callback_data="public_settings:timezone_other")
     if has_override:
         builder.button(text="↩️ Default", callback_data="public_settings:timezone_reset")
@@ -607,14 +696,20 @@ def public_settings_timezone_keyboard(current_timezone: str, has_override: bool)
 
 
 def settings_rounding_keyboard(current_mode: str) -> InlineKeyboardMarkup:
-    def mark(mode: str, label: str) -> str:
-        return f"✅ {label}" if current_mode == mode else f"☐ {label}"
-
     builder = InlineKeyboardBuilder()
-    builder.button(text=mark("precise", "With cents"), callback_data="settings_rounding:precise")
-    builder.button(text=mark("floor", "Round down"), callback_data="settings_rounding:floor")
-    builder.button(text=mark("round", "Round correctly"), callback_data="settings_rounding:round")
-    builder.button(text=mark("ceil", "Round up"), callback_data="settings_rounding:ceil")
+    options = (
+        ("precise", "With cents"),
+        ("floor", "Round down"),
+        ("round", "Round correctly"),
+        ("ceil", "Round up"),
+    )
+    for mode, label in options:
+        is_active = current_mode == mode
+        text = f"{'✅' if is_active else '☐'} {label}"
+        if is_active:
+            builder.button(text=text, callback_data=f"settings_rounding:{mode}", style="success")
+        else:
+            builder.button(text=text, callback_data=f"settings_rounding:{mode}")
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),
@@ -628,22 +723,18 @@ def settings_notifications_keyboard(
     paid_enabled: bool,
     closed_enabled: bool,
 ) -> InlineKeyboardMarkup:
-    def mark(enabled: bool, label: str) -> str:
-        return f"✅ {label}" if enabled else f"☐ {label}"
-
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text=mark(reminders_enabled, "Payment reminders"),
-        callback_data="settings_notify:reminders",
+    options = (
+        (reminders_enabled, "Payment reminders", "settings_notify:reminders"),
+        (paid_enabled, "Payment recorded", "settings_notify:paid"),
+        (closed_enabled, "All paid (cycle closed)", "settings_notify:closed"),
     )
-    builder.button(
-        text=mark(paid_enabled, "Payment recorded"),
-        callback_data="settings_notify:paid",
-    )
-    builder.button(
-        text=mark(closed_enabled, "All paid (cycle closed)"),
-        callback_data="settings_notify:closed",
-    )
+    for is_enabled, label, callback_data in options:
+        text = f"{'✅' if is_enabled else '☐'} {label}"
+        if is_enabled:
+            builder.button(text=text, callback_data=callback_data, style="success")
+        else:
+            builder.button(text=text, callback_data=callback_data)
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),

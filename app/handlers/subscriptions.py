@@ -29,6 +29,7 @@ from app.ui.keyboards import (
     admin_reply_keyboard,
     comment_edit_keyboard,
     dialog_keyboard,
+    subscription_base_currency_keyboard,
     subscription_reminder_time_edit_keyboard,
 )
 from app.ui.states import ReminderSendAction, Responder, SubscriptionAction, SubscriptionEditForm, SubscriptionForm
@@ -208,6 +209,34 @@ async def handle_currency_quick_select(
         return
 
     await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("sub_base_currency:"))
+async def handle_subscription_base_currency_quick_select(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw, raw_value = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+
+    currency = raw_value.strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        await callback.answer("Currency must contain 3 letters.", show_alert=True)
+        return
+
+    await db.update_subscription_fields(subscription_id, base_currency=currency)
+    await state.clear()
+    await callback.answer(f"Base currency set to {currency}")
+    await send_pricing_settings(callback, db, subscription_id)
 
 
 @admin_router.message(SubscriptionForm.due_date)
@@ -474,6 +503,50 @@ async def handle_subscription_currency_callback(
         SubscriptionEditForm.currency,
         prompt_text,
         reply_markup=prompt_markup,
+    )
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "basecurrency"))
+async def handle_subscription_base_currency_callback(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
+    if not subscription:
+        return
+    await state.clear()
+    current_currency = str(subscription.get("base_currency") or subscription.get("currency") or "RUB").upper()
+    text = (
+        "💱 Base currency:\n"
+        "This is the default target currency for this subscription.\n"
+        "\n"
+        f"🏷️ Current: <code>{escape_html(current_currency)}</code>\n"
+    )
+    if callback.message:
+        await callback.message.edit_text(
+            text,
+            reply_markup=subscription_base_currency_keyboard(
+                callback_data.subscription_id,
+                current_currency,
+            ),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "basecurrency_other"))
+async def handle_subscription_base_currency_other(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    state: FSMContext,
+) -> None:
+    await start_subscription_edit_flow(
+        callback,
+        state,
+        callback_data.subscription_id,
+        SubscriptionEditForm.base_currency,
+        "💱 Base currency:\nSend a 3-letter currency code.\nExample: <code>EUR</code>.",
     )
 
 
@@ -881,6 +954,23 @@ async def edit_subscription_currency(message: Message, state: FSMContext, db: Da
     await db.update_subscription_fields(sub_id, currency=currency)
     await state.clear()
     await message.answer("Currency updated.", reply_markup=admin_reply_keyboard())
+    await send_subscription_detail(message, db, sub_id)
+
+
+@admin_router.message(SubscriptionEditForm.base_currency)
+async def edit_subscription_base_currency(message: Message, state: FSMContext, db: Database) -> None:
+    sub_id = await require_edit_subscription_id(message, state)
+    if sub_id is None:
+        return
+
+    currency = (message.text or "").strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        await message.answer("Currency must contain exactly 3 letters, e.g. EUR.")
+        return
+
+    await db.update_subscription_fields(sub_id, base_currency=currency)
+    await state.clear()
+    await message.answer("Base currency updated.", reply_markup=admin_reply_keyboard())
     await send_subscription_detail(message, db, sub_id)
 
 

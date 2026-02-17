@@ -41,6 +41,7 @@ class Database:
                 name TEXT NOT NULL,
                 amount REAL NOT NULL,
                 currency TEXT NOT NULL,
+                base_currency TEXT NOT NULL DEFAULT '',
                 next_charge_at TEXT NOT NULL,
                 period_days INTEGER NOT NULL DEFAULT 30,
                 share_limit INTEGER,
@@ -137,6 +138,7 @@ class Database:
                 settings_snapshot_ready INTEGER NOT NULL DEFAULT 0,
                 amount_snapshot REAL,
                 currency_snapshot TEXT,
+                base_currency_snapshot TEXT,
                 share_limit_snapshot INTEGER,
                 comment_snapshot TEXT,
                 reminder_time_snapshot TEXT,
@@ -164,6 +166,7 @@ class Database:
         await self._ensure_subscription_columns()
         await self._ensure_cycle_columns()
         await self._ensure_participant_columns()
+        await self._backfill_subscription_base_currencies()
         await self._backfill_monthly_anchor_days()
         await self._conn.commit()
 
@@ -197,6 +200,11 @@ class Database:
             "monthly_anchor_day",
             "INTEGER",
         )
+        await self._ensure_column(
+            "subscriptions",
+            "base_currency",
+            "TEXT NOT NULL DEFAULT ''",
+        )
 
     async def _ensure_participant_columns(self) -> None:
         await self._ensure_column(
@@ -224,6 +232,11 @@ class Database:
         await self._ensure_column(
             "subscription_cycles",
             "currency_snapshot",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "base_currency_snapshot",
             "TEXT",
         )
         await self._ensure_column(
@@ -269,6 +282,35 @@ class Database:
               AND (monthly_anchor_day IS NULL OR monthly_anchor_day < 1 OR monthly_anchor_day > 31)
             """,
             (MONTHLY_PERIOD_SENTINEL,),
+        )
+
+    async def _backfill_subscription_base_currencies(self) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            UPDATE subscriptions
+            SET base_currency = UPPER(TRIM(base_currency))
+            WHERE base_currency IS NOT NULL
+            """
+        )
+        global_currency = await self.get_setting("target_currency")
+        normalized_global = (global_currency or "").strip().upper()
+        if len(normalized_global) == 3 and normalized_global.isalpha():
+            await self._conn.execute(
+                """
+                UPDATE subscriptions
+                SET base_currency = ?
+                WHERE COALESCE(NULLIF(TRIM(base_currency), ''), '') = ''
+                """,
+                (normalized_global,),
+            )
+            return
+        await self._conn.execute(
+            """
+            UPDATE subscriptions
+            SET base_currency = UPPER(currency)
+            WHERE COALESCE(NULLIF(TRIM(base_currency), ''), '') = ''
+            """
         )
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
@@ -354,17 +396,19 @@ class Database:
                 name,
                 amount,
                 currency,
+                base_currency,
                 next_charge_at,
                 period_days,
                 share_limit,
                 reminder_time,
                 monthly_anchor_day
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
                 amount,
+                currency.upper(),
                 currency.upper(),
                 due_date.isoformat(),
                 period_days,
@@ -402,7 +446,7 @@ class Database:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
             """
-            SELECT s.id, s.name, s.amount, s.currency, s.next_charge_at, s.period_days,
+            SELECT s.id, s.name, s.amount, s.currency, s.base_currency, s.next_charge_at, s.period_days,
                    s.share_limit, COUNT(sp.friend_id) AS participant_count
             FROM subscriptions s
             LEFT JOIN subscription_participants sp ON sp.subscription_id = s.id
@@ -417,7 +461,7 @@ class Database:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
             """
-            SELECT s.id, s.name, s.amount, s.currency, s.next_charge_at, s.period_days
+            SELECT s.id, s.name, s.amount, s.currency, s.base_currency, s.next_charge_at, s.period_days
             FROM subscriptions s
             JOIN subscription_participants sp ON sp.subscription_id = s.id
             JOIN friends f ON f.id = sp.friend_id
@@ -511,7 +555,7 @@ class Database:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
             """
-            SELECT id, name, amount, currency, next_charge_at, period_days, share_limit,
+            SELECT id, name, amount, currency, base_currency, next_charge_at, period_days, share_limit,
                    reminder_time, reminder_offsets, remind_after_due, comment, monthly_anchor_day
             FROM subscriptions
             """,
@@ -797,18 +841,48 @@ class Database:
         )
         await self._conn.commit()
 
+    async def get_effective_subscription_base_currency(
+        self,
+        subscription_id: int,
+        default_currency: str = "RUB",
+    ) -> str:
+        subscription = await self.get_subscription(subscription_id)
+        if subscription:
+            raw_value = str(subscription.get("base_currency") or "").strip().upper()
+            if len(raw_value) == 3 and raw_value.isalpha():
+                return raw_value
+        global_value = await self.get_setting("target_currency")
+        if global_value:
+            normalized_global = global_value.strip().upper()
+            if len(normalized_global) == 3 and normalized_global.isalpha():
+                return normalized_global
+        return default_currency.strip().upper() or "RUB"
+
     async def get_effective_target_currency(
         self,
         telegram_id: int,
+        subscription_id: int,
+        subscription_default: Optional[str] = None,
         default_currency: str = "RUB",
     ) -> str:
-        user_value = await self.get_user_setting(telegram_id, "target_currency")
-        if user_value:
-            return user_value.strip().upper()
-        global_value = await self.get_setting("target_currency")
-        if global_value:
-            return global_value.strip().upper()
-        return default_currency.strip().upper() or "RUB"
+        user_override = await self.get_user_subscription_setting(
+            telegram_id,
+            subscription_id,
+            "target_currency",
+        )
+        if user_override:
+            normalized_user = user_override.strip().upper()
+            if len(normalized_user) == 3 and normalized_user.isalpha():
+                return normalized_user
+
+        normalized_default = (subscription_default or "").strip().upper()
+        if len(normalized_default) == 3 and normalized_default.isalpha():
+            return normalized_default
+
+        return await self.get_effective_subscription_base_currency(
+            subscription_id,
+            default_currency,
+        )
 
     async def get_effective_base_reminder_time(
         self,
@@ -1076,6 +1150,7 @@ class Database:
             UPDATE subscription_cycles
             SET amount_snapshot = (SELECT amount FROM subscriptions WHERE id = ?),
                 currency_snapshot = (SELECT currency FROM subscriptions WHERE id = ?),
+                base_currency_snapshot = (SELECT base_currency FROM subscriptions WHERE id = ?),
                 share_limit_snapshot = (SELECT share_limit FROM subscriptions WHERE id = ?),
                 comment_snapshot = (SELECT comment FROM subscriptions WHERE id = ?),
                 reminder_time_snapshot = (SELECT reminder_time FROM subscriptions WHERE id = ?),
@@ -1085,6 +1160,7 @@ class Database:
             WHERE subscription_id = ? AND due_date = ?
             """,
             (
+                subscription_id,
                 subscription_id,
                 subscription_id,
                 subscription_id,
@@ -1145,6 +1221,7 @@ class Database:
                    c.settings_snapshot_ready,
                    c.amount_snapshot,
                    c.currency_snapshot,
+                   c.base_currency_snapshot,
                    c.share_limit_snapshot,
                    c.comment_snapshot,
                    c.reminder_time_snapshot,
@@ -1170,6 +1247,7 @@ class Database:
                 "settings_snapshot_ready": False,
                 "amount": None,
                 "currency": None,
+                "base_currency": None,
                 "share_limit": None,
                 "comment": "",
                 "reminder_time": "",
@@ -1189,6 +1267,7 @@ class Database:
                 state["settings_snapshot_ready"] = True
                 state["amount"] = row["amount_snapshot"]
                 state["currency"] = row["currency_snapshot"]
+                state["base_currency"] = row["base_currency_snapshot"]
                 state["share_limit"] = row["share_limit_snapshot"]
                 state["comment"] = row["comment_snapshot"] or ""
                 state["reminder_time"] = row["reminder_time_snapshot"] or ""

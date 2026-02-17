@@ -343,6 +343,20 @@ async def send_public_subscription_detail(
             reminder_time = subscription_override
         elif user_base_override:
             reminder_time = user_base_override
+
+    default_target_currency = str(
+        subscription.get("base_currency") or subscription.get("currency") or "RUB"
+    ).strip().upper()
+    user_target_currency = ""
+    if user_id is not None:
+        user_target_currency = str(
+            await db.get_user_subscription_setting(
+                user_id,
+                subscription_id,
+                "target_currency",
+            ) or ""
+        ).strip().upper()
+    effective_target_currency = user_target_currency or default_target_currency
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     comment_value = (subscription.get("comment") or "").strip()
@@ -358,6 +372,8 @@ async def send_public_subscription_detail(
         "Subscription Info:",
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>",
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>",
+        f"💱 Base currency: <code>{escape_html(default_target_currency)}</code>",
+        f"💱 My currency: <code>{escape_html(effective_target_currency)}</code>",
         f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>",
         f"➗ Split mode: <code>{escape_html(share_text)}</code>",
         "",
@@ -625,6 +641,7 @@ def _build_subscription_detail_text(
         "Subscription Info:",
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>",
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>",
+        f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>",
         f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>",
         f"➗ Split mode: <code>{escape_html(share_text)}</code>",
         "",
@@ -891,7 +908,8 @@ async def send_pricing_settings(target: Responder, db: Database, subscription_id
         "💰 Pricing:\n"
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
         "\n"
-        f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>"
+        f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
+        f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>"
     )
 
     await respond_with_markup(

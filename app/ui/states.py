@@ -13,19 +13,21 @@ class FriendForm(StatesGroup):
 
 
 class SettingsForm(StatesGroup):
-    base_currency = State()
     base_time = State()
     base_timezone = State()
 
 
 class PublicSettingsForm(StatesGroup):
-    base_currency = State()
     base_time = State()
     base_timezone = State()
 
 
 class PublicReminderForm(StatesGroup):
     reminder_time = State()
+
+
+class PublicSubscriptionCurrencyForm(StatesGroup):
+    currency = State()
 
 
 class SubscriptionForm(StatesGroup):
@@ -41,6 +43,7 @@ class SubscriptionEditForm(StatesGroup):
     rename = State()
     amount = State()
     currency = State()
+    base_currency = State()
     due_date = State()
     period = State()
     share_limit = State()

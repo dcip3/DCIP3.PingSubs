@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import html
-from aiogram import F
 import contextlib
+import html
+
+from aiogram import Bot, F
 
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -12,13 +13,12 @@ from app.ui.keyboards import (
     admin_reply_keyboard,
     admin_settings_keyboard,
     dialog_keyboard,
-    public_settings_currency_keyboard,
     public_settings_keyboard,
+    public_subscription_currency_keyboard,
     public_subscription_reminder_time_keyboard,
     public_settings_time_keyboard,
     public_settings_timezone_keyboard,
     public_reply_keyboard,
-    settings_currency_keyboard,
     settings_notifications_keyboard,
     settings_rounding_keyboard,
     settings_time_keyboard,
@@ -41,12 +41,12 @@ from app.ui.states import (
     FriendForm,
     MemberEditForm,
     PublicReminderForm,
+    PublicSubscriptionCurrencyForm,
     PublicSettingsForm,
     SettingsForm,
     SubscriptionAction,
     TestSendAction,
 )
-from app.core.constants import DEFAULT_CURRENCIES
 from app.core.config import Settings
 from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
@@ -68,12 +68,7 @@ async def _public_settings_snapshot(
     db: Database,
     settings: Settings,
     telegram_id: int,
-) -> tuple[str, str, bool, str, str, bool, str, str, bool]:
-    admin_currency_raw = await db.get_setting("target_currency")
-    admin_currency = (admin_currency_raw or settings.target_currency).strip().upper() or "RUB"
-    user_currency_raw = await db.get_user_setting(telegram_id, "target_currency")
-    has_currency_override = bool(user_currency_raw)
-    current_currency = (user_currency_raw or admin_currency).strip().upper() or admin_currency
+) -> tuple[str, str, bool, str, str, bool]:
     admin_time_raw = await db.get_setting("base_reminder_time")
     admin_time = parse_time_string(admin_time_raw, settings.base_reminder_time).strftime("%H:%M")
     user_time_raw = await db.get_user_setting(telegram_id, "base_reminder_time")
@@ -85,9 +80,6 @@ async def _public_settings_snapshot(
     has_timezone_override = bool(normalize_timezone_name(user_timezone_raw))
     current_timezone = normalize_timezone_name(user_timezone_raw, admin_timezone) or admin_timezone
     return (
-        current_currency,
-        admin_currency,
-        has_currency_override,
         current_time,
         admin_time,
         has_time_override,
@@ -98,8 +90,6 @@ async def _public_settings_snapshot(
 
 
 def _public_settings_text(
-    current_currency: str,
-    admin_currency: str,
     current_time: str,
     admin_time: str,
     current_timezone: str,
@@ -107,8 +97,6 @@ def _public_settings_text(
 ) -> str:
     return (
         "⚙️ Settings:\n\n"
-        f"💱 Currency: <code>{html.escape(current_currency)}</code>\n"
-        f"💱 Default: <code>{html.escape(admin_currency)}</code>\n\n"
         f"⏰ Base time: <code>{html.escape(current_time)} ({html.escape(current_timezone)})</code>\n"
         f"⏰ Default time: <code>{html.escape(admin_time)} ({html.escape(admin_timezone)})</code>\n\n"
         f"🌍 Timezone: <code>{html.escape(current_timezone)}</code>\n"
@@ -123,9 +111,6 @@ async def _show_public_settings_menu(
     telegram_id: int,
 ) -> None:
     (
-        current_currency,
-        admin_currency,
-        has_currency_override,
         current_time,
         admin_time,
         has_time_override,
@@ -134,15 +119,12 @@ async def _show_public_settings_menu(
         has_timezone_override,
     ) = await _public_settings_snapshot(db, settings, telegram_id)
     text = _public_settings_text(
-        current_currency,
-        admin_currency,
         current_time,
         admin_time,
         current_timezone,
         admin_timezone,
     )
     markup = public_settings_keyboard(
-        current_currency,
         current_time,
         current_timezone,
     )
@@ -272,85 +254,6 @@ async def handle_public_settings_menu_callback(
     await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
 
 
-@public_router.callback_query(F.data == "public_settings:currency")
-async def handle_public_settings_currency(
-    callback: CallbackQuery,
-    db: Database,
-    settings: Settings,
-) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
-        return
-    (
-        current_currency,
-        _,
-        has_currency_override,
-        _,
-        _,
-        _,
-        _,
-        _,
-        _,
-    ) = await _public_settings_snapshot(db, settings, callback.from_user.id)
-    if callback.message:
-        await callback.message.edit_text(
-            "💱 Base currency:\n"
-            f"💱 Current: <code>{html.escape(current_currency)}</code>\n"
-            "Choose a value:",
-            reply_markup=public_settings_currency_keyboard(
-                DEFAULT_CURRENCIES,
-                current_currency,
-                has_currency_override,
-            ),
-        )
-    await callback.answer()
-
-
-@public_router.callback_query(F.data == "public_settings:currency_other")
-async def handle_public_settings_currency_other(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(PublicSettingsForm.base_currency)
-    if callback.message:
-        await callback.message.answer(
-            "💱 Base currency:\n"
-            "Send a 3-letter currency code.\n"
-            "Example: <code>USD</code>.",
-            reply_markup=dialog_keyboard(),
-        )
-    await callback.answer()
-
-
-@public_router.callback_query(F.data.startswith("public_settings_currency:"))
-async def handle_public_settings_currency_select(
-    callback: CallbackQuery,
-    db: Database,
-    settings: Settings,
-) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
-        return
-    raw_value = callback.data.split(":", 1)[1].strip().upper()
-    if len(raw_value) != 3 or not raw_value.isalpha():
-        await callback.answer("Currency must contain 3 letters.", show_alert=True)
-        return
-    await db.set_user_setting(callback.from_user.id, "target_currency", raw_value)
-    await callback.answer(f"Base currency set to {raw_value}")
-    await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
-
-
-@public_router.callback_query(F.data == "public_settings:currency_reset")
-async def handle_public_settings_currency_reset(
-    callback: CallbackQuery,
-    db: Database,
-    settings: Settings,
-) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
-        return
-    await db.delete_user_setting(callback.from_user.id, "target_currency")
-    await callback.answer("Using admin default now.")
-    await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
-
-
 @public_router.callback_query(F.data == "public_settings:time")
 async def handle_public_settings_time(
     callback: CallbackQuery,
@@ -361,9 +264,6 @@ async def handle_public_settings_time(
         await callback.answer("Unable to identify your account.", show_alert=True)
         return
     (
-        _,
-        _,
-        _,
         current_time,
         _,
         has_time_override,
@@ -440,9 +340,6 @@ async def handle_public_settings_timezone(
         await callback.answer("Unable to identify your account.", show_alert=True)
         return
     (
-        _,
-        _,
-        _,
         _,
         _,
         _,
@@ -549,6 +446,143 @@ async def handle_public_subscription_report(
         callback_data.subscription_id,
         callback.from_user.id,
     )
+
+
+@public_router.callback_query(SubscriptionAction.filter(F.action == "public_currency"))
+async def handle_public_subscription_currency(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.")
+        return
+    subs = await db.list_subscriptions_for_user(callback.from_user.id)
+    if not any(sub["id"] == callback_data.subscription_id for sub in subs):
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
+        return
+    subscription = await db.get_subscription(callback_data.subscription_id)
+    if not subscription:
+        await callback.answer("Subscription not found.", show_alert=True)
+        return
+
+    default_currency = str(
+        subscription.get("base_currency") or subscription.get("currency") or "RUB"
+    ).strip().upper()
+    user_override_raw = str(
+        await db.get_user_subscription_setting(
+            callback.from_user.id,
+            callback_data.subscription_id,
+            "target_currency",
+        ) or ""
+    ).strip().upper()
+    current_currency = user_override_raw or default_currency
+    if callback.message:
+        await callback.message.edit_text(
+            "💱 Currency for this subscription:\n"
+            f"💱 Current: <code>{html.escape(current_currency)}</code>\n"
+            f"💱 Default: <code>{html.escape(default_currency)}</code>\n"
+            "Choose a value:",
+            reply_markup=public_subscription_currency_keyboard(
+                callback_data.subscription_id,
+                current_currency,
+                default_currency,
+            ),
+        )
+    await callback.answer()
+
+
+@public_router.callback_query(SubscriptionAction.filter(F.action == "public_currency_default"))
+async def handle_public_subscription_currency_default(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    subs = await db.list_subscriptions_for_user(callback.from_user.id)
+    if not any(sub["id"] == callback_data.subscription_id for sub in subs):
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
+        return
+    await db.delete_user_subscription_setting(
+        callback.from_user.id,
+        callback_data.subscription_id,
+        "target_currency",
+    )
+    await callback.answer("Using subscription default currency.")
+    await send_public_subscription_detail(callback, db, callback_data.subscription_id)
+
+
+@public_router.callback_query(F.data.startswith("public_sub_currency_other:"))
+async def handle_public_subscription_currency_other(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    try:
+        subscription_id = int(callback.data.split(":", 1)[1].strip())
+    except (TypeError, ValueError):
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+
+    subs = await db.list_subscriptions_for_user(callback.from_user.id)
+    if not any(sub["id"] == subscription_id for sub in subs):
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
+        return
+
+    await state.set_state(PublicSubscriptionCurrencyForm.currency)
+    await state.update_data(subscription_id=subscription_id)
+    if callback.message:
+        await callback.message.answer(
+            "💱 Currency for this subscription:\n"
+            "Send a 3-letter currency code.\n"
+            "Example: <code>CHF</code>.",
+            reply_markup=dialog_keyboard(),
+        )
+    await callback.answer()
+
+
+@public_router.callback_query(F.data.startswith("public_sub_currency:"))
+async def handle_public_subscription_currency_select(
+    callback: CallbackQuery,
+    db: Database,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw, raw_currency = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+
+    currency = raw_currency.strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        await callback.answer("Currency must contain 3 letters.", show_alert=True)
+        return
+
+    subs = await db.list_subscriptions_for_user(callback.from_user.id)
+    if not any(sub["id"] == subscription_id for sub in subs):
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
+        return
+
+    await db.set_user_subscription_setting(
+        callback.from_user.id,
+        subscription_id,
+        "target_currency",
+        currency,
+    )
+    await callback.answer(f"Currency set to {currency}")
+    await send_public_subscription_detail(callback, db, subscription_id)
 
 
 @public_router.callback_query(SubscriptionAction.filter(F.action == "public_remindertime"))
@@ -689,25 +723,49 @@ async def handle_public_reminder_time_input(
     )
 
 
-@public_router.message(PublicSettingsForm.base_currency)
-async def handle_public_settings_currency_input(
+@public_router.message(PublicSubscriptionCurrencyForm.currency)
+async def handle_public_subscription_currency_input(
     message: Message,
     state: FSMContext,
     db: Database,
-    settings: Settings,
 ) -> None:
-    if not message.from_user:
+    data = await state.get_data()
+    subscription_id = data.get("subscription_id")
+    if not subscription_id or not message.from_user:
         await state.clear()
-        await message.answer("Unable to identify your account.")
+        await message.answer("Session expired. Reopen the subscription.")
         return
+
+    subs = await db.list_subscriptions_for_user(message.from_user.id)
+    if not any(sub["id"] == subscription_id for sub in subs):
+        await state.clear()
+        await message.answer("You don't have access to this subscription.")
+        return
+
     raw_value = (message.text or "").strip().upper()
+    lowered = raw_value.lower()
+    if lowered in {"default", "base", "admin", "-"}:
+        await db.delete_user_subscription_setting(
+            message.from_user.id,
+            int(subscription_id),
+            "target_currency",
+        )
+        await state.clear()
+        await send_public_subscription_detail(message, db, int(subscription_id))
+        return
+
     if len(raw_value) != 3 or not raw_value.isalpha():
         await message.answer("Currency must contain 3 letters, for example USD.")
         return
-    await db.set_user_setting(message.from_user.id, "target_currency", raw_value)
+
+    await db.set_user_subscription_setting(
+        message.from_user.id,
+        int(subscription_id),
+        "target_currency",
+        raw_value,
+    )
     await state.clear()
-    await message.answer("Base currency updated.", reply_markup=public_reply_keyboard())
-    await _show_public_settings_menu(message, db, settings, message.from_user.id)
+    await send_public_subscription_detail(message, db, int(subscription_id))
 
 
 @public_router.message(PublicSettingsForm.base_time)
@@ -865,7 +923,6 @@ async def handle_payments_report(message: Message, db: Database) -> None:
 async def _settings_menu_text(settings: Settings) -> str:
     return (
         "⚙️ Settings:\n"
-        f"💱 Currency: <code>{html.escape(settings.target_currency)}</code>\n"
         f"⏰ Base time: <code>{html.escape(settings.base_reminder_time)}</code>\n"
         f"🌍 Timezone: <code>{html.escape(settings.base_timezone)}</code>\n"
         f"🔢 Rounding: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>"
@@ -891,31 +948,6 @@ async def handle_settings_menu_callback(callback: CallbackQuery, settings: Setti
 async def handle_settings_close(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.edit_text("Settings closed.")
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data == "settings:currency")
-async def handle_settings_currency(callback: CallbackQuery, settings: Settings) -> None:
-    text = (
-        "💱 Base currency:\n"
-        f"💱 Current: <code>{html.escape(settings.target_currency)}</code>\n"
-        "Choose a value:"
-    )
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=settings_currency_keyboard(DEFAULT_CURRENCIES))
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data == "settings:currency_other")
-async def handle_settings_currency_other(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(SettingsForm.base_currency)
-    if callback.message:
-        await callback.message.answer(
-            "💱 Base currency:\n"
-            "Send a 3-letter currency code.\n"
-            "Example: <code>USD</code>.",
-            reply_markup=dialog_keyboard(),
-        )
     await callback.answer()
 
 
@@ -1151,50 +1183,6 @@ async def handle_settings_notifications_toggle(
             ),
         )
     await callback.answer()
-
-
-@admin_router.callback_query(F.data.startswith("settings_currency:"))
-async def handle_settings_currency_select(
-    callback: CallbackQuery,
-    settings: Settings,
-    db: Database,
-    converter: CurrencyConverter,
-) -> None:
-    raw_value = callback.data.split(":", 1)[1].strip().upper()
-    if len(raw_value) != 3:
-        await callback.answer("Currency must contain 3 letters.", show_alert=True)
-        return
-    settings.target_currency = raw_value
-    converter.set_target_currency(raw_value)
-    await db.set_setting("target_currency", raw_value)
-    await callback.answer(f"Base currency set to {raw_value}")
-    if callback.message:
-        await callback.message.edit_text(
-            await _settings_menu_text(settings),
-            reply_markup=admin_settings_keyboard(),
-        )
-
-
-@admin_router.message(SettingsForm.base_currency)
-async def handle_settings_currency_input(
-    message: Message,
-    state: FSMContext,
-    settings: Settings,
-    db: Database,
-    converter: CurrencyConverter,
-) -> None:
-    raw_value = (message.text or "").strip().upper()
-    if len(raw_value) != 3 or not raw_value.isalpha():
-        await message.answer("Currency must contain 3 letters, for example USD.")
-        return
-    settings.target_currency = raw_value
-    converter.set_target_currency(raw_value)
-    await db.set_setting("target_currency", raw_value)
-    await state.clear()
-    await message.answer(
-        f"Base currency set to {raw_value}.",
-        reply_markup=admin_reply_keyboard(),
-    )
 
 
 @admin_router.message(SettingsForm.base_time)
