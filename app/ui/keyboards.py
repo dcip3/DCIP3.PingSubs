@@ -724,7 +724,7 @@ def public_settings_timezone_keyboard(current_timezone: str, default_timezone: s
         builder.button(text="Default", callback_data="public_settings:timezone_reset", style="success")
     else:
         builder.button(text="Default", callback_data="public_settings:timezone_reset")
-    builder.adjust(1)
+    builder.adjust(2)
     builder.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu", style="primary"),
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),

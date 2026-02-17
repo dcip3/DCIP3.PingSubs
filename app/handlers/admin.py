@@ -92,17 +92,19 @@ async def _public_settings_snapshot(
 def _public_settings_text(
     current_time: str,
     admin_time: str,
+    has_time_override: bool,
     current_timezone: str,
     admin_timezone: str,
+    has_timezone_override: bool,
 ) -> str:
+    time_value = current_time if has_time_override else f"Default ({admin_time})"
+    timezone_value = current_timezone if has_timezone_override else f"Default ({admin_timezone})"
     return (
         "⚙️ Settings:\n\n"
         "⏰ Time:\n"
-        f"Base time: {html.escape(current_time)} ({html.escape(current_timezone)})\n"
-        f"Default time: {html.escape(admin_time)} ({html.escape(admin_timezone)})\n\n"
+        f"Base time: {html.escape(time_value)}\n\n"
         "🌍 Timezone:\n"
-        f"Timezone: {html.escape(current_timezone)}\n"
-        f"Default timezone: {html.escape(admin_timezone)}"
+        f"Timezone: {html.escape(timezone_value)}"
     )
 
 
@@ -123,8 +125,10 @@ async def _show_public_settings_menu(
     text = _public_settings_text(
         current_time,
         admin_time,
+        has_time_override,
         current_timezone,
         admin_timezone,
+        has_timezone_override,
     )
     markup = public_settings_keyboard(
         current_time,
