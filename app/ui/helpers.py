@@ -329,20 +329,21 @@ async def send_public_subscription_detail(
         await db.get_effective_base_reminder_time(),
     ).strftime("%H:%M")
     subscription_override = normalize_time_string(subscription.get("reminder_time"))
-    reminder_time = subscription_override or admin_base_time
+    user_sub_override = None
+    user_base_time = admin_base_time
     if user_id is not None:
         user_sub_override = normalize_time_string(
             await db.get_user_subscription_setting(user_id, subscription_id, "reminder_time")
         )
-        user_base_override = normalize_time_string(
-            await db.get_user_setting(user_id, "base_reminder_time")
-        )
-        if user_sub_override:
-            reminder_time = user_sub_override
-        elif subscription_override:
-            reminder_time = subscription_override
-        elif user_base_override:
-            reminder_time = user_base_override
+        user_base_time = parse_time_string(
+            await db.get_effective_user_base_reminder_time(user_id, admin_base_time),
+            admin_base_time,
+        ).strftime("%H:%M")
+    default_reminder_time = subscription_override or user_base_time
+    if user_sub_override:
+        reminder_time_display = user_sub_override
+    else:
+        reminder_time_display = f"Default ({default_reminder_time})"
 
     default_target_currency = str(
         subscription.get("base_currency") or subscription.get("currency") or "RUB"
@@ -356,7 +357,10 @@ async def send_public_subscription_detail(
                 "target_currency",
             ) or ""
         ).strip().upper()
-    effective_target_currency = user_target_currency or default_target_currency
+    if user_target_currency:
+        my_currency_display = user_target_currency
+    else:
+        my_currency_display = f"Default ({default_target_currency})"
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     comment_value = (subscription.get("comment") or "").strip()
@@ -373,7 +377,7 @@ async def send_public_subscription_detail(
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>",
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>",
         f"💱 Base currency: <code>{escape_html(default_target_currency)}</code>",
-        f"💱 My currency: <code>{escape_html(effective_target_currency)}</code>",
+        f"💱 My currency: <code>{escape_html(my_currency_display)}</code>",
         f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>",
         f"➗ Split mode: <code>{escape_html(share_text)}</code>",
         "",
@@ -389,7 +393,7 @@ async def send_public_subscription_detail(
         [
             "",
             "Reminder Info:",
-            f"⏰ Time: <code>{escape_html(reminder_time)} ({escape_html(reminder_timezone)})</code>",
+            f"⏰ Time: <code>{escape_html(reminder_time_display)} ({escape_html(reminder_timezone)})</code>",
             f"🔔 Days: <code>{escape_html(offsets_text)}</code>",
             f"📣 Post-due: <code>{escape_html(overdue_text)}</code>",
             "",

@@ -315,26 +315,35 @@ def public_subscription_reminder_time_keyboard(
     default_time: str,
 ) -> InlineKeyboardMarkup:
     presets = ("09:00", "12:00", "16:00", "20:00")
-    builder = InlineKeyboardBuilder()
     normalized_current = current_time.strip()
     normalized_default = default_time.strip()
     default_active = normalized_current == normalized_default
+    rows: list[list[InlineKeyboardButton]] = []
+    preset_buttons: list[InlineKeyboardButton] = []
+
     for time_value in presets:
         is_active = (time_value == normalized_current) and not default_active
         if is_active:
-            builder.button(
-                text=time_value,
-                callback_data=f"public_sub_remindertime:{subscription_id}:{time_value}",
-                style="success",
+            preset_buttons.append(
+                InlineKeyboardButton(
+                    text=time_value,
+                    callback_data=f"public_sub_remindertime:{subscription_id}:{time_value}",
+                    style="success",
+                )
             )
         else:
-            builder.button(
-                text=time_value,
-                callback_data=f"public_sub_remindertime:{subscription_id}:{time_value}",
+            preset_buttons.append(
+                InlineKeyboardButton(
+                    text=time_value,
+                    callback_data=f"public_sub_remindertime:{subscription_id}:{time_value}",
+                )
             )
+    for index in range(0, len(preset_buttons), 2):
+        rows.append(preset_buttons[index : index + 2])
 
+    rows.append([InlineKeyboardButton(text="Other", callback_data=f"public_sub_remindertime_other:{subscription_id}")])
     if default_active:
-        builder.button(
+        default_button = InlineKeyboardButton(
             text="Default",
             callback_data=SubscriptionAction(
                 action="public_remindertime_default",
@@ -343,24 +352,25 @@ def public_subscription_reminder_time_keyboard(
             style="success",
         )
     else:
-        builder.button(
+        default_button = InlineKeyboardButton(
             text="Default",
             callback_data=SubscriptionAction(
                 action="public_remindertime_default",
                 subscription_id=subscription_id,
             ).pack(),
         )
-    builder.button(text="Other", callback_data=f"public_sub_remindertime_other:{subscription_id}")
-    builder.row(
-        InlineKeyboardButton(
+    rows.append([default_button])
+    rows.append(
+        [
+            InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="open_public", subscription_id=subscription_id).pack(),
             style="primary",
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            ),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
     )
-    builder.adjust(2, 2, 2)
-    return builder.as_markup()
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def reminder_send_targets_keyboard(
@@ -634,25 +644,32 @@ def public_subscription_currency_keyboard(
     default_currency: str,
 ) -> InlineKeyboardMarkup:
     options = ("USD", "EUR", "RUB")
-    builder = InlineKeyboardBuilder()
     normalized_current = current_currency.upper()
     normalized_default = default_currency.upper()
     default_active = normalized_current == normalized_default
+    rows: list[list[InlineKeyboardButton]] = []
+    option_buttons: list[InlineKeyboardButton] = []
     for code in options:
         is_active = (code == normalized_current) and not default_active
         if is_active:
-            builder.button(
-                text=code,
-                callback_data=f"public_sub_currency:{subscription_id}:{code}",
-                style="success",
+            option_buttons.append(
+                InlineKeyboardButton(
+                    text=code,
+                    callback_data=f"public_sub_currency:{subscription_id}:{code}",
+                    style="success",
+                )
             )
         else:
-            builder.button(
-                text=code,
-                callback_data=f"public_sub_currency:{subscription_id}:{code}",
+            option_buttons.append(
+                InlineKeyboardButton(
+                    text=code,
+                    callback_data=f"public_sub_currency:{subscription_id}:{code}",
+                )
             )
+    rows.append(option_buttons)
+    rows.append([InlineKeyboardButton(text="Other", callback_data=f"public_sub_currency_other:{subscription_id}")])
     if default_active:
-        builder.button(
+        default_button = InlineKeyboardButton(
             text="Default",
             callback_data=SubscriptionAction(
                 action="public_currency_default",
@@ -661,75 +678,116 @@ def public_subscription_currency_keyboard(
             style="success",
         )
     else:
-        builder.button(
+        default_button = InlineKeyboardButton(
             text="Default",
             callback_data=SubscriptionAction(
                 action="public_currency_default",
                 subscription_id=subscription_id,
             ).pack(),
         )
-    builder.button(text="Other", callback_data=f"public_sub_currency_other:{subscription_id}")
-    builder.adjust(3, 2)
-    builder.row(
-        InlineKeyboardButton(
+    rows.append([default_button])
+    rows.append(
+        [
+            InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="open_public", subscription_id=subscription_id).pack(),
             style="primary",
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            ),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
     )
-    return builder.as_markup()
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def public_settings_time_keyboard(current_time: str, default_time: str) -> InlineKeyboardMarkup:
     presets = ("09:00", "12:00", "16:00", "20:00")
-    builder = InlineKeyboardBuilder()
     normalized_current = current_time.strip()
     normalized_default = default_time.strip()
     default_active = normalized_current == normalized_default
+    rows: list[list[InlineKeyboardButton]] = []
+    preset_buttons: list[InlineKeyboardButton] = []
     for time_value in presets:
         is_active = (time_value == normalized_current) and not default_active
         text = f"{'✅ ' if is_active else ''}{time_value}"
         if is_active:
-            builder.button(text=text, callback_data=f"public_settings_time:{time_value}", style="success")
+            preset_buttons.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"public_settings_time:{time_value}",
+                    style="success",
+                )
+            )
         else:
-            builder.button(text=text, callback_data=f"public_settings_time:{time_value}")
-    builder.button(text="Other", callback_data="public_settings:time_other")
+            preset_buttons.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"public_settings_time:{time_value}",
+                )
+            )
+    for index in range(0, len(preset_buttons), 2):
+        rows.append(preset_buttons[index : index + 2])
+    rows.append([InlineKeyboardButton(text="Other", callback_data="public_settings:time_other")])
     if default_active:
-        builder.button(text="Default", callback_data="public_settings:time_reset", style="success")
+        default_button = InlineKeyboardButton(
+            text="Default",
+            callback_data="public_settings:time_reset",
+            style="success",
+        )
     else:
-        builder.button(text="Default", callback_data="public_settings:time_reset")
-    builder.adjust(2, 2, 2)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        default_button = InlineKeyboardButton(text="Default", callback_data="public_settings:time_reset")
+    rows.append([default_button])
+    rows.append(
+        [
+            InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu", style="primary"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
     )
-    return builder.as_markup()
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def public_settings_timezone_keyboard(current_timezone: str, default_timezone: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
     normalized_current = current_timezone.strip()
     normalized_default = default_timezone.strip()
     default_active = normalized_current == normalized_default
+    rows: list[list[InlineKeyboardButton]] = []
+    zone_buttons: list[InlineKeyboardButton] = []
     for zone in COMMON_TIMEZONES:
         is_active = (zone == normalized_current) and not default_active
         text = f"{'✅ ' if is_active else ''}{zone}"
         if is_active:
-            builder.button(text=text, callback_data=f"public_settings_timezone:{zone}", style="success")
+            zone_buttons.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"public_settings_timezone:{zone}",
+                    style="success",
+                )
+            )
         else:
-            builder.button(text=text, callback_data=f"public_settings_timezone:{zone}")
-    builder.button(text="Other", callback_data="public_settings:timezone_other")
+            zone_buttons.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"public_settings_timezone:{zone}",
+                )
+            )
+    for index in range(0, len(zone_buttons), 2):
+        rows.append(zone_buttons[index : index + 2])
+    rows.append([InlineKeyboardButton(text="Other", callback_data="public_settings:timezone_other")])
     if default_active:
-        builder.button(text="Default", callback_data="public_settings:timezone_reset", style="success")
+        default_button = InlineKeyboardButton(
+            text="Default",
+            callback_data="public_settings:timezone_reset",
+            style="success",
+        )
     else:
-        builder.button(text="Default", callback_data="public_settings:timezone_reset")
-    builder.adjust(2)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        default_button = InlineKeyboardButton(text="Default", callback_data="public_settings:timezone_reset")
+    rows.append([default_button])
+    rows.append(
+        [
+            InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu", style="primary"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
     )
-    return builder.as_markup()
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def settings_rounding_keyboard(current_mode: str) -> InlineKeyboardMarkup:
