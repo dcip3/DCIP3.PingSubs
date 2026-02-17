@@ -263,6 +263,7 @@ async def send_public_subscription_detail(
         user_id = target.from_user.id
     elif isinstance(target, Message) and target.from_user:
         user_id = target.from_user.id
+    is_admin_view = bool(user_id is not None and await db.is_admin(user_id))
 
     admin_timezone = normalize_timezone_name(
         await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
@@ -376,15 +377,15 @@ async def send_public_subscription_detail(
         "Subscription Info:",
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>",
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>",
-        f"💱 Base currency: <code>{escape_html(default_target_currency)}</code>",
         f"💱 My currency: <code>{escape_html(my_currency_display)}</code>",
         f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>",
-        f"➗ Split mode: <code>{escape_html(share_text)}</code>",
         "",
         "Cycle Info:",
         f"📅 Next charge: <code>{escape_html(next_charge)}</code>",
         f"🔁 Cadence: <code>{escape_html(cadence)}</code>",
     ]
+    if is_admin_view:
+        sections.insert(5, f"➗ Split mode: <code>{escape_html(share_text)}</code>")
     if overdue_block:
         sections.extend(["", overdue_block])
     if comment_line:
@@ -394,13 +395,18 @@ async def send_public_subscription_detail(
             "",
             "Reminder Info:",
             f"⏰ Time: <code>{escape_html(reminder_time_display)} ({escape_html(reminder_timezone)})</code>",
-            f"🔔 Days: <code>{escape_html(offsets_text)}</code>",
-            f"📣 Post-due: <code>{escape_html(overdue_text)}</code>",
-            "",
-            f"Users ({len(participants)}):",
-            participants_text,
         ]
     )
+    if is_admin_view:
+        sections.extend(
+            [
+                f"🔔 Days: <code>{escape_html(offsets_text)}</code>",
+                f"📣 Post-due: <code>{escape_html(overdue_text)}</code>",
+                "",
+                f"Users ({len(participants)}):",
+                participants_text,
+            ]
+        )
     text = "\n".join(sections)
     await respond_with_markup(
         target,
