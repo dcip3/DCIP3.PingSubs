@@ -86,6 +86,21 @@ async def _load_subscription(
     return subscription
 
 
+async def _show_payment_mode_menu(
+    callback: CallbackQuery,
+    subscription_id: int,
+    current_mode: str,
+) -> None:
+    if callback.message:
+        await callback.message.edit_text(
+            "💳 Payment mode:\n"
+            "\n"
+            "Choose how each user amount is calculated.\n"
+            "Then configure the option below.",
+            reply_markup=subscription_payment_mode_keyboard(subscription_id, current_mode),
+        )
+
+
 async def start_subscription_creation(responder: Responder, state: FSMContext) -> None:
     target = _response_target(responder)
     await state.clear()
@@ -571,16 +586,7 @@ async def handle_subscription_payment_mode_callback(
     current_mode = str(subscription.get("payment_mode") or PAYMENT_MODE_SPLIT).strip().lower()
     if current_mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
         current_mode = PAYMENT_MODE_SPLIT
-    if callback.message:
-        await callback.message.edit_text(
-            "💳 Payment mode:\n"
-            "\n"
-            "Choose how each user amount is calculated.",
-            reply_markup=subscription_payment_mode_keyboard(
-                callback_data.subscription_id,
-                current_mode,
-            ),
-        )
+    await _show_payment_mode_menu(callback, callback_data.subscription_id, current_mode)
     await callback.answer()
 
 
@@ -607,7 +613,7 @@ async def handle_subscription_payment_mode_select(
     await db.update_subscription_fields(subscription_id, payment_mode=mode)
     await state.clear()
     await callback.answer(f"Payment mode set to {'fixed' if mode == PAYMENT_MODE_FIXED else 'split'}.")
-    await send_pricing_settings(callback, db, subscription_id)
+    await _show_payment_mode_menu(callback, subscription_id, mode)
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "useramounts"))
@@ -618,6 +624,14 @@ async def handle_subscription_user_amounts_callback(
     state: FSMContext,
 ) -> None:
     await state.clear()
+    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
+    if not subscription:
+        return
+    current_mode = str(subscription.get("payment_mode") or PAYMENT_MODE_SPLIT).strip().lower()
+    if current_mode != PAYMENT_MODE_FIXED:
+        await callback.answer("Switch Payment mode to Fixed first.", show_alert=True)
+        await _show_payment_mode_menu(callback, callback_data.subscription_id, PAYMENT_MODE_SPLIT)
+        return
     await send_subscription_user_amounts(callback, db, callback_data.subscription_id)
 
 

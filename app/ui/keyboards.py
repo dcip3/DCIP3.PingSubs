@@ -203,7 +203,7 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Rename", callback_data=SubscriptionAction(action="rename", subscription_id=subscription_id).pack())
     builder.button(text="💰 Pricing", callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack())
-    builder.button(text="➗ Split limit", callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack())
+    builder.button(text="💳 Payment mode", callback_data=SubscriptionAction(action="paymentmode", subscription_id=subscription_id).pack())
     builder.button(text="📅 Next charge", callback_data=SubscriptionAction(action="duedate", subscription_id=subscription_id).pack())
     builder.button(text="🔁 Period", callback_data=SubscriptionAction(action="period", subscription_id=subscription_id).pack())
     builder.button(text="🔔 Reminders", callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack())
@@ -469,14 +469,6 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         text="💱 Base currency",
         callback_data=SubscriptionAction(action="basecurrency", subscription_id=subscription_id).pack(),
     )
-    builder.button(
-        text="💳 Payment mode",
-        callback_data=SubscriptionAction(action="paymentmode", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
-        text="👥 Amount per user",
-        callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
-    )
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(
@@ -519,11 +511,29 @@ def subscription_payment_mode_keyboard(
             callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
         )
     rows.append([split_button, fixed_button])
+    if normalized_mode == PAYMENT_MODE_FIXED:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="👥 Amount per user",
+                    callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="➗ Split limit",
+                    callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack(),
+                )
+            ]
+        )
     rows.append(
         [
             InlineKeyboardButton(
                 text="⬅️ Back",
-                callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
+                callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
                 style="primary",
             ),
             InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
@@ -559,7 +569,7 @@ def subscription_user_amounts_keyboard(
         [
             InlineKeyboardButton(
                 text="⬅️ Back",
-                callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
+                callback_data=SubscriptionAction(action="paymentmode", subscription_id=subscription_id).pack(),
                 style="primary",
             ),
             InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
