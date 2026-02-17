@@ -480,8 +480,10 @@ async def handle_public_subscription_currency(
     if callback.message:
         await callback.message.edit_text(
             "💱 Currency for this subscription:\n"
-            f"💱 Current: <code>{html.escape(current_currency)}</code>\n"
-            f"💱 Default: <code>{html.escape(default_currency)}</code>\n"
+            "\n"
+            f"Current: <code>{html.escape(current_currency)}</code>\n"
+            f"Default: <code>{html.escape(default_currency)}</code>\n"
+            "\n"
             "Choose a value:",
             reply_markup=public_subscription_currency_keyboard(
                 callback_data.subscription_id,
@@ -627,9 +629,11 @@ async def handle_public_subscription_reminder_time(
     if callback.message:
         await callback.message.edit_text(
             "⏰ Reminder time:\n"
-            f"⏰ Current: <code>{effective_time}</code>\n"
-            f"⏰ Default: <code>{default_time}</code>\n"
-            f"🌍 Timezone: <code>{user_timezone}</code>\n"
+            "\n"
+            f"Current: <code>{effective_time}</code>\n"
+            f"Default: <code>{default_time}</code>\n"
+            f"Timezone: <code>{user_timezone}</code>\n"
+            "\n"
             "Choose a value:",
             reply_markup=public_subscription_reminder_time_keyboard(
                 callback_data.subscription_id,
