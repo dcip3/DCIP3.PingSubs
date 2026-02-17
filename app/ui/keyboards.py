@@ -311,17 +311,46 @@ def subscription_reminder_time_edit_keyboard(subscription_id: int) -> InlineKeyb
 
 def public_subscription_reminder_time_keyboard(
     subscription_id: int,
-    has_override: bool,
+    current_time: str,
+    default_time: str,
 ) -> InlineKeyboardMarkup:
+    presets = ("09:00", "12:00", "16:00", "20:00")
     builder = InlineKeyboardBuilder()
-    if has_override:
+    normalized_current = current_time.strip()
+    normalized_default = default_time.strip()
+    default_active = normalized_current == normalized_default
+    for time_value in presets:
+        is_active = (time_value == normalized_current) and not default_active
+        if is_active:
+            builder.button(
+                text=time_value,
+                callback_data=f"public_sub_remindertime:{subscription_id}:{time_value}",
+                style="success",
+            )
+        else:
+            builder.button(
+                text=time_value,
+                callback_data=f"public_sub_remindertime:{subscription_id}:{time_value}",
+            )
+
+    if default_active:
         builder.button(
-            text="↩️ Default",
+            text="Default",
+            callback_data=SubscriptionAction(
+                action="public_remindertime_default",
+                subscription_id=subscription_id,
+            ).pack(),
+            style="success",
+        )
+    else:
+        builder.button(
+            text="Default",
             callback_data=SubscriptionAction(
                 action="public_remindertime_default",
                 subscription_id=subscription_id,
             ).pack(),
         )
+    builder.button(text="Other", callback_data=f"public_sub_remindertime_other:{subscription_id}")
     builder.row(
         InlineKeyboardButton(
             text="⬅️ Back",
@@ -330,7 +359,7 @@ def public_subscription_reminder_time_keyboard(
         ),
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
     )
-    builder.adjust(1)
+    builder.adjust(2, 2, 2)
     return builder.as_markup()
 
 
@@ -608,25 +637,23 @@ def public_subscription_currency_keyboard(
     builder = InlineKeyboardBuilder()
     normalized_current = current_currency.upper()
     normalized_default = default_currency.upper()
+    default_active = normalized_current == normalized_default
     for code in options:
-        is_active = code == normalized_current
-        text = f"{'✅ ' if is_active else ''}{code}"
+        is_active = (code == normalized_current) and not default_active
         if is_active:
             builder.button(
-                text=text,
+                text=code,
                 callback_data=f"public_sub_currency:{subscription_id}:{code}",
                 style="success",
             )
         else:
             builder.button(
-                text=text,
+                text=code,
                 callback_data=f"public_sub_currency:{subscription_id}:{code}",
             )
-    default_active = normalized_current == normalized_default
-    default_text = f"{'✅ ' if default_active else ''}Default ({normalized_default})"
     if default_active:
         builder.button(
-            text=default_text,
+            text="Default",
             callback_data=SubscriptionAction(
                 action="public_currency_default",
                 subscription_id=subscription_id,
@@ -635,7 +662,7 @@ def public_subscription_currency_keyboard(
         )
     else:
         builder.button(
-            text=default_text,
+            text="Default",
             callback_data=SubscriptionAction(
                 action="public_currency_default",
                 subscription_id=subscription_id,

@@ -621,19 +621,20 @@ async def handle_public_subscription_reminder_time(
         await db.get_effective_user_timezone(callback.from_user.id, settings.base_timezone),
         settings.base_timezone,
     ) or settings.base_timezone
-    effective_time = user_override_time or subscription_time_raw or user_base_time
-    await state.set_state(PublicReminderForm.reminder_time)
-    await state.update_data(subscription_id=callback_data.subscription_id)
+    default_time = subscription_time_raw or user_base_time
+    effective_time = user_override_time or default_time
+    await state.clear()
     if callback.message:
-        await callback.message.answer(
+        await callback.message.edit_text(
             "⏰ Reminder time:\n"
+            f"⏰ Current: <code>{effective_time}</code>\n"
+            f"⏰ Default: <code>{default_time}</code>\n"
             f"🌍 Timezone: <code>{user_timezone}</code>\n"
-            "Send time in <code>HH:MM</code>.\n"
-            "\n"
-            f"🏷️ Current: <code>{effective_time}</code>.",
+            "Choose a value:",
             reply_markup=public_subscription_reminder_time_keyboard(
                 callback_data.subscription_id,
-                bool(user_override_time),
+                effective_time,
+                default_time,
             ),
         )
     await callback.answer()
@@ -659,8 +660,78 @@ async def handle_public_subscription_reminder_time_default(
         "reminder_time",
     )
     await state.clear()
-    await callback.answer("Using your base time now.")
+    await callback.answer("Using default reminder time.")
     await send_public_subscription_detail(callback, db, callback_data.subscription_id)
+
+
+@public_router.callback_query(F.data.startswith("public_sub_remindertime_other:"))
+async def handle_public_subscription_reminder_time_other(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    try:
+        subscription_id = int(callback.data.split(":", 1)[1].strip())
+    except (TypeError, ValueError):
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+
+    subs = await db.list_subscriptions_for_user(callback.from_user.id)
+    if not any(sub["id"] == subscription_id for sub in subs):
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
+        return
+
+    await state.set_state(PublicReminderForm.reminder_time)
+    await state.update_data(subscription_id=subscription_id)
+    if callback.message:
+        await callback.message.answer(
+            "⏰ Reminder time for this subscription:\n"
+            "Send time in <code>HH:MM</code>.",
+            reply_markup=dialog_keyboard(),
+        )
+    await callback.answer()
+
+
+@public_router.callback_query(F.data.startswith("public_sub_remindertime:"))
+async def handle_public_subscription_reminder_time_select(
+    callback: CallbackQuery,
+    db: Database,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw, raw_time = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+
+    normalized = normalize_time_string(raw_time)
+    if normalized is None:
+        await callback.answer("Time must be HH:MM.", show_alert=True)
+        return
+
+    subs = await db.list_subscriptions_for_user(callback.from_user.id)
+    if not any(sub["id"] == subscription_id for sub in subs):
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
+        return
+
+    await db.set_user_subscription_setting(
+        callback.from_user.id,
+        subscription_id,
+        "reminder_time",
+        normalized,
+    )
+    await callback.answer(f"Reminder time set to {normalized}")
+    await send_public_subscription_detail(callback, db, subscription_id)
 
 
 @public_router.message(PublicReminderForm.reminder_time)
@@ -668,7 +739,6 @@ async def handle_public_reminder_time_input(
     message: Message,
     state: FSMContext,
     db: Database,
-    settings: Settings,
 ) -> None:
     data = await state.get_data()
     subscription_id = data.get("subscription_id")
@@ -689,20 +759,7 @@ async def handle_public_reminder_time_input(
     if lowered in {"default", "base", "admin", "-"}:
         await db.delete_user_subscription_setting(message.from_user.id, int(subscription_id), "reminder_time")
         await state.clear()
-        effective_time = parse_time_string(
-            await db.get_effective_user_base_reminder_time(
-                message.from_user.id,
-                settings.base_reminder_time,
-            )
-        ).strftime("%H:%M")
-        user_timezone = normalize_timezone_name(
-            await db.get_effective_user_timezone(message.from_user.id, settings.base_timezone),
-            settings.base_timezone,
-        ) or settings.base_timezone
-        await message.answer(
-            f"Personal override cleared. Using base time {effective_time} ({user_timezone}).",
-            reply_markup=public_reply_keyboard(),
-        )
+        await send_public_subscription_detail(message, db, int(subscription_id))
         return
 
     normalized = normalize_time_string(raw_time)
@@ -717,10 +774,7 @@ async def handle_public_reminder_time_input(
         normalized,
     )
     await state.clear()
-    await message.answer(
-        f"Personal reminder time updated to {normalized}.",
-        reply_markup=public_reply_keyboard(),
-    )
+    await send_public_subscription_detail(message, db, int(subscription_id))
 
 
 @public_router.message(PublicSubscriptionCurrencyForm.currency)
