@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import aiosqlite
 
-from app.core.constants import MONTHLY_PERIOD_SENTINEL
+from app.core.constants import MONTHLY_PERIOD_SENTINEL, PAYMENT_MODES, PAYMENT_MODE_SPLIT
 
 
 class Database:
@@ -42,6 +42,7 @@ class Database:
                 amount REAL NOT NULL,
                 currency TEXT NOT NULL,
                 base_currency TEXT NOT NULL DEFAULT '',
+                payment_mode TEXT NOT NULL DEFAULT 'split',
                 next_charge_at TEXT NOT NULL,
                 period_days INTEGER NOT NULL DEFAULT 30,
                 share_limit INTEGER,
@@ -54,6 +55,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS subscription_participants (
                 subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
                 friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
+                fixed_amount REAL,
                 PRIMARY KEY (subscription_id, friend_id)
             );
             """
@@ -139,6 +141,7 @@ class Database:
                 amount_snapshot REAL,
                 currency_snapshot TEXT,
                 base_currency_snapshot TEXT,
+                payment_mode_snapshot TEXT,
                 share_limit_snapshot INTEGER,
                 comment_snapshot TEXT,
                 reminder_time_snapshot TEXT,
@@ -153,6 +156,7 @@ class Database:
                 telegram_id INTEGER NOT NULL,
                 full_name TEXT NOT NULL,
                 share_weight INTEGER NOT NULL DEFAULT 1,
+                fixed_amount REAL,
                 PRIMARY KEY (subscription_id, due_date, telegram_id)
             );
             """
@@ -167,6 +171,7 @@ class Database:
         await self._ensure_cycle_columns()
         await self._ensure_participant_columns()
         await self._backfill_subscription_base_currencies()
+        await self._backfill_subscription_payment_modes()
         await self._backfill_monthly_anchor_days()
         await self._conn.commit()
 
@@ -205,12 +210,27 @@ class Database:
             "base_currency",
             "TEXT NOT NULL DEFAULT ''",
         )
+        await self._ensure_column(
+            "subscriptions",
+            "payment_mode",
+            "TEXT NOT NULL DEFAULT 'split'",
+        )
 
     async def _ensure_participant_columns(self) -> None:
         await self._ensure_column(
             "subscription_participants",
             "share_weight",
             "INTEGER NOT NULL DEFAULT 1",
+        )
+        await self._ensure_column(
+            "subscription_participants",
+            "fixed_amount",
+            "REAL",
+        )
+        await self._ensure_column(
+            "subscription_cycle_participants",
+            "fixed_amount",
+            "REAL",
         )
 
     async def _ensure_cycle_columns(self) -> None:
@@ -237,6 +257,11 @@ class Database:
         await self._ensure_column(
             "subscription_cycles",
             "base_currency_snapshot",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "payment_mode_snapshot",
             "TEXT",
         )
         await self._ensure_column(
@@ -311,6 +336,27 @@ class Database:
             SET base_currency = UPPER(currency)
             WHERE COALESCE(NULLIF(TRIM(base_currency), ''), '') = ''
             """
+        )
+
+    async def _backfill_subscription_payment_modes(self) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            UPDATE subscriptions
+            SET payment_mode = LOWER(TRIM(payment_mode))
+            WHERE payment_mode IS NOT NULL
+            """
+        )
+        placeholders = ",".join(["?"] * len(PAYMENT_MODES))
+        await self._conn.execute(
+            f"""
+            UPDATE subscriptions
+            SET payment_mode = ?
+            WHERE payment_mode IS NULL
+               OR COALESCE(NULLIF(TRIM(payment_mode), ''), '') = ''
+               OR payment_mode NOT IN ({placeholders})
+            """,
+            (PAYMENT_MODE_SPLIT, *PAYMENT_MODES),
         )
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
@@ -397,19 +443,21 @@ class Database:
                 amount,
                 currency,
                 base_currency,
+                payment_mode,
                 next_charge_at,
                 period_days,
                 share_limit,
                 reminder_time,
                 monthly_anchor_day
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
                 amount,
                 currency.upper(),
                 currency.upper(),
+                PAYMENT_MODE_SPLIT,
                 due_date.isoformat(),
                 period_days,
                 share_limit,
@@ -447,7 +495,7 @@ class Database:
         cursor = await self._conn.execute(
             """
             SELECT s.id, s.name, s.amount, s.currency, s.base_currency, s.next_charge_at, s.period_days,
-                   s.share_limit, COUNT(sp.friend_id) AS participant_count
+                   s.share_limit, s.payment_mode, COUNT(sp.friend_id) AS participant_count
             FROM subscriptions s
             LEFT JOIN subscription_participants sp ON sp.subscription_id = s.id
             GROUP BY s.id
@@ -462,6 +510,7 @@ class Database:
         cursor = await self._conn.execute(
             """
             SELECT s.id, s.name, s.amount, s.currency, s.base_currency, s.next_charge_at, s.period_days
+                   , s.payment_mode
             FROM subscriptions s
             JOIN subscription_participants sp ON sp.subscription_id = s.id
             JOIN friends f ON f.id = sp.friend_id
@@ -484,6 +533,7 @@ class Database:
         cursor = await self._conn.execute(
             """
             SELECT f.id, f.full_name, f.telegram_id, sp.share_weight
+                   , sp.fixed_amount
             FROM subscription_participants sp
             JOIN friends f ON f.id = sp.friend_id
             WHERE sp.subscription_id = ?
@@ -500,7 +550,8 @@ class Database:
             """
             SELECT f.id, f.full_name, f.telegram_id,
                    CASE WHEN sp.friend_id IS NULL THEN 0 ELSE 1 END AS is_member,
-                   COALESCE(sp.share_weight, 1) AS share_weight
+                   COALESCE(sp.share_weight, 1) AS share_weight,
+                   sp.fixed_amount
             FROM friends f
             LEFT JOIN subscription_participants sp
                 ON sp.friend_id = f.id AND sp.subscription_id = ?
@@ -522,10 +573,17 @@ class Database:
         if enabled:
             await self._conn.execute(
                 """
-                INSERT OR REPLACE INTO subscription_participants (subscription_id, friend_id, share_weight)
-                VALUES (?, ?, ?)
+                INSERT INTO subscription_participants (
+                    subscription_id,
+                    friend_id,
+                    share_weight,
+                    fixed_amount
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(subscription_id, friend_id) DO UPDATE
+                SET share_weight = excluded.share_weight
                 """,
-                (subscription_id, friend_id, share_weight),
+                (subscription_id, friend_id, share_weight, None),
             )
         else:
             await self._conn.execute(
@@ -551,12 +609,30 @@ class Database:
         )
         await self._conn.commit()
 
+    async def update_participant_fixed_amount(
+        self,
+        subscription_id: int,
+        friend_id: int,
+        fixed_amount: Optional[float],
+    ) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            UPDATE subscription_participants
+            SET fixed_amount = ?
+            WHERE subscription_id = ? AND friend_id = ?
+            """,
+            (fixed_amount, subscription_id, friend_id),
+        )
+        await self._conn.commit()
+
     async def fetch_subscriptions_for_reminders(self) -> List[Dict[str, Any]]:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
             """
             SELECT id, name, amount, currency, base_currency, next_charge_at, period_days, share_limit,
-                   reminder_time, reminder_offsets, remind_after_due, comment, monthly_anchor_day
+                   reminder_time, reminder_offsets, remind_after_due, comment, monthly_anchor_day,
+                   payment_mode
             FROM subscriptions
             """,
         )
@@ -568,7 +644,7 @@ class Database:
         placeholders = ",".join(["?"] * len(ids))
         participants_cursor = await self._conn.execute(
             f"""
-            SELECT sp.subscription_id, f.full_name, f.telegram_id, sp.share_weight
+            SELECT sp.subscription_id, f.full_name, f.telegram_id, sp.share_weight, sp.fixed_amount
             FROM subscription_participants sp
             JOIN friends f ON f.id = sp.friend_id
             WHERE sp.subscription_id IN ({placeholders})
@@ -583,6 +659,7 @@ class Database:
                     "full_name": row["full_name"],
                     "telegram_id": row["telegram_id"],
                     "share_weight": row["share_weight"],
+                    "fixed_amount": row["fixed_amount"],
                 }
             )
 
@@ -1072,7 +1149,7 @@ class Database:
         assert self._conn is not None, "Database is not connected"
         participants_cursor = await self._conn.execute(
             """
-            SELECT f.telegram_id, f.full_name, sp.share_weight
+            SELECT f.telegram_id, f.full_name, sp.share_weight, sp.fixed_amount
             FROM subscription_participants sp
             JOIN friends f ON f.id = sp.friend_id
             WHERE sp.subscription_id = ?
@@ -1089,9 +1166,10 @@ class Database:
                 due_date,
                 telegram_id,
                 full_name,
-                share_weight
+                share_weight,
+                fixed_amount
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1100,6 +1178,7 @@ class Database:
                     int(row["telegram_id"]),
                     str(row["full_name"]),
                     int(row["share_weight"] or 1),
+                    row["fixed_amount"],
                 )
                 for row in participants
             ],
@@ -1151,6 +1230,7 @@ class Database:
             SET amount_snapshot = (SELECT amount FROM subscriptions WHERE id = ?),
                 currency_snapshot = (SELECT currency FROM subscriptions WHERE id = ?),
                 base_currency_snapshot = (SELECT base_currency FROM subscriptions WHERE id = ?),
+                payment_mode_snapshot = (SELECT payment_mode FROM subscriptions WHERE id = ?),
                 share_limit_snapshot = (SELECT share_limit FROM subscriptions WHERE id = ?),
                 comment_snapshot = (SELECT comment FROM subscriptions WHERE id = ?),
                 reminder_time_snapshot = (SELECT reminder_time FROM subscriptions WHERE id = ?),
@@ -1160,6 +1240,7 @@ class Database:
             WHERE subscription_id = ? AND due_date = ?
             """,
             (
+                subscription_id,
                 subscription_id,
                 subscription_id,
                 subscription_id,
@@ -1195,7 +1276,7 @@ class Database:
         due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
         cursor = await self._conn.execute(
             """
-            SELECT telegram_id, full_name, share_weight
+            SELECT telegram_id, full_name, share_weight, fixed_amount
             FROM subscription_cycle_participants
             WHERE subscription_id = ? AND due_date = ?
             ORDER BY full_name
@@ -1222,6 +1303,7 @@ class Database:
                    c.amount_snapshot,
                    c.currency_snapshot,
                    c.base_currency_snapshot,
+                   c.payment_mode_snapshot,
                    c.share_limit_snapshot,
                    c.comment_snapshot,
                    c.reminder_time_snapshot,
@@ -1229,7 +1311,8 @@ class Database:
                    c.remind_after_due_snapshot,
                    cp.telegram_id,
                    cp.full_name,
-                   cp.share_weight
+                   cp.share_weight,
+                   cp.fixed_amount
             FROM subscription_cycles c
             LEFT JOIN subscription_cycle_participants cp
               ON cp.subscription_id = c.subscription_id
@@ -1248,6 +1331,7 @@ class Database:
                 "amount": None,
                 "currency": None,
                 "base_currency": None,
+                "payment_mode": PAYMENT_MODE_SPLIT,
                 "share_limit": None,
                 "comment": "",
                 "reminder_time": "",
@@ -1268,6 +1352,7 @@ class Database:
                 state["amount"] = row["amount_snapshot"]
                 state["currency"] = row["currency_snapshot"]
                 state["base_currency"] = row["base_currency_snapshot"]
+                state["payment_mode"] = row["payment_mode_snapshot"] or PAYMENT_MODE_SPLIT
                 state["share_limit"] = row["share_limit_snapshot"]
                 state["comment"] = row["comment_snapshot"] or ""
                 state["reminder_time"] = row["reminder_time_snapshot"] or ""
@@ -1279,6 +1364,7 @@ class Database:
                         "telegram_id": int(row["telegram_id"]),
                         "full_name": str(row["full_name"]),
                         "share_weight": int(row["share_weight"] or 1),
+                        "fixed_amount": row["fixed_amount"],
                     }
                 )
         return result

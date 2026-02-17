@@ -9,7 +9,12 @@ from aiogram.types import CallbackQuery, Message
 from aiogram import Bot
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.core.constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
+from app.core.constants import (
+    DATE_INPUT_FORMAT,
+    MONTHLY_PERIOD_SENTINEL,
+    PAYMENT_MODE_FIXED,
+    PAYMENT_MODE_SPLIT,
+)
 from app.storage.db import Database
 from app.ui.helpers import (
     currency_prompt,
@@ -18,6 +23,7 @@ from app.ui.helpers import (
     require_edit_subscription_id,
     send_pricing_settings,
     send_subscription_payment_report,
+    send_subscription_user_amounts,
     send_reminder_send_menu,
     send_reminder_settings,
     send_subscription_detail,
@@ -29,6 +35,7 @@ from app.ui.keyboards import (
     admin_reply_keyboard,
     comment_edit_keyboard,
     dialog_keyboard,
+    subscription_payment_mode_keyboard,
     subscription_base_currency_keyboard,
     subscription_reminder_time_edit_keyboard,
 )
@@ -550,6 +557,119 @@ async def handle_subscription_base_currency_other(
     )
 
 
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "paymentmode"))
+async def handle_subscription_payment_mode_callback(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
+    if not subscription:
+        return
+    await state.clear()
+    current_mode = str(subscription.get("payment_mode") or PAYMENT_MODE_SPLIT).strip().lower()
+    if current_mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
+        current_mode = PAYMENT_MODE_SPLIT
+    if callback.message:
+        await callback.message.edit_text(
+            "💳 Payment mode:\n"
+            "\n"
+            "Choose how each user amount is calculated.",
+            reply_markup=subscription_payment_mode_keyboard(
+                callback_data.subscription_id,
+                current_mode,
+            ),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("sub_payment_mode:"))
+async def handle_subscription_payment_mode_select(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw, raw_mode = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+    mode = raw_mode.strip().lower()
+    if mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
+        await callback.answer("Unsupported mode.", show_alert=True)
+        return
+    await db.update_subscription_fields(subscription_id, payment_mode=mode)
+    await state.clear()
+    await callback.answer(f"Payment mode set to {'fixed' if mode == PAYMENT_MODE_FIXED else 'split'}.")
+    await send_pricing_settings(callback, db, subscription_id)
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "useramounts"))
+async def handle_subscription_user_amounts_callback(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    await send_subscription_user_amounts(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(F.data.startswith("sub_user_amount:"))
+async def handle_subscription_user_amount_edit_callback(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw, friend_id_raw = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+        friend_id = int(friend_id_raw)
+    except ValueError:
+        await callback.answer("Invalid user.", show_alert=True)
+        return
+    participants = await db.list_subscription_participants(subscription_id)
+    target_person = next((person for person in participants if int(person["id"]) == friend_id), None)
+    if target_person is None:
+        await callback.answer("User is not in this subscription.", show_alert=True)
+        return
+
+    current_value = target_person.get("fixed_amount")
+    if current_value is None:
+        current_text = "not set"
+    else:
+        try:
+            current_text = f"{float(current_value):.2f}"
+        except (TypeError, ValueError):
+            current_text = "not set"
+
+    await state.set_state(SubscriptionEditForm.user_amount)
+    await state.update_data(
+        user_amount_subscription_id=subscription_id,
+        user_amount_friend_id=friend_id,
+    )
+    if callback.message:
+        await callback.message.answer(
+            "👥 Amount per user:\n"
+            f"🏷️ User: <code>{escape_html(str(target_person['full_name']))}</code>\n"
+            f"🏷️ Current: <code>{escape_html(current_text)}</code>\n\n"
+            "Send amount (example: <code>300</code>).\n"
+            "Send <code>clear</code> to remove fixed amount.",
+            reply_markup=dialog_keyboard(),
+        )
+    await callback.answer()
+
+
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "duedate"))
 async def handle_subscription_due_callback(
     callback: CallbackQuery,
@@ -972,6 +1092,53 @@ async def edit_subscription_base_currency(message: Message, state: FSMContext, d
     await state.clear()
     await message.answer("Base currency updated.", reply_markup=admin_reply_keyboard())
     await send_subscription_detail(message, db, sub_id)
+
+
+@admin_router.message(SubscriptionEditForm.user_amount)
+async def edit_subscription_user_amount(message: Message, state: FSMContext, db: Database) -> None:
+    data = await state.get_data()
+    subscription_id = data.get("user_amount_subscription_id")
+    friend_id = data.get("user_amount_friend_id")
+    if not subscription_id or not friend_id:
+        await state.clear()
+        await message.answer("Session expired. Reopen amount-per-user menu.")
+        return
+
+    participants = await db.list_subscription_participants(int(subscription_id))
+    target_person = next((person for person in participants if int(person["id"]) == int(friend_id)), None)
+    if target_person is None:
+        await state.clear()
+        await message.answer("User is not in this subscription.")
+        return
+
+    raw_value = (message.text or "").strip()
+    if raw_value.lower() in {"clear", "default", "none", "-"}:
+        await db.update_participant_fixed_amount(
+            int(subscription_id),
+            int(friend_id),
+            None,
+        )
+        await state.clear()
+        await message.answer("Fixed amount cleared.", reply_markup=admin_reply_keyboard())
+        await send_subscription_user_amounts(message, db, int(subscription_id))
+        return
+
+    try:
+        amount = float(raw_value.replace(",", "."))
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Amount must be a positive number. Example: 300")
+        return
+
+    await db.update_participant_fixed_amount(
+        int(subscription_id),
+        int(friend_id),
+        amount,
+    )
+    await state.clear()
+    await message.answer("Fixed amount updated.", reply_markup=admin_reply_keyboard())
+    await send_subscription_user_amounts(message, db, int(subscription_id))
 
 
 @admin_router.message(SubscriptionEditForm.due_date)

@@ -6,6 +6,7 @@ from typing import Dict, Iterable, Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app.core.constants import PAYMENT_MODE_FIXED, PAYMENT_MODE_SPLIT
 from app.ui.states import (
     MemberAction,
     ParticipantAction,
@@ -468,6 +469,14 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         text="💱 Base currency",
         callback_data=SubscriptionAction(action="basecurrency", subscription_id=subscription_id).pack(),
     )
+    builder.button(
+        text="💳 Payment mode",
+        callback_data=SubscriptionAction(action="paymentmode", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="👥 Amount per user",
+        callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
+    )
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(
@@ -478,6 +487,85 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
     )
     return builder.as_markup()
+
+
+def subscription_payment_mode_keyboard(
+    subscription_id: int,
+    current_mode: str,
+) -> InlineKeyboardMarkup:
+    normalized_mode = (current_mode or PAYMENT_MODE_SPLIT).strip().lower()
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if normalized_mode == PAYMENT_MODE_SPLIT:
+        split_button = InlineKeyboardButton(
+            text="Split by shares",
+            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_SPLIT}",
+            style="success",
+        )
+    else:
+        split_button = InlineKeyboardButton(
+            text="Split by shares",
+            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_SPLIT}",
+        )
+    if normalized_mode == PAYMENT_MODE_FIXED:
+        fixed_button = InlineKeyboardButton(
+            text="Fixed per user",
+            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
+            style="success",
+        )
+    else:
+        fixed_button = InlineKeyboardButton(
+            text="Fixed per user",
+            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
+        )
+    rows.append([split_button, fixed_button])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Back",
+                callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
+                style="primary",
+            ),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def subscription_user_amounts_keyboard(
+    subscription_id: int,
+    participants: Sequence[Dict[str, object]],
+    currency: str,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for person in participants:
+        name = str(person.get("full_name") or "Unknown")
+        fixed_amount = person.get("fixed_amount")
+        amount_text = "not set"
+        if fixed_amount is not None:
+            try:
+                amount_text = f"{float(fixed_amount):.2f} {currency.upper()}"
+            except (TypeError, ValueError):
+                amount_text = "not set"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{name} — {amount_text}",
+                    callback_data=f"sub_user_amount:{subscription_id}:{int(person['id'])}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Back",
+                callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
+                style="primary",
+            ),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def subscription_base_currency_keyboard(

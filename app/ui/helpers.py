@@ -15,7 +15,13 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
-from app.core.constants import DATE_INPUT_FORMAT, DEFAULT_CURRENCIES, MONTHLY_PERIOD_SENTINEL
+from app.core.constants import (
+    DATE_INPUT_FORMAT,
+    DEFAULT_CURRENCIES,
+    MONTHLY_PERIOD_SENTINEL,
+    PAYMENT_MODE_FIXED,
+    PAYMENT_MODE_SPLIT,
+)
 from app.storage.db import Database
 from app.ui.keyboards import (
     admin_reply_keyboard,
@@ -30,6 +36,7 @@ from app.ui.keyboards import (
     member_detail_keyboard,
     member_report_keyboard,
     pricing_settings_keyboard,
+    subscription_user_amounts_keyboard,
     public_subscription_detail_keyboard,
     public_subscription_report_keyboard,
     reminder_settings_keyboard,
@@ -55,6 +62,59 @@ from app.core.reminders import (
 from app.ui.text import escape_html, format_display_name
 
 MAX_TELEGRAM_MESSAGE_LEN = 3900
+
+
+def _normalize_payment_mode(raw_value: object) -> str:
+    value = str(raw_value or PAYMENT_MODE_SPLIT).strip().lower()
+    if value == PAYMENT_MODE_FIXED:
+        return PAYMENT_MODE_FIXED
+    return PAYMENT_MODE_SPLIT
+
+
+def _to_fixed_amount(raw_value: object) -> Optional[float]:
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _split_share_base(
+    subscription: Dict[str, object],
+    participants: Sequence[Dict[str, object]],
+) -> int:
+    share_limit = int(subscription.get("share_limit") or 0)
+    if share_limit > 0:
+        return share_limit
+    if not participants:
+        return 1
+    total_shares = sum(int(person.get("share_weight") or 1) for person in participants)
+    return total_shares or 1
+
+
+def _sum_users_total(
+    subscription: Dict[str, object],
+    participants: Sequence[Dict[str, object]],
+) -> float:
+    if not participants:
+        return 0.0
+    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    split_share_base = _split_share_base(subscription, participants)
+    per_share = float(subscription.get("amount") or 0.0) / split_share_base
+    total = 0.0
+    for person in participants:
+        if payment_mode == PAYMENT_MODE_FIXED:
+            fixed_amount = _to_fixed_amount(person.get("fixed_amount"))
+            if fixed_amount is not None:
+                total += fixed_amount
+                continue
+        weight = int(person.get("share_weight") or 1)
+        total += per_share * weight
+    return total
 
 
 def _format_iso_date(value: str) -> str:
@@ -306,16 +366,28 @@ async def send_public_subscription_detail(
         except ValueError:
             pass
     next_charge = _format_iso_date(next_charge_value)
-    share_base, share_text = _share_details(subscription, participants)
-    per_person = subscription["amount"] / share_base
+    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    _, share_text = _share_details(subscription, participants)
+    split_share_base = _split_share_base(subscription, participants)
+    per_person = subscription["amount"] / split_share_base
+    users_total = _sum_users_total(subscription, participants)
+    person_by_telegram: dict[int, Dict[str, object]] = {
+        int(person["telegram_id"]): person
+        for person in participants
+        if person.get("telegram_id") is not None
+    }
 
     if participants:
         participants_lines = []
         for p in participants:
             weight = int(p.get("share_weight") or 1)
             weight_text = f" (x{weight})" if weight > 1 else ""
+            fixed_amount = _to_fixed_amount(p.get("fixed_amount"))
+            amount_text = ""
+            if payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
+                amount_text = f" — {fixed_amount:.2f} {escape_html(subscription['currency'])}"
             participants_lines.append(
-                f"• <code>{escape_html(p['full_name'])}{weight_text}</code>"
+                f"• <code>{escape_html(p['full_name'])}{weight_text}{amount_text}</code>"
             )
         participants_text = "\n".join(participants_lines)
     else:
@@ -362,6 +434,21 @@ async def send_public_subscription_detail(
         my_currency_display = user_target_currency
     else:
         my_currency_display = f"Default ({default_target_currency})"
+
+    my_amount_display = "n/a"
+    if user_id is not None:
+        current_person = person_by_telegram.get(int(user_id))
+        if current_person:
+            if payment_mode == PAYMENT_MODE_FIXED:
+                fixed_amount = _to_fixed_amount(current_person.get("fixed_amount"))
+                if fixed_amount is not None:
+                    my_amount_display = f"{fixed_amount:.2f} {subscription['currency']}"
+                else:
+                    weight = int(current_person.get("share_weight") or 1)
+                    my_amount_display = f"{(per_person * weight):.2f} {subscription['currency']}"
+            else:
+                weight = int(current_person.get("share_weight") or 1)
+                my_amount_display = f"{(per_person * weight):.2f} {subscription['currency']}"
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     comment_value = (subscription.get("comment") or "").strip()
@@ -378,14 +465,19 @@ async def send_public_subscription_detail(
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>",
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>",
         f"💱 My currency: <code>{escape_html(my_currency_display)}</code>",
-        f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>",
+        f"💵 My amount: <code>{escape_html(my_amount_display)}</code>",
         "",
         "Cycle Info:",
         f"📅 Next charge: <code>{escape_html(next_charge)}</code>",
         f"🔁 Cadence: <code>{escape_html(cadence)}</code>",
     ]
     if is_admin_view:
-        sections.insert(5, f"➗ Split mode: <code>{escape_html(share_text)}</code>")
+        sections.insert(5, f"💳 Payment mode: <code>{'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}</code>")
+        if payment_mode == PAYMENT_MODE_FIXED:
+            sections.insert(6, f"👥 Users total: <code>{users_total:.2f} {escape_html(subscription['currency'])}</code>")
+        else:
+            sections.insert(6, f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>")
+            sections.insert(7, f"➗ Split mode: <code>{escape_html(share_text)}</code>")
     if overdue_block:
         sections.extend(["", overdue_block])
     if comment_line:
@@ -598,6 +690,10 @@ def _share_details(
     subscription: Dict[str, object],
     participants: Sequence[Dict[str, object]],
 ) -> tuple[int, str]:
+    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    if payment_mode == PAYMENT_MODE_FIXED:
+        return 1, "fixed per user"
+
     share_limit = int(subscription.get("share_limit") or 0)
     if share_limit:
         return share_limit, f"split into {share_limit} share(s)"
@@ -617,8 +713,11 @@ def _build_subscription_detail_text(
     base_time: str,
     base_timezone: str,
 ) -> str:
-    share_base, share_text = _share_details(subscription, participants)
-    per_person = subscription["amount"] / share_base
+    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    split_share_base = _split_share_base(subscription, participants)
+    _, share_text = _share_details(subscription, participants)
+    per_person = subscription["amount"] / split_share_base
+    users_total = _sum_users_total(subscription, participants)
     comment_value = (subscription.get("comment") or "").strip()
     comment_line = f"📝 Comment: <code>{escape_html(comment_value)}</code>" if comment_value else ""
 
@@ -627,8 +726,12 @@ def _build_subscription_detail_text(
         for p in participants:
             weight = int(p.get("share_weight") or 1)
             weight_text = f" (x{weight})" if weight > 1 else ""
+            fixed_amount = _to_fixed_amount(p.get("fixed_amount"))
+            amount_text = ""
+            if payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
+                amount_text = f" — {fixed_amount:.2f} {escape_html(subscription['currency'])}"
             participants_lines.append(
-                f"• <code>{escape_html(p['full_name'])}{weight_text}</code>"
+                f"• <code>{escape_html(p['full_name'])}{weight_text}{amount_text}</code>"
             )
         participants_text = "\n".join(participants_lines)
     else:
@@ -652,8 +755,7 @@ def _build_subscription_detail_text(
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>",
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>",
         f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>",
-        f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>",
-        f"➗ Split mode: <code>{escape_html(share_text)}</code>",
+        f"💳 Payment mode: <code>{'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}</code>",
         "",
         "Cycle Info:",
         f"📅 Next charge: <code>{_format_iso_date(subscription['next_charge_at'])}</code>",
@@ -664,6 +766,11 @@ def _build_subscription_detail_text(
         f"🔔 Days: <code>{escape_html(offsets_text)}</code>",
         f"📣 Post-due: <code>{escape_html(overdue_text)}</code>",
     ]
+    if payment_mode == PAYMENT_MODE_FIXED:
+        lines.insert(5, f"👥 Users total: <code>{users_total:.2f} {escape_html(subscription['currency'])}</code>")
+    else:
+        lines.insert(5, f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>")
+        lines.insert(6, f"➗ Split mode: <code>{escape_html(share_text)}</code>")
     if comment_line:
         lines.extend(["", comment_line])
     lines.extend(["", f"Users ({len(participants)}):", participants_text])
@@ -913,19 +1020,65 @@ async def send_pricing_settings(target: Responder, db: Database, subscription_id
     if not subscription:
         await respond_with_markup(target, "This subscription no longer exists.")
         return
+    participants = await db.list_subscription_participants(subscription_id)
+    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    users_total = _sum_users_total(subscription, participants)
+    mode_label = "Fixed per user" if payment_mode == PAYMENT_MODE_FIXED else "Split by shares"
 
     text = (
         "💰 Pricing:\n"
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
         "\n"
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>"
+        f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>\n"
+        f"💳 Payment mode: <code>{mode_label}</code>\n"
+        f"👥 Users total: <code>{users_total:.2f} {escape_html(subscription['currency'])}</code>"
     )
 
     await respond_with_markup(
         target,
         text,
         reply_markup=pricing_settings_keyboard(subscription_id),
+    )
+
+
+async def send_subscription_user_amounts(
+    target: Responder,
+    db: Database,
+    subscription_id: int,
+) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await respond_with_markup(target, "This subscription no longer exists.")
+        return
+    participants = await db.list_subscription_participants(subscription_id)
+    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    assigned_total = sum(
+        amount
+        for amount in (_to_fixed_amount(person.get("fixed_amount")) for person in participants)
+        if amount is not None
+    )
+    missing_count = sum(
+        1 for person in participants if _to_fixed_amount(person.get("fixed_amount")) is None
+    )
+    mode_label = "Fixed per user" if payment_mode == PAYMENT_MODE_FIXED else "Split by shares"
+    text = (
+        "👥 Amount per user:\n"
+        f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
+        f"💳 Mode: <code>{mode_label}</code>\n"
+        f"💰 Subscription: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
+        f"👥 Assigned total: <code>{assigned_total:.2f} {escape_html(subscription['currency'])}</code>\n"
+        f"⚠️ Missing amounts: <code>{missing_count}</code>\n\n"
+        "Select a user to set or clear their fixed amount."
+    )
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=subscription_user_amounts_keyboard(
+            subscription_id,
+            participants,
+            str(subscription["currency"]),
+        ),
     )
 
 

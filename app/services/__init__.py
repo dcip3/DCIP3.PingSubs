@@ -15,7 +15,11 @@ from app.ui.keyboards import (
     build_payment_confirmation_keyboard,
     build_test_payment_confirmation_keyboard,
 )
-from app.core.constants import MONTHLY_PERIOD_SENTINEL
+from app.core.constants import (
+    MONTHLY_PERIOD_SENTINEL,
+    PAYMENT_MODE_FIXED,
+    PAYMENT_MODE_SPLIT,
+)
 from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
@@ -90,6 +94,25 @@ def calculate_share_base(item: Dict[str, object], participants: list[Dict[str, o
     if not participants:
         return 1
     return sum(int(p.get("share_weight") or 1) for p in participants)
+
+
+def normalize_payment_mode(raw_value: object) -> str:
+    value = str(raw_value or PAYMENT_MODE_SPLIT).strip().lower()
+    if value == PAYMENT_MODE_FIXED:
+        return PAYMENT_MODE_FIXED
+    return PAYMENT_MODE_SPLIT
+
+
+def parse_fixed_amount(raw_value: object) -> Optional[float]:
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
 
 
 def format_converted_amount(amount: float, currency: str, rounding_mode: str) -> str:
@@ -392,6 +415,7 @@ async def _run_reminder_pass(
         raw_name = str(item.get("name", ""))
         raw_currency = str(item.get("currency", ""))
         raw_base_currency = str(item.get("base_currency") or converter.target_currency).upper()
+        raw_payment_mode = normalize_payment_mode(item.get("payment_mode"))
         raw_comment = str(item.get("comment", "")).strip()
         safe_name = escape_html(raw_name)
         default_subscription_override_time = normalize_time_string(item.get("reminder_time"))
@@ -430,6 +454,8 @@ async def _run_reminder_pass(
             cycle_currency = str(currency_source or raw_currency).upper()
             base_currency_source = cycle_state.get("base_currency") if settings_snapshot_ready else raw_base_currency
             cycle_base_currency = str(base_currency_source or raw_base_currency).upper()
+            payment_mode_source = cycle_state.get("payment_mode") if settings_snapshot_ready else raw_payment_mode
+            cycle_payment_mode = normalize_payment_mode(payment_mode_source)
             share_limit_source = cycle_state.get("share_limit") if settings_snapshot_ready else item.get("share_limit")
             try:
                 cycle_share_limit = int(share_limit_source) if share_limit_source is not None else None
@@ -451,6 +477,7 @@ async def _run_reminder_pass(
                 "amount": cycle_amount,
                 "currency": cycle_currency,
                 "base_currency": cycle_base_currency,
+                "payment_mode": cycle_payment_mode,
                 "share_limit": cycle_share_limit,
                 "comment": cycle_comment,
                 "offsets": cycle_offsets,
@@ -492,7 +519,7 @@ async def _run_reminder_pass(
             user_time_now_cache: dict[int, tuple[date, time]] = {}
             user_suppressed_cache: dict[tuple[str, date], set[int]] = {}
             user_currency_cache: dict[tuple[int, str], str] = {}
-            converted_share_cache: dict[tuple[str, str, int, float], Optional[float]] = {}
+            converted_share_cache: dict[tuple[str, str, float], Optional[float]] = {}
             for cycle_due in open_cycles:
                 cycle_participants = participants_by_cycle.get(cycle_due, [])
                 if not cycle_participants:
@@ -500,6 +527,7 @@ async def _run_reminder_pass(
                 cycle_meta = cycle_meta_by_due.get(cycle_due, {})
                 cycle_currency = str(cycle_meta.get("currency") or raw_currency).upper()
                 cycle_base_currency = str(cycle_meta.get("base_currency") or raw_base_currency).upper()
+                cycle_payment_mode = normalize_payment_mode(cycle_meta.get("payment_mode"))
                 cycle_comment = str(cycle_meta.get("comment") or "")
                 cycle_amount = float(cycle_meta.get("amount") or item["amount"])
                 cycle_share_limit = cycle_meta.get("share_limit")
@@ -597,7 +625,21 @@ async def _run_reminder_pass(
                         )
                         user_currency_cache[currency_cache_key] = target_currency
 
-                    converted_cache_key = (source_currency, target_currency, share_base, share_amount)
+                    weight = int(person.get("share_weight") or 1)
+                    fixed_amount = parse_fixed_amount(person.get("fixed_amount"))
+                    if cycle_payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
+                        person_amount_value = fixed_amount
+                        share_text = "fixed"
+                    else:
+                        person_amount_value = share_amount * weight
+                        share_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
+                    amount_text = f"{person_amount_value:.2f} {cycle_currency}"
+
+                    converted_cache_key = (
+                        source_currency,
+                        target_currency,
+                        round(person_amount_value, 8),
+                    )
                     converted_base = converted_share_cache.get(converted_cache_key)
                     if converted_cache_key not in converted_share_cache:
                         if source_currency == target_currency:
@@ -605,7 +647,7 @@ async def _run_reminder_pass(
                         else:
                             try:
                                 converted_base = await converter.convert_to(
-                                    share_amount,
+                                    person_amount_value,
                                     source_currency,
                                     target_currency,
                                 )
@@ -619,16 +661,16 @@ async def _run_reminder_pass(
                                 converted_base = None
                         converted_share_cache[converted_cache_key] = converted_base
 
-                    weight = int(person.get("share_weight") or 1)
-                    share_text, amount_text, share_amount_value, converted_value, converted_display = _build_share_line(
-                        share_amount=share_amount,
-                        weight=weight,
-                        share_base=share_base,
-                        safe_currency=cycle_currency,
-                        converted_base=converted_base,
-                        rounding_mode=rounding_mode,
-                        target_currency=target_currency,
-                    )
+                    share_amount_value = float(person_amount_value)
+                    converted_value: Optional[float] = None
+                    converted_display: Optional[str] = None
+                    if converted_base is not None:
+                        converted_value = float(converted_base)
+                        converted_display = format_converted_amount(
+                            converted_base,
+                            target_currency,
+                            rounding_mode,
+                        )
                     base_amount_value: Optional[float] = converted_value
                     if base_amount_value is None and source_currency == target_currency:
                         base_amount_value = float(share_amount_value)
@@ -911,12 +953,13 @@ async def send_test_reminders(
         DEFAULT_REMINDER_TIMEZONE,
     ) or DEFAULT_REMINDER_TIMEZONE
     today = datetime.now(parse_timezone(admin_timezone_name)).date()
+    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
     share_base = calculate_share_base(subscription, participants)
     share_amount = subscription["amount"] / share_base
 
     sent_count = 0
     target_currency_cache: dict[int, str] = {}
-    converted_share_cache: dict[str, Optional[float]] = {}
+    converted_share_cache: dict[tuple[str, float], Optional[float]] = {}
     for person in target_participants:
         telegram_id = int(person["telegram_id"])
         target_currency = target_currency_cache.get(telegram_id)
@@ -929,13 +972,24 @@ async def send_test_reminders(
             )
             target_currency_cache[telegram_id] = target_currency
 
-        converted_base = converted_share_cache.get(target_currency)
-        if target_currency not in converted_share_cache:
+        weight = int(person.get("share_weight") or 1)
+        fixed_amount = parse_fixed_amount(person.get("fixed_amount"))
+        if payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
+            person_amount_value = fixed_amount
+            share_text = "fixed"
+        else:
+            person_amount_value = share_amount * weight
+            share_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
+        amount_text = f"{person_amount_value:.2f} {raw_currency}"
+
+        converted_cache_key = (target_currency, round(person_amount_value, 8))
+        converted_base = converted_share_cache.get(converted_cache_key)
+        if converted_cache_key not in converted_share_cache:
             if source_currency == target_currency:
                 converted_base = None
             else:
                 try:
-                    converted_base = await converter.convert_to(share_amount, source_currency, target_currency)
+                    converted_base = await converter.convert_to(person_amount_value, source_currency, target_currency)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Conversion failed for test reminder %s and currency %s: %s",
@@ -944,18 +998,10 @@ async def send_test_reminders(
                         exc,
                     )
                     converted_base = None
-            converted_share_cache[target_currency] = converted_base
-
-        weight = int(person.get("share_weight") or 1)
-        share_text, amount_text, _, _, converted_display = _build_share_line(
-            share_amount=share_amount,
-            weight=weight,
-            share_base=share_base,
-            safe_currency=raw_currency,
-            converted_base=converted_base,
-            rounding_mode=rounding_mode,
-            target_currency=target_currency,
-        )
+            converted_share_cache[converted_cache_key] = converted_base
+        converted_display = None
+        if converted_base is not None:
+            converted_display = format_converted_amount(converted_base, target_currency, rounding_mode)
         status_text, due_date_text = _format_status_and_date(due_date, today)
         message_text = _build_reminder_message(
             person_name=str(person["full_name"]),

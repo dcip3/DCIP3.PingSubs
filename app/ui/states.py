@@ -44,6 +44,7 @@ class SubscriptionEditForm(StatesGroup):
     amount = State()
     currency = State()
     base_currency = State()
+    user_amount = State()
     due_date = State()
     period = State()
     share_limit = State()
