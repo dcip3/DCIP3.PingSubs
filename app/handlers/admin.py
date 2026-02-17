@@ -97,10 +97,12 @@ def _public_settings_text(
 ) -> str:
     return (
         "⚙️ Settings:\n\n"
-        f"⏰ Base time: <code>{html.escape(current_time)} ({html.escape(current_timezone)})</code>\n"
-        f"⏰ Default time: <code>{html.escape(admin_time)} ({html.escape(admin_timezone)})</code>\n\n"
-        f"🌍 Timezone: <code>{html.escape(current_timezone)}</code>\n"
-        f"🌍 Default timezone: <code>{html.escape(admin_timezone)}</code>"
+        "⏰ Time:\n"
+        f"Base time: {html.escape(current_time)} ({html.escape(current_timezone)})\n"
+        f"Default time: {html.escape(admin_time)} ({html.escape(admin_timezone)})\n\n"
+        "🌍 Timezone:\n"
+        f"Timezone: {html.escape(current_timezone)}\n"
+        f"Default timezone: {html.escape(admin_timezone)}"
     )
 
 
@@ -265,10 +267,10 @@ async def handle_public_settings_time(
         return
     (
         current_time,
+        admin_time,
         _,
-        has_time_override,
         current_timezone,
-        _,
+        admin_timezone,
         _,
     ) = await _public_settings_snapshot(
         db,
@@ -278,9 +280,12 @@ async def handle_public_settings_time(
     if callback.message:
         await callback.message.edit_text(
             "⏰ Base time:\n"
-            f"⏰ Current: <code>{current_time} ({current_timezone})</code>\n"
+            "\n"
+            f"Current: <code>{current_time} ({current_timezone})</code>\n"
+            f"Default: <code>{admin_time} ({admin_timezone})</code>\n"
+            "\n"
             "Choose a value:",
-            reply_markup=public_settings_time_keyboard(current_time, has_time_override),
+            reply_markup=public_settings_time_keyboard(current_time, admin_time),
         )
     await callback.answer()
 
@@ -291,6 +296,7 @@ async def handle_public_settings_time_other(callback: CallbackQuery, state: FSMC
     if callback.message:
         await callback.message.answer(
             "⏰ Base time:\n"
+            "\n"
             "Send time in <code>HH:MM</code>.",
             reply_markup=dialog_keyboard(),
         )
@@ -344,8 +350,8 @@ async def handle_public_settings_timezone(
         _,
         _,
         current_timezone,
+        admin_timezone,
         _,
-        has_timezone_override,
     ) = await _public_settings_snapshot(
         db,
         settings,
@@ -354,11 +360,14 @@ async def handle_public_settings_timezone(
     if callback.message:
         await callback.message.edit_text(
             "🌍 Timezone:\n"
-            f"🌍 Current: <code>{current_timezone}</code>\n"
+            "\n"
+            f"Current: <code>{current_timezone}</code>\n"
+            f"Default: <code>{admin_timezone}</code>\n"
+            "\n"
             "Choose a value:",
             reply_markup=public_settings_timezone_keyboard(
                 current_timezone,
-                has_timezone_override,
+                admin_timezone,
             ),
         )
     await callback.answer()
@@ -370,6 +379,7 @@ async def handle_public_settings_timezone_other(callback: CallbackQuery, state: 
     if callback.message:
         await callback.message.answer(
             "🌍 Timezone:\n"
+            "\n"
             "Send an IANA timezone.\n"
             "Examples: <code>Europe/Moscow</code>, <code>America/New_York</code>.",
             reply_markup=dialog_keyboard(),
@@ -980,10 +990,10 @@ async def handle_payments_report(message: Message, db: Database) -> None:
 
 async def _settings_menu_text(settings: Settings) -> str:
     return (
-        "⚙️ Settings:\n"
-        f"⏰ Base time: <code>{html.escape(settings.base_reminder_time)}</code>\n"
-        f"🌍 Timezone: <code>{html.escape(settings.base_timezone)}</code>\n"
-        f"🔢 Rounding: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>"
+        "⚙️ Settings:\n\n"
+        f"Base time: <code>{html.escape(settings.base_reminder_time)}</code>\n"
+        f"Timezone: <code>{html.escape(settings.base_timezone)}</code>\n"
+        f"Rounding: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>"
     )
 
 
@@ -1013,7 +1023,9 @@ async def handle_settings_close(callback: CallbackQuery) -> None:
 async def handle_settings_time(callback: CallbackQuery, settings: Settings) -> None:
     text = (
         "⏰ Base time:\n"
-        f"⏰ Current: <code>{html.escape(settings.base_reminder_time)} ({html.escape(settings.base_timezone)})</code>\n"
+        "\n"
+        f"Current: <code>{html.escape(settings.base_reminder_time)} ({html.escape(settings.base_timezone)})</code>\n"
+        "\n"
         "Choose a value:"
     )
     if callback.message:
@@ -1030,6 +1042,7 @@ async def handle_settings_time_other(callback: CallbackQuery, state: FSMContext)
     if callback.message:
         await callback.message.answer(
             "⏰ Base time:\n"
+            "\n"
             "Send time in <code>HH:MM</code>.",
             reply_markup=dialog_keyboard(),
         )
@@ -1040,7 +1053,9 @@ async def handle_settings_time_other(callback: CallbackQuery, state: FSMContext)
 async def handle_settings_timezone(callback: CallbackQuery, settings: Settings) -> None:
     text = (
         "🌍 Timezone:\n"
-        f"🌍 Current: <code>{html.escape(settings.base_timezone)}</code>\n"
+        "\n"
+        f"Current: <code>{html.escape(settings.base_timezone)}</code>\n"
+        "\n"
         "Choose a value:"
     )
     if callback.message:
@@ -1057,6 +1072,7 @@ async def handle_settings_timezone_other(callback: CallbackQuery, state: FSMCont
     if callback.message:
         await callback.message.answer(
             "🌍 Timezone:\n"
+            "\n"
             "Send an IANA timezone.\n"
             "Examples: <code>Europe/Moscow</code>, <code>America/New_York</code>.",
             reply_markup=dialog_keyboard(),
@@ -1120,7 +1136,9 @@ def _rounding_label(mode: str) -> str:
 async def handle_settings_rounding(callback: CallbackQuery, settings: Settings) -> None:
     text = (
         "🔢 Rounding:\n"
-        f"🔢 Current: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>\n"
+        "\n"
+        f"Current: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>\n"
+        "\n"
         "Choose a mode:"
     )
     if callback.message:
