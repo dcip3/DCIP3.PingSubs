@@ -102,9 +102,9 @@ def _public_settings_text(
     return (
         "⚙️ Settings:\n\n"
         "⏰ Time:\n"
-        f"Base time: {html.escape(time_value)}\n\n"
+        f"Base time: <code>{html.escape(time_value)}</code>\n\n"
         "🌍 Timezone:\n"
-        f"Timezone: {html.escape(timezone_value)}"
+        f"Timezone: <code>{html.escape(timezone_value)}</code>"
     )
 
 
@@ -995,8 +995,11 @@ async def handle_payments_report(message: Message, db: Database) -> None:
 async def _settings_menu_text(settings: Settings) -> str:
     return (
         "⚙️ Settings:\n\n"
-        f"Base time: <code>{html.escape(settings.base_reminder_time)}</code>\n"
-        f"Timezone: <code>{html.escape(settings.base_timezone)}</code>\n"
+        "⏰ Time:\n"
+        f"Base time: <code>{html.escape(settings.base_reminder_time)}</code>\n\n"
+        "🌍 Timezone:\n"
+        f"Timezone: <code>{html.escape(settings.base_timezone)}</code>\n\n"
+        "🔢 Rounding:\n"
         f"Rounding: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>"
     )
 

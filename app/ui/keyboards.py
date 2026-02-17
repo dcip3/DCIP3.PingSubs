@@ -607,21 +607,36 @@ def settings_time_keyboard(current_time: str) -> InlineKeyboardMarkup:
 
 
 def settings_timezone_keyboard(current_timezone: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
+    rows: list[list[InlineKeyboardButton]] = []
+    zone_buttons: list[InlineKeyboardButton] = []
     for zone in COMMON_TIMEZONES:
         is_active = zone == current_timezone
         text = f"{'✅ ' if is_active else ''}{zone}"
         if is_active:
-            builder.button(text=text, callback_data=f"settings_timezone:{zone}", style="success")
+            zone_buttons.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"settings_timezone:{zone}",
+                    style="success",
+                )
+            )
         else:
-            builder.button(text=text, callback_data=f"settings_timezone:{zone}")
-    builder.button(text="Other", callback_data="settings:timezone_other")
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            zone_buttons.append(
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"settings_timezone:{zone}",
+                )
+            )
+    for index in range(0, len(zone_buttons), 2):
+        rows.append(zone_buttons[index : index + 2])
+    rows.append([InlineKeyboardButton(text="Other", callback_data="settings:timezone_other")])
+    rows.append(
+        [
+            InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
     )
-    return builder.as_markup()
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def public_settings_keyboard(
