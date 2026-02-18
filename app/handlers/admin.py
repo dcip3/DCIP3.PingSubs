@@ -284,7 +284,6 @@ async def handle_public_settings_time(
     if callback.message:
         await callback.message.edit_text(
             "⏰ Base time:\n"
-            "\n"
             f"Current: <code>{current_time} ({current_timezone})</code>\n"
             f"Default: <code>{admin_time} ({admin_timezone})</code>\n"
             "\n"
@@ -364,7 +363,6 @@ async def handle_public_settings_timezone(
     if callback.message:
         await callback.message.edit_text(
             "🌍 Timezone:\n"
-            "\n"
             f"Current: <code>{current_timezone}</code>\n"
             f"Default: <code>{admin_timezone}</code>\n"
             "\n"
@@ -494,7 +492,6 @@ async def handle_public_subscription_currency(
     if callback.message:
         await callback.message.edit_text(
             "💱 Currency for this subscription:\n"
-            "\n"
             f"Current: <code>{html.escape(current_currency)}</code>\n"
             f"Default: <code>{html.escape(default_currency)}</code>\n"
             "\n"
@@ -556,7 +553,8 @@ async def handle_public_subscription_currency_other(
         await callback.message.answer(
             "💱 Currency for this subscription:\n"
             "Send a 3-letter currency code.\n"
-            "Example: <code>CHF</code>.",
+            "\n"
+            "Example: <code>CHF</code>",
             reply_markup=dialog_keyboard(),
         )
     await callback.answer()
