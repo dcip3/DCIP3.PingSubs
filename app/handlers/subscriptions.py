@@ -949,9 +949,9 @@ async def handle_subscription_share_callback(
     current_label = f"{current_share} user(s)" if current_share else "all users"
     prompt_text = (
         "➗ Split limit:\n"
-        "Send number of users or tap “Split across all”.\n"
+        f"Current: <code>{escape_html(current_label)}</code>\n"
         "\n"
-        f"🏷️ Current: <code>{escape_html(current_label)}</code>\n"
+        "Send number of users or tap “Split across all”."
     )
     await start_subscription_edit_flow(
         callback,

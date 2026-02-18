@@ -1059,9 +1059,9 @@ async def send_subscription_user_amounts(
         if amount is not None
     )
     text = (
-        "👥 Amount per user:\n\n"
-        f"💰 Subscription: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"🧮 Assigned total: <code>{assigned_total:.2f} {escape_html(subscription['currency'])}</code>\n"
+        "👥 Amount per user:\n"
+        f"Subscription: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
+        f"Assigned total: <code>{assigned_total:.2f} {escape_html(subscription['currency'])}</code>\n"
         "\n"
         "Select a user to set or clear their fixed amount.\n"
         "Use <code>Set all</code> to apply one amount to everyone."
