@@ -222,7 +222,7 @@ def _build_subscription_blocks(
     safe_name = escape_html(subscription_name)
     safe_status = escape_html(status_text)
     safe_due_date = escape_html(due_date_text)
-    safe_share = escape_html(share_text)
+    _ = share_text  # kept for compatibility with existing call sites
     safe_amount = escape_html(amount_text)
     safe_converted = escape_html(converted_text) if converted_text else None
     safe_comment = escape_html(comment) if comment else ""
@@ -235,8 +235,7 @@ def _build_subscription_blocks(
         ],
         [
             "💳 Payment:",
-            f"👥 Share: <code>{safe_share}</code>",
-            f"💰 Amount: <code>{safe_amount}</code>",
+            f"💵 My amount: <code>{safe_amount}</code>",
         ],
     ]
     if safe_converted:
