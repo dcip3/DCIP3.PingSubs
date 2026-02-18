@@ -1415,10 +1415,10 @@ async def edit_subscription_user_amount(message: Message, state: FSMContext, db:
 
     try:
         amount = float(raw_value.replace(",", "."))
-        if amount <= 0:
+        if amount < 0:
             raise ValueError
     except ValueError:
-        await message.answer("Amount must be a positive number. Example: 300")
+        await message.answer("Amount must be zero or a positive number. Example: 300 or 0")
         return
 
     await db.update_participant_fixed_amount(
@@ -1449,10 +1449,10 @@ async def edit_subscription_user_amount_all(message: Message, state: FSMContext,
     raw_value = (message.text or "").strip()
     try:
         amount = float(raw_value.replace(",", "."))
-        if amount <= 0:
+        if amount < 0:
             raise ValueError
     except ValueError:
-        await message.answer("Amount must be a positive number. Example: 300")
+        await message.answer("Amount must be zero or a positive number. Example: 300 or 0")
         return
 
     await db.update_all_participants_fixed_amount(int(subscription_id), amount)
