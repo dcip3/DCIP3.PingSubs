@@ -568,7 +568,7 @@ def subscription_user_amounts_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                text="✅ Set all",
+                text="✏️ Set all",
                 callback_data=f"sub_user_amount_all:{subscription_id}",
             )
         ]

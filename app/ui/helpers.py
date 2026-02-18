@@ -862,9 +862,9 @@ async def send_member_detail(target: Responder, db: Database, friend_id: int) ->
     else:
         sub_lines = "<code>No subscriptions yet.</code>"
     text = (
-        "User Info:\n"
+        "👤 User Info:\n"
         f"Name: <code>{escape_html(friend['full_name'])}</code>\n"
-        f"🆔 Telegram ID: <code>{friend['telegram_id']}</code>\n\n"
+        f"Telegram ID: <code>{friend['telegram_id']}</code>\n\n"
         "Subscriptions:\n"
         f"{sub_lines}"
     )
@@ -1059,9 +1059,9 @@ async def send_subscription_user_amounts(
         if amount is not None
     )
     text = (
-        "👥 Amount per user:\n"
+        "👥 Amount per user:\n\n"
         f"💰 Subscription: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"👥 Assigned total: <code>{assigned_total:.2f} {escape_html(subscription['currency'])}</code>\n"
+        f"🧮 Assigned total: <code>{assigned_total:.2f} {escape_html(subscription['currency'])}</code>\n"
         "\n"
         "Select a user to set or clear their fixed amount.\n"
         "Use <code>Set all</code> to apply one amount to everyone."
@@ -1098,8 +1098,9 @@ async def send_participants_editor(callback: CallbackQuery, db: Database, subscr
     total_shares = sum(int(friend.get("share_weight") or 1) for friend in friends if friend["is_member"])
     text = (
         "👥 Users:\n"
-        f"👥 Selected: <code>{selected}</code>\n"
-        f"➗ Total shares: <code>{total_shares}</code>\n"
+        f"Selected: <code>{selected}</code>\n"
+        f"Total shares: <code>{total_shares}</code>\n"
+        "\n"
         "Tap <code>xN</code> to change share weight (1-5)."
     )
     await callback.message.edit_text(text, reply_markup=keyboard)
