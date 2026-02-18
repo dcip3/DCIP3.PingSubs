@@ -39,6 +39,7 @@ from app.ui.keyboards import (
     subscription_payment_mode_keyboard,
     subscription_base_currency_keyboard,
     subscription_reminder_time_edit_keyboard,
+    user_amount_clear_keyboard,
 )
 from app.ui.states import ReminderSendAction, Responder, SubscriptionAction, SubscriptionEditForm, SubscriptionForm
 from app.core.reminders import (
@@ -717,11 +718,13 @@ async def handle_subscription_user_amount_edit_callback(
         return
 
     current_value = target_person.get("fixed_amount")
+    has_current_value = False
     if current_value is None:
         current_text = "not set"
     else:
         try:
             current_text = f"{float(current_value):.2f}"
+            has_current_value = True
         except (TypeError, ValueError):
             current_text = "not set"
 
@@ -731,12 +734,88 @@ async def handle_subscription_user_amount_edit_callback(
         user_amount_friend_id=friend_id,
     )
     if callback.message:
+        prompt = (
+            "👥 Amount per user:\n\n"
+            f"User: <code>{escape_html(str(target_person['full_name']))}</code>\n"
+            f"Current: <code>{escape_html(current_text)}</code>\n\n"
+            "Send amount (example: <code>300</code>)."
+        )
+        if has_current_value:
+            prompt += "\nOr tap <code>Clear</code>."
         await callback.message.answer(
-            "👥 Amount per user:\n"
-            f"🏷️ User: <code>{escape_html(str(target_person['full_name']))}</code>\n"
-            f"🏷️ Current: <code>{escape_html(current_text)}</code>\n\n"
-            "Send amount (example: <code>300</code>).\n"
-            "Send <code>clear</code> to remove fixed amount.",
+            prompt,
+            reply_markup=(
+                user_amount_clear_keyboard(subscription_id, friend_id)
+                if has_current_value
+                else dialog_keyboard()
+            ),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("sub_user_amount_clear:"))
+async def handle_subscription_user_amount_clear_callback(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw, friend_id_raw = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+        friend_id = int(friend_id_raw)
+    except ValueError:
+        await callback.answer("Invalid user.", show_alert=True)
+        return
+
+    participants = await db.list_subscription_participants(subscription_id)
+    target_person = next((person for person in participants if int(person["id"]) == friend_id), None)
+    if target_person is None:
+        await callback.answer("User is not in this subscription.", show_alert=True)
+        return
+
+    await db.update_participant_fixed_amount(subscription_id, friend_id, None)
+    await state.clear()
+    await callback.answer("Fixed amount cleared.")
+    await send_subscription_user_amounts(callback, db, subscription_id)
+
+
+@admin_router.callback_query(F.data.startswith("sub_user_amount_all:"))
+async def handle_subscription_user_amount_set_all_callback(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":", 1)
+    if len(parts) != 2:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await callback.answer("Subscription not found.", show_alert=True)
+        return
+    participants = await db.list_subscription_participants(subscription_id)
+    if not participants:
+        await callback.answer("No users in this subscription.", show_alert=True)
+        return
+
+    await state.set_state(SubscriptionEditForm.user_amount_all)
+    await state.update_data(user_amount_all_subscription_id=subscription_id)
+    if callback.message:
+        await callback.message.answer(
+            "👥 Amount per user:\n\n"
+            "Send amount to apply it to all users.\n"
+            "Example: <code>300</code>.",
             reply_markup=dialog_keyboard(),
         )
     await callback.answer()
@@ -1210,6 +1289,36 @@ async def edit_subscription_user_amount(message: Message, state: FSMContext, db:
     )
     await state.clear()
     await message.answer("Fixed amount updated.", reply_markup=admin_reply_keyboard())
+    await send_subscription_user_amounts(message, db, int(subscription_id))
+
+
+@admin_router.message(SubscriptionEditForm.user_amount_all)
+async def edit_subscription_user_amount_all(message: Message, state: FSMContext, db: Database) -> None:
+    data = await state.get_data()
+    subscription_id = data.get("user_amount_all_subscription_id")
+    if not subscription_id:
+        await state.clear()
+        await message.answer("Session expired. Reopen amount-per-user menu.")
+        return
+
+    participants = await db.list_subscription_participants(int(subscription_id))
+    if not participants:
+        await state.clear()
+        await message.answer("No users in this subscription.")
+        return
+
+    raw_value = (message.text or "").strip()
+    try:
+        amount = float(raw_value.replace(",", "."))
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Amount must be a positive number. Example: 300")
+        return
+
+    await db.update_all_participants_fixed_amount(int(subscription_id), amount)
+    await state.clear()
+    await message.answer("Fixed amount updated for all users.", reply_markup=admin_reply_keyboard())
     await send_subscription_user_amounts(message, db, int(subscription_id))
 
 

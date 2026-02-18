@@ -630,6 +630,22 @@ class Database:
         )
         await self._conn.commit()
 
+    async def update_all_participants_fixed_amount(
+        self,
+        subscription_id: int,
+        fixed_amount: Optional[float],
+    ) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            UPDATE subscription_participants
+            SET fixed_amount = ?
+            WHERE subscription_id = ?
+            """,
+            (fixed_amount, subscription_id),
+        )
+        await self._conn.commit()
+
     async def fetch_subscriptions_for_reminders(self) -> List[Dict[str, Any]]:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(

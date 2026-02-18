@@ -1053,24 +1053,18 @@ async def send_subscription_user_amounts(
         await respond_with_markup(target, "This subscription no longer exists.")
         return
     participants = await db.list_subscription_participants(subscription_id)
-    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
     assigned_total = sum(
         amount
         for amount in (_to_fixed_amount(person.get("fixed_amount")) for person in participants)
         if amount is not None
     )
-    missing_count = sum(
-        1 for person in participants if _to_fixed_amount(person.get("fixed_amount")) is None
-    )
-    mode_label = "Fixed per user" if payment_mode == PAYMENT_MODE_FIXED else "Split by shares"
     text = (
         "👥 Amount per user:\n"
-        f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
-        f"💳 Mode: <code>{mode_label}</code>\n"
         f"💰 Subscription: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
         f"👥 Assigned total: <code>{assigned_total:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"⚠️ Missing amounts: <code>{missing_count}</code>\n\n"
-        "Select a user to set or clear their fixed amount."
+        "\n"
+        "Select a user to set or clear their fixed amount.\n"
+        "Use <code>Set all</code> to apply one amount to everyone."
     )
     await respond_with_markup(
         target,

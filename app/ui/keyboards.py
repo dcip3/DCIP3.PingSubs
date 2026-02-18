@@ -568,6 +568,14 @@ def subscription_user_amounts_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
+                text="✅ Set all",
+                callback_data=f"sub_user_amount_all:{subscription_id}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=SubscriptionAction(action="paymentmode", subscription_id=subscription_id).pack(),
                 style="primary",
@@ -576,6 +584,16 @@ def subscription_user_amounts_keyboard(
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def user_amount_clear_keyboard(subscription_id: int, friend_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="Clear",
+        callback_data=f"sub_user_amount_clear:{subscription_id}:{friend_id}",
+        style="danger",
+    )
+    return builder.as_markup()
 
 
 def subscription_base_currency_keyboard(
