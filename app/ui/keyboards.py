@@ -888,6 +888,61 @@ def public_subscription_currency_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def subscription_currency_keyboard(
+    subscription_id: int,
+    current_currency: str,
+    default_currency: str,
+) -> InlineKeyboardMarkup:
+    options = ("USD", "EUR", "RUB")
+    normalized_current = current_currency.upper()
+    normalized_default = default_currency.upper()
+    default_active = normalized_current == normalized_default
+    rows: list[list[InlineKeyboardButton]] = []
+    option_buttons: list[InlineKeyboardButton] = []
+    for code in options:
+        is_active = (code == normalized_current) and not default_active
+        if is_active:
+            option_buttons.append(
+                InlineKeyboardButton(
+                    text=code,
+                    callback_data=f"sub_currency:{subscription_id}:{code}",
+                    style="success",
+                )
+            )
+        else:
+            option_buttons.append(
+                InlineKeyboardButton(
+                    text=code,
+                    callback_data=f"sub_currency:{subscription_id}:{code}",
+                )
+            )
+    rows.append(option_buttons)
+    rows.append([InlineKeyboardButton(text="Other", callback_data=f"sub_currency_other:{subscription_id}")])
+    if default_active:
+        default_button = InlineKeyboardButton(
+            text="Default",
+            callback_data=SubscriptionAction(action="currency_default", subscription_id=subscription_id).pack(),
+            style="success",
+        )
+    else:
+        default_button = InlineKeyboardButton(
+            text="Default",
+            callback_data=SubscriptionAction(action="currency_default", subscription_id=subscription_id).pack(),
+        )
+    rows.append([default_button])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Back",
+                callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
+                style="primary",
+            ),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def public_settings_time_keyboard(current_time: str, default_time: str) -> InlineKeyboardMarkup:
     presets = ("09:00", "12:00", "16:00", "20:00")
     normalized_current = current_time.strip()

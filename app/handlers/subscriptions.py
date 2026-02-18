@@ -37,6 +37,7 @@ from app.ui.keyboards import (
     comment_edit_keyboard,
     dialog_keyboard,
     subscription_payment_mode_keyboard,
+    subscription_currency_keyboard,
     subscription_base_currency_keyboard,
     subscription_reminder_time_keyboard,
     user_amount_clear_keyboard,
@@ -125,6 +126,32 @@ async def _show_reminder_time_menu(
             subscription_id,
             current_time,
             base_time,
+        ),
+    )
+
+
+async def _show_subscription_currency_menu(
+    callback: CallbackQuery,
+    db: Database,
+    subscription_id: int,
+) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription or not callback.message:
+        return
+    current_currency = str(subscription.get("currency") or "RUB").strip().upper()
+    default_currency = str(
+        subscription.get("base_currency") or subscription.get("currency") or "RUB"
+    ).strip().upper()
+    await callback.message.edit_text(
+        "💱 Currency:\n"
+        f"Current: <code>{escape_html(current_currency)}</code>\n"
+        f"Default: <code>{escape_html(default_currency)}</code>\n"
+        "\n"
+        "Choose a value:",
+        reply_markup=subscription_currency_keyboard(
+            subscription_id,
+            current_currency,
+            default_currency,
         ),
     )
 
@@ -573,9 +600,9 @@ async def handle_subscription_amount_callback(
         return
     prompt = (
         "💰 Amount:\n"
-        "Send new value (example: <code>149.99</code>).\n"
+        f"Current: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
         "\n"
-        f"🏷️ Current: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
+        "Send new value (example: <code>149.99</code>)."
     )
     await start_subscription_edit_flow(
         callback,
@@ -596,21 +623,89 @@ async def handle_subscription_currency_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    _, prompt_markup = currency_prompt()
-    prompt_text = (
-        "💱 Currency:\n"
-        "Choose a value or send your own (3 letters).\n"
-        "\n"
-        f"🏷️ Current: <code>{escape_html(subscription['currency'])}</code>\n"
-    )
-    await start_subscription_edit_flow(
-        callback,
-        state,
-        callback_data.subscription_id,
-        SubscriptionEditForm.currency,
-        prompt_text,
-        reply_markup=prompt_markup,
-    )
+    await state.clear()
+    await _show_subscription_currency_menu(callback, db, callback_data.subscription_id)
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("sub_currency:"))
+async def handle_subscription_currency_select(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw, raw_currency = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+    currency = raw_currency.strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        await callback.answer("Currency must contain 3 letters.", show_alert=True)
+        return
+    await db.update_subscription_fields(subscription_id, currency=currency)
+    await state.clear()
+    await callback.answer(f"Currency set to {currency}")
+    await _show_subscription_currency_menu(callback, db, subscription_id)
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "currency_default"))
+async def handle_subscription_currency_default(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    subscription = await db.get_subscription(callback_data.subscription_id)
+    if not subscription:
+        await callback.answer("Subscription not found.", show_alert=True)
+        return
+    default_currency = str(
+        subscription.get("base_currency") or subscription.get("currency") or "RUB"
+    ).strip().upper()
+    await db.update_subscription_fields(callback_data.subscription_id, currency=default_currency)
+    await state.clear()
+    await callback.answer("Using default currency.")
+    await _show_subscription_currency_menu(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(F.data.startswith("sub_currency_other:"))
+async def handle_subscription_currency_other(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":", 1)
+    if len(parts) != 2:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await callback.answer("Subscription not found.", show_alert=True)
+        return
+
+    await state.set_state(SubscriptionEditForm.currency)
+    await state.update_data(edit_subscription_id=subscription_id)
+    if callback.message:
+        await callback.message.answer(
+            "💱 Currency:\n"
+            "Send a 3-letter currency code.\n"
+            "\n"
+            "Example: <code>CHF</code>",
+            reply_markup=dialog_keyboard(),
+        )
+    await callback.answer()
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "basecurrency"))
@@ -627,9 +722,9 @@ async def handle_subscription_base_currency_callback(
     current_currency = str(subscription.get("base_currency") or subscription.get("currency") or "RUB").upper()
     text = (
         "💱 Base currency:\n"
-        "This is the default target currency for this subscription.\n"
+        f"Current: <code>{escape_html(current_currency)}</code>\n"
         "\n"
-        f"🏷️ Current: <code>{escape_html(current_currency)}</code>\n"
+        "This is the default target currency for this subscription."
     )
     if callback.message:
         await callback.message.edit_text(
