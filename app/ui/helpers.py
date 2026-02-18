@@ -915,8 +915,6 @@ async def send_reminder_settings(target: Responder, db: Database, subscription_i
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     text = (
         "🔔 Reminders:\n"
-        f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
-        "\n"
         f"⏰ Time: <code>{escape_html(reminder_line)}</code>\n"
         f"🔔 Days: <code>{escape_html(offsets_text)}</code>\n"
         f"📣 Post-due alerts: <code>{escape_html(overdue_text)}</code>"
@@ -1021,19 +1019,10 @@ async def send_pricing_settings(target: Responder, db: Database, subscription_id
     if not subscription:
         await respond_with_markup(target, "This subscription no longer exists.")
         return
-    participants = await db.list_subscription_participants(subscription_id)
-    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
-    users_total = _sum_users_total(subscription, participants)
-    mode_label = "Fixed per user" if payment_mode == PAYMENT_MODE_FIXED else "Split by shares"
-
     text = (
         "💰 Pricing:\n"
-        f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
-        "\n"
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>\n"
-        f"💳 Payment mode: <code>{mode_label}</code>\n"
-        f"👥 Users total: <code>{users_total:.2f} {escape_html(subscription['currency'])}</code>"
+        f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>"
     )
 
     await respond_with_markup(
@@ -1114,6 +1103,7 @@ def add_cancel_button(
     cancel_button = InlineKeyboardButton(
         text="✖ Cancel",
         callback_data=SubscriptionAction(action="cancel_edit", subscription_id=subscription_id).pack(),
+        style="danger",
     )
     rows = list(base_markup.inline_keyboard) if base_markup else []
     rows.append([cancel_button])

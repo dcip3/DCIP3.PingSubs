@@ -511,9 +511,9 @@ async def handle_subscription_rename_callback(
         return
     prompt = (
         "✏️ Rename:\n"
-        "Send new subscription name.\n"
+        f"Current: <code>{escape_html(subscription['name'])}</code>\n"
         "\n"
-        f"🏷️ Current: <code>{escape_html(subscription['name'])}</code>\n"
+        "Send new subscription name."
     )
     await start_subscription_edit_flow(
         callback,
@@ -837,9 +837,9 @@ async def handle_subscription_due_callback(
         current = subscription.get("next_charge_at", "unknown")
     prompt = (
         "📅 Next charge:\n"
-        "Send new date in <code>DD.MM.YYYY</code>.\n"
+        f"Current: <code>{escape_html(current)}</code>\n"
         "\n"
-        f"🏷️ Current: <code>{escape_html(current)}</code>\n"
+        "Send new date in <code>DD.MM.YYYY</code>"
     )
     await start_subscription_edit_flow(
         callback,
@@ -1040,10 +1040,15 @@ async def handle_subscription_reminder_days_callback(
 
 
 def _comment_prompt_text(current_value: str) -> str:
-    base = "📝 Comment:\nSend text to attach to reminders."
+    base = "📝 Comment:"
     if current_value:
-        return f"{base}\n\n🏷️ Current: <code>{escape_html(current_value)}</code>."
-    return base
+        return (
+            f"{base}\n"
+            f"Current: <code>{escape_html(current_value)}</code>.\n"
+            "\n"
+            "Send text to attach to reminders."
+        )
+    return f"{base}\nSend text to attach to reminders."
 
 
 async def _open_comment_editor(
