@@ -310,6 +310,64 @@ def subscription_reminder_time_edit_keyboard(subscription_id: int) -> InlineKeyb
     return builder.as_markup()
 
 
+def subscription_reminder_time_keyboard(
+    subscription_id: int,
+    current_time: str,
+    default_time: str,
+) -> InlineKeyboardMarkup:
+    presets = ("09:00", "12:00", "16:00", "20:00")
+    normalized_current = current_time.strip()
+    normalized_default = default_time.strip()
+    default_active = normalized_current == normalized_default
+    rows: list[list[InlineKeyboardButton]] = []
+    preset_buttons: list[InlineKeyboardButton] = []
+
+    for time_value in presets:
+        is_active = (time_value == normalized_current) and not default_active
+        if is_active:
+            preset_buttons.append(
+                InlineKeyboardButton(
+                    text=time_value,
+                    callback_data=f"sub_remindertime:{subscription_id}:{time_value}",
+                    style="success",
+                )
+            )
+        else:
+            preset_buttons.append(
+                InlineKeyboardButton(
+                    text=time_value,
+                    callback_data=f"sub_remindertime:{subscription_id}:{time_value}",
+                )
+            )
+    for index in range(0, len(preset_buttons), 2):
+        rows.append(preset_buttons[index : index + 2])
+
+    rows.append([InlineKeyboardButton(text="Other", callback_data=f"sub_remindertime_other:{subscription_id}")])
+    if default_active:
+        default_button = InlineKeyboardButton(
+            text="Default",
+            callback_data=SubscriptionAction(action="remindertime_default", subscription_id=subscription_id).pack(),
+            style="success",
+        )
+    else:
+        default_button = InlineKeyboardButton(
+            text="Default",
+            callback_data=SubscriptionAction(action="remindertime_default", subscription_id=subscription_id).pack(),
+        )
+    rows.append([default_button])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Back",
+                callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+                style="primary",
+            ),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def public_subscription_reminder_time_keyboard(
     subscription_id: int,
     current_time: str,

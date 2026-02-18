@@ -38,7 +38,7 @@ from app.ui.keyboards import (
     dialog_keyboard,
     subscription_payment_mode_keyboard,
     subscription_base_currency_keyboard,
-    subscription_reminder_time_edit_keyboard,
+    subscription_reminder_time_keyboard,
     user_amount_clear_keyboard,
 )
 from app.ui.states import ReminderSendAction, Responder, SubscriptionAction, SubscriptionEditForm, SubscriptionForm
@@ -101,6 +101,32 @@ async def _show_payment_mode_menu(
             "Then configure the option below.",
             reply_markup=subscription_payment_mode_keyboard(subscription_id, current_mode),
         )
+
+
+async def _show_reminder_time_menu(
+    callback: CallbackQuery,
+    db: Database,
+    subscription_id: int,
+) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription or not callback.message:
+        return
+    base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
+    current_override = normalize_time_string(subscription.get("reminder_time"))
+    current_time = current_override or base_time
+    current_label = current_override or f"default ({base_time})"
+    await callback.message.edit_text(
+        "⏰ Reminder time:\n"
+        f"Current: <code>{escape_html(current_label)}</code>\n"
+        "\n"
+        "🌍 Applied in each recipient timezone.\n"
+        "Choose a value:",
+        reply_markup=subscription_reminder_time_keyboard(
+            subscription_id,
+            current_time,
+            base_time,
+        ),
+    )
 
 
 async def start_subscription_creation(responder: Responder, state: FSMContext) -> None:
@@ -860,13 +886,18 @@ async def handle_subscription_period_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    period_text, period_markup = period_prompt()
+    _, period_markup = period_prompt()
     current_period = int(subscription.get("period_days") or 30)
     if current_period == MONTHLY_PERIOD_SENTINEL:
         current_label = "monthly"
     else:
         current_label = f"{current_period} day(s)"
-    prompt = f"{period_text}\n\n🏷️ Current: <code>{escape_html(current_label)}</code>"
+    prompt = (
+        "🔁 Period:\n"
+        f"Current: <code>{escape_html(current_label)}</code>\n"
+        "\n"
+        "Repeat period in days. Choose a preset or send your own number."
+    )
     await start_subscription_edit_flow(
         callback,
         state,
@@ -973,28 +1004,68 @@ async def handle_subscription_reminder_time_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
-    current_override = normalize_time_string(subscription.get("reminder_time"))
-    if current_override:
-        current_label = f"{current_override} (subscription override)"
-    else:
-        current_label = f"default ({base_time})"
-    prompt = (
-        "⏰ Reminder time:\n"
-        "Send time in <code>HH:MM</code>.\n"
-        "🌍 Applied in each recipient timezone.\n"
-        "\n"
-        f"🏷️ Current: <code>{escape_html(current_label)}</code>."
-    )
-    prompt_markup = subscription_reminder_time_edit_keyboard(callback_data.subscription_id) if current_override else None
-    await start_subscription_edit_flow(
-        callback,
-        state,
-        callback_data.subscription_id,
-        SubscriptionEditForm.reminder_time,
-        prompt,
-        reply_markup=prompt_markup,
-    )
+    await state.clear()
+    await _show_reminder_time_menu(callback, db, callback_data.subscription_id)
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("sub_remindertime:"))
+async def handle_subscription_reminder_time_select(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw, time_raw = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+    normalized = normalize_time_string(time_raw)
+    if normalized is None:
+        await callback.answer("Time must be HH:MM.", show_alert=True)
+        return
+    await db.update_subscription_fields(subscription_id, reminder_time=normalized)
+    await state.clear()
+    await callback.answer(f"Reminder time set to {normalized}")
+    await _show_reminder_time_menu(callback, db, subscription_id)
+
+
+@admin_router.callback_query(F.data.startswith("sub_remindertime_other:"))
+async def handle_subscription_reminder_time_other(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":", 1)
+    if len(parts) != 2:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, subscription_id_raw = parts
+    try:
+        subscription_id = int(subscription_id_raw)
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await callback.answer("Subscription not found.", show_alert=True)
+        return
+    await state.set_state(SubscriptionEditForm.reminder_time)
+    await state.update_data(edit_subscription_id=subscription_id)
+    if callback.message:
+        await callback.message.answer(
+            "⏰ Reminder time:\n"
+            "Send time in <code>HH:MM</code>\n"
+            "\n"
+            "Example: <code>16:00</code>",
+            reply_markup=dialog_keyboard(),
+        )
+    await callback.answer()
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "remindertime_default"))
@@ -1007,7 +1078,7 @@ async def handle_subscription_reminder_time_default(
     await db.update_subscription_fields(callback_data.subscription_id, reminder_time="")
     await state.clear()
     await callback.answer("Using base time now.")
-    await send_subscription_detail(callback, db, callback_data.subscription_id)
+    await _show_reminder_time_menu(callback, db, callback_data.subscription_id)
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "reminderdays"))
@@ -1426,17 +1497,6 @@ async def edit_subscription_reminder_time(message: Message, state: FSMContext, d
         return
 
     candidate = (message.text or "").strip()
-    if candidate.lower() in {"default", "base", "admin", "-"}:
-        await db.update_subscription_fields(sub_id, reminder_time="")
-        await state.clear()
-        effective = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
-        await message.answer(
-            f"Subscription override cleared. Using base time {effective}.",
-            reply_markup=admin_reply_keyboard(),
-        )
-        await send_subscription_detail(message, db, sub_id)
-        return
-
     normalized = normalize_time_string(candidate)
     if normalized is None:
         await message.answer("Time must be in HH:MM format (24-hour clock).")

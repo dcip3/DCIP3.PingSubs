@@ -914,7 +914,7 @@ async def send_reminder_settings(target: Responder, db: Database, subscription_i
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     text = (
-        "🔔 Reminders:\n"
+        "🔔 Reminders:\n\n"
         f"⏰ Time: <code>{escape_html(reminder_line)}</code>\n"
         f"🔔 Days: <code>{escape_html(offsets_text)}</code>\n"
         f"📣 Post-due alerts: <code>{escape_html(overdue_text)}</code>"
@@ -1020,7 +1020,7 @@ async def send_pricing_settings(target: Responder, db: Database, subscription_id
         await respond_with_markup(target, "This subscription no longer exists.")
         return
     text = (
-        "💰 Pricing:\n"
+        "💰 Pricing:\n\n"
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
         f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>"
     )
