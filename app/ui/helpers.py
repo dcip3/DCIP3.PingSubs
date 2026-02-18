@@ -28,6 +28,7 @@ from app.ui.keyboards import (
     build_members_list_keyboard,
     build_participants_keyboard,
     build_currency_keyboard,
+    build_creation_payment_mode_keyboard,
     build_period_keyboard,
     build_public_subscription_list_keyboard,
     build_share_limit_keyboard,
@@ -1177,4 +1178,11 @@ def share_limit_prompt() -> Tuple[str, InlineKeyboardMarkup]:
     return (
         "➗ Split limit:\nSend the number of users who split this subscription or tap “Split across all”.",
         build_share_limit_keyboard(),
+    )
+
+
+def payment_mode_prompt() -> Tuple[str, InlineKeyboardMarkup]:
+    return (
+        "💳 Payment mode:\nChoose how user amounts will be calculated.",
+        build_creation_payment_mode_keyboard(),
     )

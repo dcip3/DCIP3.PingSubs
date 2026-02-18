@@ -36,6 +36,7 @@ class SubscriptionForm(StatesGroup):
     currency = State()
     due_date = State()
     period = State()
+    payment_mode = State()
     share_limit = State()
 
 

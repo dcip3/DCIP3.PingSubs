@@ -19,6 +19,7 @@ from app.storage.db import Database
 from app.ui.helpers import (
     currency_prompt,
     get_edit_subscription_id,
+    payment_mode_prompt,
     period_prompt,
     require_edit_subscription_id,
     send_pricing_settings,
@@ -120,6 +121,9 @@ async def _finalize_new_subscription(
     share_limit: Optional[int],
 ) -> None:
     data = await state.get_data()
+    payment_mode = str(data.get("payment_mode") or PAYMENT_MODE_SPLIT).strip().lower()
+    if payment_mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
+        payment_mode = PAYMENT_MODE_SPLIT
     sub_id = await db.create_subscription(
         name=data["subscription_name"],
         amount=float(data["amount"]),
@@ -127,6 +131,7 @@ async def _finalize_new_subscription(
         due_date=data["due_date"],
         period_days=int(data["period_days"]),
         share_limit=share_limit,
+        payment_mode=payment_mode,
     )
     await state.clear()
 
@@ -296,8 +301,8 @@ async def subscription_form_period(message: Message, state: FSMContext) -> None:
         period = 30
 
     await state.update_data(period_days=period)
-    await state.set_state(SubscriptionForm.share_limit)
-    text_prompt, markup_prompt = share_limit_prompt()
+    await state.set_state(SubscriptionForm.payment_mode)
+    text_prompt, markup_prompt = payment_mode_prompt()
     await message.answer(text_prompt, reply_markup=markup_prompt)
 
 
@@ -353,8 +358,8 @@ async def handle_period_quick_select(
     current_state = await state.get_state()
     if current_state == SubscriptionForm.period.state:
         await state.update_data(period_days=days)
-        await state.set_state(SubscriptionForm.share_limit)
-        text_prompt, markup_prompt = share_limit_prompt()
+        await state.set_state(SubscriptionForm.payment_mode)
+        text_prompt, markup_prompt = payment_mode_prompt()
         await callback.message.answer(text_prompt, reply_markup=markup_prompt)
         label = "monthly" if days == MONTHLY_PERIOD_SENTINEL else f"{days} day(s)"
         await callback.answer(f"Period set to {label}")
@@ -391,6 +396,59 @@ async def handle_period_quick_select(
         return
 
     await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("create_payment_mode:"))
+async def handle_create_payment_mode_quick_select(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    current_state = await state.get_state()
+    if current_state != SubscriptionForm.payment_mode.state:
+        await callback.answer()
+        return
+
+    mode = callback.data.split(":", 1)[1].strip().lower()
+    if mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
+        await callback.answer("Unsupported mode.", show_alert=True)
+        return
+    await state.update_data(payment_mode=mode)
+
+    if mode == PAYMENT_MODE_FIXED:
+        await _finalize_new_subscription(callback, state, db, share_limit=None)
+        return
+
+    await state.set_state(SubscriptionForm.share_limit)
+    text_prompt, markup_prompt = share_limit_prompt()
+    await callback.message.answer(text_prompt, reply_markup=markup_prompt)
+    await callback.answer("Payment mode set to split")
+
+
+@admin_router.message(SubscriptionForm.payment_mode)
+async def subscription_form_payment_mode(message: Message, state: FSMContext, db: Database) -> None:
+    raw_value = (message.text or "").strip().lower()
+    if raw_value in {"split", "shares", "share"}:
+        mode = PAYMENT_MODE_SPLIT
+    elif raw_value in {"fixed", "amount", "fixed per user"}:
+        mode = PAYMENT_MODE_FIXED
+    else:
+        text_prompt, markup_prompt = payment_mode_prompt()
+        await message.answer(
+            "Choose a valid payment mode: split or fixed.\n"
+            "You can tap a button below.",
+            reply_markup=markup_prompt,
+        )
+        return
+
+    await state.update_data(payment_mode=mode)
+    if mode == PAYMENT_MODE_FIXED:
+        await _finalize_new_subscription(message, state, db, share_limit=None)
+        return
+
+    await state.set_state(SubscriptionForm.share_limit)
+    text_prompt, markup_prompt = share_limit_prompt()
+    await message.answer(text_prompt, reply_markup=markup_prompt)
 
 
 @admin_router.message(SubscriptionForm.share_limit)

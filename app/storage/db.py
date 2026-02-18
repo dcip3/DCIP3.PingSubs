@@ -434,8 +434,12 @@ class Database:
         due_date: date,
         period_days: int,
         share_limit: Optional[int],
+        payment_mode: str = PAYMENT_MODE_SPLIT,
     ) -> int:
         assert self._conn is not None, "Database is not connected"
+        normalized_mode = str(payment_mode or PAYMENT_MODE_SPLIT).strip().lower()
+        if normalized_mode not in PAYMENT_MODES:
+            normalized_mode = PAYMENT_MODE_SPLIT
         cursor = await self._conn.execute(
             """
             INSERT INTO subscriptions (
@@ -457,7 +461,7 @@ class Database:
                 amount,
                 currency.upper(),
                 currency.upper(),
-                PAYMENT_MODE_SPLIT,
+                normalized_mode,
                 due_date.isoformat(),
                 period_days,
                 share_limit,

@@ -967,6 +967,14 @@ def build_share_limit_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def build_creation_payment_mode_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Split by shares", callback_data=f"create_payment_mode:{PAYMENT_MODE_SPLIT}")
+    builder.button(text="Fixed per user", callback_data=f"create_payment_mode:{PAYMENT_MODE_FIXED}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 def build_payment_confirmation_keyboard(subscription_id: int, due_date: date | str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     due_str = due_date if isinstance(due_date, str) else due_date.isoformat()
