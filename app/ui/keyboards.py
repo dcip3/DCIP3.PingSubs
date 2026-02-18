@@ -613,8 +613,11 @@ def subscription_user_amounts_keyboard(
         amount_text = "not set"
         if fixed_amount is not None:
             try:
-                value = float(fixed_amount) * weight
-                amount_text = f"{value:.2f} {currency.upper()}"
+                base_value = float(fixed_amount)
+                if weight > 1:
+                    amount_text = f"{base_value:.2f} (x{weight}) {currency.upper()}"
+                else:
+                    amount_text = f"{base_value:.2f} {currency.upper()}"
             except (TypeError, ValueError):
                 amount_text = "not set"
         rows.append(
