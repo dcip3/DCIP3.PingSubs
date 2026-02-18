@@ -1307,18 +1307,6 @@ async def handle_subscription_delete_confirm(
     await send_subscription_list(callback, db)
 
 
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "cancel_edit"))
-async def handle_subscription_edit_cancel(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    await state.clear()
-    await callback.answer("Canceled.")
-    await send_subscription_detail(callback, db, callback_data.subscription_id)
-
-
 @admin_router.message(SubscriptionEditForm.rename)
 async def edit_subscription_rename(message: Message, state: FSMContext, db: Database) -> None:
     sub_id = await require_edit_subscription_id(message, state)

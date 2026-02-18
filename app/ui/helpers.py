@@ -7,7 +7,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State
 from aiogram.types import (
     CallbackQuery,
-    InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
     ReplyKeyboardMarkup,
@@ -1098,20 +1097,6 @@ async def send_participants_editor(callback: CallbackQuery, db: Database, subscr
     await callback.answer()
 
 
-def add_cancel_button(
-    subscription_id: int,
-    base_markup: Optional[InlineKeyboardMarkup] = None,
-) -> InlineKeyboardMarkup:
-    cancel_button = InlineKeyboardButton(
-        text="✖ Cancel",
-        callback_data=SubscriptionAction(action="cancel_edit", subscription_id=subscription_id).pack(),
-        style="danger",
-    )
-    rows = list(base_markup.inline_keyboard) if base_markup else []
-    rows.append([cancel_button])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 async def start_subscription_edit_flow(
     callback: CallbackQuery,
     state: FSMContext,
@@ -1123,7 +1108,7 @@ async def start_subscription_edit_flow(
     await state.set_state(next_state)
     await state.update_data(edit_subscription_id=int(subscription_id))
     await callback.answer()
-    markup = add_cancel_button(subscription_id, reply_markup)
+    markup = reply_markup or dialog_keyboard()
     await callback.message.answer(prompt, reply_markup=markup)
 
 

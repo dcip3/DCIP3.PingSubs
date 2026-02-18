@@ -49,9 +49,8 @@ async def handle_member_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(FriendForm.telegram_id)
     if callback.message:
         await callback.message.answer(
-            "New User:\n"
-            "🆔 Send Telegram ID (numbers only) or forward user's message.\n"
-            "Use <code>Cancel</code> to stop.",
+            "👥 New User:\n"
+            "Send Telegram ID (numbers only) or forward user's message.\n",
             reply_markup=dialog_keyboard(),
         )
     await callback.answer()
