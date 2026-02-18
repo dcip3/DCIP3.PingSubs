@@ -705,7 +705,9 @@ async def handle_public_subscription_reminder_time_other(
     if callback.message:
         await callback.message.answer(
             "⏰ Reminder time for this subscription:\n"
-            "Send time in <code>HH:MM</code>.",
+            "Send time in <code>HH:MM</code>\n"
+            "\n"
+            "Example: <code>16:00</code>",
             reply_markup=dialog_keyboard(),
         )
     await callback.answer()
