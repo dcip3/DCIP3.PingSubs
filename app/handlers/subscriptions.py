@@ -807,6 +807,11 @@ async def handle_subscription_user_amount_edit_callback(
     except ValueError:
         await callback.answer("Invalid user.", show_alert=True)
         return
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await callback.answer("Subscription not found.", show_alert=True)
+        return
+    default_amount = float(subscription.get("amount") or 0.0)
     participants = await db.list_subscription_participants(subscription_id)
     target_person = next((person for person in participants if int(person["id"]) == friend_id), None)
     if target_person is None:
@@ -816,13 +821,13 @@ async def handle_subscription_user_amount_edit_callback(
     current_value = target_person.get("fixed_amount")
     has_current_value = False
     if current_value is None:
-        current_text = "not set"
+        current_text = f"{default_amount:.2f}"
     else:
         try:
             current_text = f"{float(current_value):.2f}"
             has_current_value = True
         except (TypeError, ValueError):
-            current_text = "not set"
+            current_text = f"{default_amount:.2f}"
 
     await state.set_state(SubscriptionEditForm.user_amount)
     await state.update_data(
@@ -837,7 +842,7 @@ async def handle_subscription_user_amount_edit_callback(
             "Send amount (example: <code>300</code>)."
         )
         if has_current_value:
-            prompt += "\nOr tap <code>Clear</code>."
+            prompt += "\nOr tap <code>Clear</code> to use subscription amount."
         await callback.message.answer(
             prompt,
             reply_markup=(
@@ -875,7 +880,7 @@ async def handle_subscription_user_amount_clear_callback(
 
     await db.update_participant_fixed_amount(subscription_id, friend_id, None)
     await state.clear()
-    await callback.answer("Fixed amount cleared.")
+    await callback.answer("Using subscription amount.")
     await send_subscription_user_amounts(callback, db, subscription_id)
 
 
@@ -1404,7 +1409,7 @@ async def edit_subscription_user_amount(message: Message, state: FSMContext, db:
             None,
         )
         await state.clear()
-        await message.answer("Fixed amount cleared.", reply_markup=admin_reply_keyboard())
+        await message.answer("Using subscription amount.", reply_markup=admin_reply_keyboard())
         await send_subscription_user_amounts(message, db, int(subscription_id))
         return
 

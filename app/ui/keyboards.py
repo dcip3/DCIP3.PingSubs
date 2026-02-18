@@ -607,22 +607,21 @@ def subscription_user_amounts_keyboard(
     subscription_id: int,
     participants: Sequence[Dict[str, object]],
     currency: str,
+    subscription_amount: float,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for person in participants:
         name = str(person.get("full_name") or "Unknown")
         weight = int(person.get("share_weight") or 1)
         fixed_amount = person.get("fixed_amount")
-        amount_text = "not set"
-        if fixed_amount is not None:
-            try:
-                base_value = float(fixed_amount)
-                if weight > 1:
-                    amount_text = f"{base_value:.2f} (x{weight}) {currency.upper()}"
-                else:
-                    amount_text = f"{base_value:.2f} {currency.upper()}"
-            except (TypeError, ValueError):
-                amount_text = "not set"
+        try:
+            base_value = float(fixed_amount) if fixed_amount is not None else float(subscription_amount)
+        except (TypeError, ValueError):
+            base_value = float(subscription_amount)
+        if weight > 1:
+            amount_text = f"{base_value:.2f} (x{weight}) {currency.upper()}"
+        else:
+            amount_text = f"{base_value:.2f} {currency.upper()}"
         rows.append(
             [
                 InlineKeyboardButton(

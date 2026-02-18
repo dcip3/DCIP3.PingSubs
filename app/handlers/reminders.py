@@ -125,8 +125,9 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
                     None,
                 )
             )
-            if cycle_payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
-                paid_amount = fixed_amount * weight
+            if cycle_payment_mode == PAYMENT_MODE_FIXED:
+                base_amount = fixed_amount if fixed_amount is not None else cycle_amount
+                paid_amount = base_amount * weight
             else:
                 paid_amount = cycle_amount * weight / share_base
             amount_line = f"Amount: {paid_amount:.2f} {escape_html(cycle_currency)}"
