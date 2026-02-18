@@ -139,19 +139,14 @@ async def _show_subscription_currency_menu(
     if not subscription or not callback.message:
         return
     current_currency = str(subscription.get("currency") or "RUB").strip().upper()
-    default_currency = str(
-        subscription.get("base_currency") or subscription.get("currency") or "RUB"
-    ).strip().upper()
     await callback.message.edit_text(
         "💱 Currency:\n"
         f"Current: <code>{escape_html(current_currency)}</code>\n"
-        f"Default: <code>{escape_html(default_currency)}</code>\n"
         "\n"
         "Choose a value:",
         reply_markup=subscription_currency_keyboard(
             subscription_id,
             current_currency,
-            default_currency,
         ),
     )
 
@@ -652,26 +647,6 @@ async def handle_subscription_currency_select(
     await state.clear()
     await callback.answer(f"Currency set to {currency}")
     await _show_subscription_currency_menu(callback, db, subscription_id)
-
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "currency_default"))
-async def handle_subscription_currency_default(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    subscription = await db.get_subscription(callback_data.subscription_id)
-    if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
-        return
-    default_currency = str(
-        subscription.get("base_currency") or subscription.get("currency") or "RUB"
-    ).strip().upper()
-    await db.update_subscription_fields(callback_data.subscription_id, currency=default_currency)
-    await state.clear()
-    await callback.answer("Using default currency.")
-    await _show_subscription_currency_menu(callback, db, callback_data.subscription_id)
 
 
 @admin_router.callback_query(F.data.startswith("sub_currency_other:"))

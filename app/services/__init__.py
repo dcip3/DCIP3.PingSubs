@@ -627,7 +627,7 @@ async def _run_reminder_pass(
                     weight = int(person.get("share_weight") or 1)
                     fixed_amount = parse_fixed_amount(person.get("fixed_amount"))
                     if cycle_payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
-                        person_amount_value = fixed_amount
+                        person_amount_value = fixed_amount * weight
                         share_text = "fixed"
                     else:
                         person_amount_value = share_amount * weight
@@ -974,7 +974,7 @@ async def send_test_reminders(
         weight = int(person.get("share_weight") or 1)
         fixed_amount = parse_fixed_amount(person.get("fixed_amount"))
         if payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
-            person_amount_value = fixed_amount
+            person_amount_value = fixed_amount * weight
             share_text = "fixed"
         else:
             person_amount_value = share_amount * weight

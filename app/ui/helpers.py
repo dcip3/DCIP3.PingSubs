@@ -108,12 +108,12 @@ def _sum_users_total(
     per_share = float(subscription.get("amount") or 0.0) / split_share_base
     total = 0.0
     for person in participants:
+        weight = int(person.get("share_weight") or 1)
         if payment_mode == PAYMENT_MODE_FIXED:
             fixed_amount = _to_fixed_amount(person.get("fixed_amount"))
             if fixed_amount is not None:
-                total += fixed_amount
+                total += fixed_amount * weight
                 continue
-        weight = int(person.get("share_weight") or 1)
         total += per_share * weight
     return total
 
@@ -386,7 +386,7 @@ async def send_public_subscription_detail(
             fixed_amount = _to_fixed_amount(p.get("fixed_amount"))
             amount_text = ""
             if payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
-                amount_text = f" — {fixed_amount:.2f} {escape_html(subscription['currency'])}"
+                amount_text = f" — {(fixed_amount * weight):.2f} {escape_html(subscription['currency'])}"
             participants_lines.append(
                 f"• <code>{escape_html(p['full_name'])}{weight_text}{amount_text}</code>"
             )
@@ -443,7 +443,8 @@ async def send_public_subscription_detail(
             if payment_mode == PAYMENT_MODE_FIXED:
                 fixed_amount = _to_fixed_amount(current_person.get("fixed_amount"))
                 if fixed_amount is not None:
-                    my_amount_display = f"{fixed_amount:.2f} {subscription['currency']}"
+                    weight = int(current_person.get("share_weight") or 1)
+                    my_amount_display = f"{(fixed_amount * weight):.2f} {subscription['currency']}"
                 else:
                     weight = int(current_person.get("share_weight") or 1)
                     my_amount_display = f"{(per_person * weight):.2f} {subscription['currency']}"
@@ -730,7 +731,7 @@ def _build_subscription_detail_text(
             fixed_amount = _to_fixed_amount(p.get("fixed_amount"))
             amount_text = ""
             if payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
-                amount_text = f" — {fixed_amount:.2f} {escape_html(subscription['currency'])}"
+                amount_text = f" — {(fixed_amount * weight):.2f} {escape_html(subscription['currency'])}"
             participants_lines.append(
                 f"• <code>{escape_html(p['full_name'])}{weight_text}{amount_text}</code>"
             )
@@ -1043,8 +1044,9 @@ async def send_subscription_user_amounts(
         return
     participants = await db.list_subscription_participants(subscription_id)
     assigned_total = sum(
-        amount
-        for amount in (_to_fixed_amount(person.get("fixed_amount")) for person in participants)
+        amount * int(person.get("share_weight") or 1)
+        for person in participants
+        for amount in [_to_fixed_amount(person.get("fixed_amount"))]
         if amount is not None
     )
     text = (

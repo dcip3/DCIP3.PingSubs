@@ -5,8 +5,9 @@ from datetime import datetime
 
 from aiogram.types import CallbackQuery
 
+from app.core.constants import PAYMENT_MODE_FIXED
 from app.core.reminders import format_due_date, normalize_monthly_anchor_day
-from app.services import calculate_share_base
+from app.services import calculate_share_base, normalize_payment_mode, parse_fixed_amount
 from app.ui.states import ReminderAction, TestPaidAction
 from app.storage.db import Database
 from app.ui.text import escape_html
@@ -111,7 +112,23 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
                 ),
                 share_base,
             )
-            paid_amount = cycle_amount * weight / share_base
+            cycle_payment_mode = normalize_payment_mode(
+                cycle_state.get("payment_mode") if settings_snapshot_ready else subscription.get("payment_mode")
+            )
+            fixed_amount = parse_fixed_amount(
+                next(
+                    (
+                        p.get("fixed_amount")
+                        for p in cycle_participants
+                        if int(p["telegram_id"]) == user_id
+                    ),
+                    None,
+                )
+            )
+            if cycle_payment_mode == PAYMENT_MODE_FIXED and fixed_amount is not None:
+                paid_amount = fixed_amount * weight
+            else:
+                paid_amount = cycle_amount * weight / share_base
             amount_line = f"Amount: {paid_amount:.2f} {escape_html(cycle_currency)}"
         admin_note = (
             f"✅ Payment recorded: {escape_html(subscription['name'])} ({format_due_date(due_value)})\n"

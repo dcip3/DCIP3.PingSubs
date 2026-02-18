@@ -608,11 +608,13 @@ def subscription_user_amounts_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     for person in participants:
         name = str(person.get("full_name") or "Unknown")
+        weight = int(person.get("share_weight") or 1)
         fixed_amount = person.get("fixed_amount")
         amount_text = "not set"
         if fixed_amount is not None:
             try:
-                amount_text = f"{float(fixed_amount):.2f} {currency.upper()}"
+                value = float(fixed_amount) * weight
+                amount_text = f"{value:.2f} {currency.upper()}"
             except (TypeError, ValueError):
                 amount_text = "not set"
         rows.append(
@@ -891,16 +893,13 @@ def public_subscription_currency_keyboard(
 def subscription_currency_keyboard(
     subscription_id: int,
     current_currency: str,
-    default_currency: str,
 ) -> InlineKeyboardMarkup:
     options = ("USD", "EUR", "RUB")
     normalized_current = current_currency.upper()
-    normalized_default = default_currency.upper()
-    default_active = normalized_current == normalized_default
     rows: list[list[InlineKeyboardButton]] = []
     option_buttons: list[InlineKeyboardButton] = []
     for code in options:
-        is_active = (code == normalized_current) and not default_active
+        is_active = code == normalized_current
         if is_active:
             option_buttons.append(
                 InlineKeyboardButton(
@@ -918,18 +917,6 @@ def subscription_currency_keyboard(
             )
     rows.append(option_buttons)
     rows.append([InlineKeyboardButton(text="Other", callback_data=f"sub_currency_other:{subscription_id}")])
-    if default_active:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data=SubscriptionAction(action="currency_default", subscription_id=subscription_id).pack(),
-            style="success",
-        )
-    else:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data=SubscriptionAction(action="currency_default", subscription_id=subscription_id).pack(),
-        )
-    rows.append([default_button])
     rows.append(
         [
             InlineKeyboardButton(
