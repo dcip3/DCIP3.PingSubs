@@ -107,14 +107,16 @@ def build_members_list_keyboard(
         if page > 1:
             nav_row.append(
                 InlineKeyboardButton(
-                    text="◀️ Prev",
+                    text="⬅️ Back",
                     callback_data=MemberAction(action="page", friend_id=page - 1).pack(),
+                    style="primary",
                 )
             )
         nav_row.append(
             InlineKeyboardButton(
                 text=f"{page}/{total_pages}",
                 callback_data=MemberAction(action="page", friend_id=page).pack(),
+                style="primary",
             )
         )
         if page < total_pages:
@@ -122,6 +124,7 @@ def build_members_list_keyboard(
                 InlineKeyboardButton(
                     text="Next ▶️",
                     callback_data=MemberAction(action="page", friend_id=page + 1).pack(),
+                    style="primary",
                 )
             )
         rows.append(nav_row)
