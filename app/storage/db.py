@@ -173,6 +173,7 @@ class Database:
         await self._backfill_subscription_base_currencies()
         await self._backfill_subscription_payment_modes()
         await self._backfill_monthly_anchor_days()
+        await self._backfill_open_cycle_participant_snapshots()
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -357,6 +358,52 @@ class Database:
                OR payment_mode NOT IN ({placeholders})
             """,
             (PAYMENT_MODE_SPLIT, *PAYMENT_MODES),
+        )
+
+    async def _backfill_open_cycle_participant_snapshots(self) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            DELETE FROM subscription_cycle_participants
+            WHERE EXISTS (
+                SELECT 1
+                FROM subscription_cycles c
+                WHERE c.subscription_id = subscription_cycle_participants.subscription_id
+                  AND c.due_date = subscription_cycle_participants.due_date
+                  AND c.closed_at IS NULL
+            )
+            """
+        )
+        await self._conn.execute(
+            """
+            INSERT INTO subscription_cycle_participants (
+                subscription_id,
+                due_date,
+                telegram_id,
+                full_name,
+                share_weight,
+                fixed_amount
+            )
+            SELECT c.subscription_id,
+                   c.due_date,
+                   f.telegram_id,
+                   f.full_name,
+                   COALESCE(sp.share_weight, 1),
+                   sp.fixed_amount
+            FROM subscription_cycles c
+            JOIN subscription_participants sp
+              ON sp.subscription_id = c.subscription_id
+            JOIN friends f
+              ON f.id = sp.friend_id
+            WHERE c.closed_at IS NULL
+            """
+        )
+        await self._conn.execute(
+            """
+            UPDATE subscription_cycles
+            SET participants_snapshot_ready = 1
+            WHERE closed_at IS NULL
+            """
         )
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
@@ -594,6 +641,7 @@ class Database:
                 "DELETE FROM subscription_participants WHERE subscription_id = ? AND friend_id = ?",
                 (subscription_id, friend_id),
             )
+        await self._refresh_open_cycle_participant_snapshots(subscription_id)
         await self._conn.commit()
 
     async def update_participant_weight(
@@ -611,6 +659,7 @@ class Database:
             """,
             (share_weight, subscription_id, friend_id),
         )
+        await self._refresh_open_cycle_participant_snapshots(subscription_id)
         await self._conn.commit()
 
     async def update_participant_fixed_amount(
@@ -628,6 +677,7 @@ class Database:
             """,
             (fixed_amount, subscription_id, friend_id),
         )
+        await self._refresh_open_cycle_participant_snapshots(subscription_id)
         await self._conn.commit()
 
     async def update_all_participants_fixed_amount(
@@ -644,7 +694,49 @@ class Database:
             """,
             (fixed_amount, subscription_id),
         )
+        await self._refresh_open_cycle_participant_snapshots(subscription_id)
         await self._conn.commit()
+
+    async def _refresh_open_cycle_participant_snapshots(self, subscription_id: int) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            DELETE FROM subscription_cycle_participants
+            WHERE subscription_id = ?
+              AND due_date IN (
+                  SELECT due_date
+                  FROM subscription_cycles
+                  WHERE subscription_id = ? AND closed_at IS NULL
+              )
+            """,
+            (subscription_id, subscription_id),
+        )
+        await self._conn.execute(
+            """
+            INSERT INTO subscription_cycle_participants (
+                subscription_id,
+                due_date,
+                telegram_id,
+                full_name,
+                share_weight,
+                fixed_amount
+            )
+            SELECT c.subscription_id,
+                   c.due_date,
+                   f.telegram_id,
+                   f.full_name,
+                   COALESCE(sp.share_weight, 1),
+                   sp.fixed_amount
+            FROM subscription_cycles c
+            JOIN subscription_participants sp
+              ON sp.subscription_id = c.subscription_id
+            JOIN friends f
+              ON f.id = sp.friend_id
+            WHERE c.subscription_id = ?
+              AND c.closed_at IS NULL
+            """,
+            (subscription_id,),
+        )
 
     async def fetch_subscriptions_for_reminders(self) -> List[Dict[str, Any]]:
         assert self._conn is not None, "Database is not connected"
