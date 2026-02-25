@@ -439,9 +439,8 @@ async def _run_reminder_pass(
             due_key = cycle_due.isoformat()
             cycle_state = cycle_participants_state.get(due_key) or {}
             cycle_participants = list(cycle_state.get("participants") or [])
-            snapshot_ready = bool(cycle_state.get("snapshot_ready"))
             settings_snapshot_ready = bool(cycle_state.get("settings_snapshot_ready"))
-            if not cycle_participants and not snapshot_ready:
+            if not cycle_participants:
                 cycle_participants = participants
 
             amount_source = cycle_state.get("amount") if settings_snapshot_ready else item.get("amount")

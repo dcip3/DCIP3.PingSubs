@@ -33,9 +33,8 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
     cycle_state_map = await db.list_cycle_participants_for_due_dates(subscription["id"], [due_value])
     cycle_state = cycle_state_map.get(due_value) or {}
     cycle_participants = list(cycle_state.get("participants") or [])
-    snapshot_ready = bool(cycle_state.get("snapshot_ready"))
     settings_snapshot_ready = bool(cycle_state.get("settings_snapshot_ready"))
-    if not cycle_participants and not snapshot_ready:
+    if not cycle_participants:
         cycle_participants = await db.list_subscription_participants(subscription["id"])
     cycle_currency = str(cycle_state.get("currency") or subscription["currency"])
     cycle_share_limit = cycle_state.get("share_limit")
