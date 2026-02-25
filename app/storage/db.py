@@ -1114,6 +1114,18 @@ class Database:
             """,
             (subscription_id, due_value),
         )
+        await self._conn.commit()
+
+    async def freeze_cycle_snapshot(self, subscription_id: int, due_date: date | str) -> None:
+        assert self._conn is not None, "Database is not connected"
+        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
+        await self._conn.execute(
+            """
+            INSERT OR IGNORE INTO subscription_cycles (subscription_id, due_date)
+            VALUES (?, ?)
+            """,
+            (subscription_id, due_value),
+        )
         await self._ensure_cycle_settings_snapshot_exists(subscription_id, due_value)
         await self._ensure_cycle_participant_snapshot_exists(subscription_id, due_value)
         await self._conn.commit()

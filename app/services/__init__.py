@@ -439,8 +439,9 @@ async def _run_reminder_pass(
             due_key = cycle_due.isoformat()
             cycle_state = cycle_participants_state.get(due_key) or {}
             cycle_participants = list(cycle_state.get("participants") or [])
+            snapshot_ready = bool(cycle_state.get("snapshot_ready"))
             settings_snapshot_ready = bool(cycle_state.get("settings_snapshot_ready"))
-            if not cycle_participants:
+            if not cycle_participants and not snapshot_ready:
                 cycle_participants = participants
 
             amount_source = cycle_state.get("amount") if settings_snapshot_ready else item.get("amount")
@@ -511,6 +512,7 @@ async def _run_reminder_pass(
             continue
         if has_cycle_participants:
             queued_events_for_admin: dict[tuple[date, int], dict[str, object]] = {}
+            frozen_due_dates: set[date] = set()
             user_base_time_cache: dict[int, str] = {}
             user_subscription_time_cache: dict[int, Optional[str]] = {}
             user_timezone_cache: dict[int, str] = {}
@@ -676,6 +678,9 @@ async def _run_reminder_pass(
                     status_text, due_date_text = _format_status_and_date(cycle_due, local_today)
                     for event_offset in sorted(event_offsets):
                         if register_reminders:
+                            if cycle_due not in frozen_due_dates:
+                                await db.freeze_cycle_snapshot(int(item["id"]), cycle_due)
+                                frozen_due_dates.add(cycle_due)
                             if not await db.register_user_reminder_if_new(
                                 int(item["id"]),
                                 cycle_due,
@@ -777,6 +782,7 @@ async def _run_reminder_pass(
                 event_offsets.add((today - cycle_due).days)
             for event_offset in sorted(event_offsets):
                 if register_reminders:
+                    await db.freeze_cycle_snapshot(int(item["id"]), cycle_due)
                     if not await db.register_reminder_if_new(int(item["id"]), cycle_due, event_offset):
                         continue
                 safe_currency = escape_html(cycle_currency)
