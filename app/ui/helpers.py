@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Dict, Optional, Sequence, Tuple, Union
 
 from aiogram.fsm.context import FSMContext
@@ -42,6 +42,7 @@ from app.ui.keyboards import (
     reminder_settings_keyboard,
     reminder_send_targets_keyboard,
     settings_tests_keyboard,
+    subscription_open_cycles_keyboard,
     subscription_report_keyboard,
     subscription_detail_keyboard,
     tests_menu_keyboard,
@@ -133,6 +134,18 @@ def _format_iso_date(value: str) -> str:
         return datetime.strptime(value, "%Y-%m-%d").strftime(DATE_INPUT_FORMAT)
     except ValueError:
         return value
+
+
+def _format_cycle_status(value: str, today: date) -> str:
+    try:
+        due_date = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return "Unknown date"
+    if due_date > today:
+        return f"Due in {(due_date - today).days} day(s)"
+    if due_date == today:
+        return "Due today"
+    return f"Overdue by {(today - due_date).days} day(s)"
 
 
 async def respond_with_markup(
@@ -547,6 +560,85 @@ async def send_subscription_payment_report(
         target,
         text,
         reply_markup=subscription_report_keyboard(subscription_id),
+    )
+
+
+async def send_subscription_open_cycles(
+    target: Responder,
+    db: Database,
+    subscription_id: int,
+) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await respond_with_markup(target, "This subscription no longer exists.")
+        return
+
+    open_cycles = await db.list_open_cycles(subscription_id)
+    if not open_cycles:
+        await respond_with_markup(
+            target,
+            "🗂 Open cycles:\nNo open cycles for this subscription.",
+            reply_markup=subscription_open_cycles_keyboard(subscription_id),
+        )
+        return
+
+    cycle_state_map = await db.list_cycle_participants_for_due_dates(subscription_id, open_cycles)
+    payments = await db.list_payments_for_cycles(subscription_id, open_cycles)
+    live_participants = await db.list_subscription_participants(subscription_id)
+
+    paid_by_due: dict[str, set[int]] = {}
+    for row in payments:
+        due_value = str(row.get("due_date") or "")
+        payer_id = row.get("paid_by_telegram_id")
+        if payer_id is None:
+            continue
+        paid_by_due.setdefault(due_value, set()).add(int(payer_id))
+
+    today = datetime.today().date()
+    lines = [
+        "🗂 Open cycles:",
+        f"Subscription: <code>{escape_html(subscription['name'])}</code>",
+        "",
+    ]
+    for idx, due_value in enumerate(open_cycles, 1):
+        cycle_state = cycle_state_map.get(due_value) or {}
+        cycle_participants = list(cycle_state.get("participants") or [])
+        snapshot_ready = bool(cycle_state.get("snapshot_ready"))
+        settings_snapshot_ready = bool(cycle_state.get("settings_snapshot_ready"))
+        if not cycle_participants and not snapshot_ready:
+            cycle_participants = live_participants
+
+        participant_ids = {
+            int(person.get("telegram_id") or 0)
+            for person in cycle_participants
+            if int(person.get("telegram_id") or 0) > 0
+        }
+        users_count = len(participant_ids)
+        paid_count = len(participant_ids.intersection(paid_by_due.get(due_value, set())))
+
+        amount_source = cycle_state.get("amount") if settings_snapshot_ready else subscription.get("amount")
+        try:
+            amount_value = float(amount_source)
+        except (TypeError, ValueError):
+            amount_value = float(subscription.get("amount") or 0.0)
+        currency_source = cycle_state.get("currency") if settings_snapshot_ready else subscription.get("currency")
+        currency_value = str(currency_source or subscription.get("currency") or "").upper()
+
+        lines.extend(
+            [
+                f"{idx}. <code>{escape_html(_format_iso_date(due_value))}</code> — "
+                f"<code>{escape_html(_format_cycle_status(due_value, today))}</code>",
+                f"💰 Amount: <code>{amount_value:.2f} {escape_html(currency_value)}</code>",
+                f"👥 Users: <code>{users_count}</code> | ✅ Paid: <code>{paid_count}/{users_count}</code>",
+                f"📦 Snapshot flags: <code>users={int(snapshot_ready)} settings={int(settings_snapshot_ready)}</code>",
+                "",
+            ]
+        )
+
+    await send_chunked_responder_text(
+        target,
+        "\n".join(lines).rstrip(),
+        reply_markup=subscription_open_cycles_keyboard(subscription_id),
     )
 
 

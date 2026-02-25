@@ -210,11 +210,12 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder.button(text="📅 Next charge", callback_data=SubscriptionAction(action="duedate", subscription_id=subscription_id).pack())
     builder.button(text="🔁 Period", callback_data=SubscriptionAction(action="period", subscription_id=subscription_id).pack())
     builder.button(text="🔔 Reminders", callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack())
+    builder.button(text="🗂 Open cycles", callback_data=SubscriptionAction(action="cycles", subscription_id=subscription_id).pack())
     builder.button(text="📝 Comment", callback_data=SubscriptionAction(action="comment", subscription_id=subscription_id).pack())
     builder.button(text="👥 Users", callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack())
     builder.button(text="📊 Payments report", callback_data=SubscriptionAction(action="report", subscription_id=subscription_id).pack())
     builder.button(text="🗑 Delete", callback_data=SubscriptionAction(action="delete", subscription_id=subscription_id).pack())
-    builder.adjust(2, 2, 2, 2, 2)
+    builder.adjust(2, 2, 2, 2, 2, 1)
     builder.row(
         InlineKeyboardButton(
             text="⬅️ Back",
@@ -266,6 +267,10 @@ def build_back_keyboard(subscription_id: int, back_action: str) -> InlineKeyboar
 
 
 def subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    return build_back_keyboard(subscription_id, "open")
+
+
+def subscription_open_cycles_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     return build_back_keyboard(subscription_id, "open")
 
 

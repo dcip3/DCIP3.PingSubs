@@ -23,6 +23,7 @@ from app.ui.helpers import (
     period_prompt,
     require_edit_subscription_id,
     send_pricing_settings,
+    send_subscription_open_cycles,
     send_subscription_payment_report,
     send_subscription_user_amounts,
     send_reminder_send_menu,
@@ -1003,6 +1004,17 @@ async def handle_subscription_report_callback(
 ) -> None:
     await state.clear()
     await send_subscription_payment_report(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "cycles"))
+async def handle_subscription_cycles_callback(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    await send_subscription_open_cycles(callback, db, callback_data.subscription_id)
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "reminders_send"))
