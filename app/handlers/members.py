@@ -8,6 +8,7 @@ from app.ui.helpers import send_member_detail, send_member_list, send_member_rep
 from app.ui.keyboards import (
     admin_reply_keyboard,
     dialog_keyboard,
+    member_balance_currency_keyboard,
     member_balance_keyboard,
     member_delete_confirm_keyboard,
 )
@@ -95,55 +96,34 @@ async def handle_member_balance_menu(
         balance_value = float(friend.get("balance") or 0.0)
     except (TypeError, ValueError):
         balance_value = 0.0
-    balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
+    default_balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
+    balance_currency = str(friend.get("balance_currency") or "").strip().upper()
+    if len(balance_currency) != 3 or not balance_currency.isalpha():
+        balance_currency = default_balance_currency
     if callback.message:
         await callback.message.edit_text(
             "💰 Balance:\n"
+            "\n"
             f"User: <code>{friend['full_name']}</code>\n"
-            f"Current: <code>{balance_value:.2f} {balance_currency}</code>\n\n"
+            f"💰 Amount: <code>{balance_value:.2f}</code>\n"
+            f"💱 Currency: <code>{balance_currency}</code>\n\n"
             "Choose an action:",
             reply_markup=member_balance_keyboard(callback_data.friend_id),
         )
     await callback.answer()
 
 
-async def _start_member_balance_edit(
-    callback: CallbackQuery,
-    state: FSMContext,
-    friend_id: int,
-    mode: str,
-) -> None:
+async def _start_member_balance_edit(callback: CallbackQuery, state: FSMContext, friend_id: int) -> None:
     await state.set_state(MemberEditForm.balance)
-    await state.update_data(edit_member_id=friend_id, balance_mode=mode)
+    await state.update_data(edit_member_id=friend_id)
     if callback.message:
-        if mode == "set":
-            await callback.message.answer(
-                "💰 Set balance:\n"
-                "Send the new balance value.\n"
-                "Example: <code>1200</code>.",
-                reply_markup=dialog_keyboard(),
-            )
-        else:
-            await callback.message.answer(
-                "💰 Add balance:\n"
-                "Send amount to add.\n"
-                "Example: <code>300</code>.",
-                reply_markup=dialog_keyboard(),
-            )
+        await callback.message.answer(
+            "💰 Set balance:\n"
+            "Send the new balance value.\n"
+            "Example: <code>1200</code>.",
+            reply_markup=dialog_keyboard(),
+        )
     await callback.answer()
-
-
-@admin_router.callback_query(MemberAction.filter(F.action == "balance_add"))
-async def handle_member_balance_add_prompt(
-    callback: CallbackQuery,
-    callback_data: MemberAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    if not await db.get_friend(callback_data.friend_id):
-        await callback.answer("User not found.", show_alert=True)
-        return
-    await _start_member_balance_edit(callback, state, callback_data.friend_id, "add")
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "balance_set"))
@@ -156,7 +136,85 @@ async def handle_member_balance_set_prompt(
     if not await db.get_friend(callback_data.friend_id):
         await callback.answer("User not found.", show_alert=True)
         return
-    await _start_member_balance_edit(callback, state, callback_data.friend_id, "set")
+    await _start_member_balance_edit(callback, state, callback_data.friend_id)
+
+
+@admin_router.callback_query(MemberAction.filter(F.action == "balance_currency"))
+async def handle_member_balance_currency_menu(
+    callback: CallbackQuery,
+    callback_data: MemberAction,
+    db: Database,
+) -> None:
+    friend = await db.get_friend(callback_data.friend_id)
+    if not friend:
+        await callback.answer("User not found.", show_alert=True)
+        return
+    default_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
+    current_currency = str(friend.get("balance_currency") or "").strip().upper()
+    if len(current_currency) != 3 or not current_currency.isalpha():
+        current_currency = default_currency
+    if callback.message:
+        await callback.message.edit_text(
+            "💰 Balance:\n"
+            f"User: <code>{friend['full_name']}</code>\n"
+            f"💱 Currency: <code>{current_currency}</code>\n\n"
+            "Choose a value:",
+            reply_markup=member_balance_currency_keyboard(callback_data.friend_id, current_currency),
+        )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("member_balance_currency:"))
+async def handle_member_balance_currency_select(
+    callback: CallbackQuery,
+    db: Database,
+) -> None:
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    _, friend_id_raw, raw_currency = parts
+    try:
+        friend_id = int(friend_id_raw)
+    except ValueError:
+        await callback.answer("Invalid user.", show_alert=True)
+        return
+    currency = raw_currency.strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        await callback.answer("Currency must contain 3 letters.", show_alert=True)
+        return
+    updated = await db.set_friend_balance_currency(friend_id, currency)
+    if updated is None:
+        await callback.answer("User not found.", show_alert=True)
+        return
+    await callback.answer(f"Currency set to {updated}")
+    await handle_member_balance_currency_menu(
+        callback,
+        MemberAction(action="balance_currency", friend_id=friend_id),
+        db,
+    )
+
+
+@admin_router.callback_query(MemberAction.filter(F.action == "balance_currency_other"))
+async def handle_member_balance_currency_other(
+    callback: CallbackQuery,
+    callback_data: MemberAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    if not await db.get_friend(callback_data.friend_id):
+        await callback.answer("User not found.", show_alert=True)
+        return
+    await state.set_state(MemberEditForm.balance_currency)
+    await state.update_data(edit_member_id=callback_data.friend_id)
+    if callback.message:
+        await callback.message.answer(
+            "💱 Balance currency:\n"
+            "Send a 3-letter currency code.\n"
+            "Example: <code>USD</code>.",
+            reply_markup=dialog_keyboard(),
+        )
+    await callback.answer()
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "rename"))
@@ -201,7 +259,6 @@ async def handle_member_balance_input(
 ) -> None:
     data = await state.get_data()
     friend_id = data.get("edit_member_id")
-    mode = str(data.get("balance_mode") or "add").strip().lower()
     if not friend_id:
         await state.clear()
         await message.answer("Session expired. Open users again.")
@@ -213,16 +270,10 @@ async def handle_member_balance_input(
         await message.answer("Amount must be a number. Example: 300")
         return
 
-    if mode == "set":
-        if amount < 0:
-            await message.answer("Balance cannot be negative.")
-            return
-        updated_balance = await db.set_friend_balance(int(friend_id), amount)
-    else:
-        if amount <= 0:
-            await message.answer("Amount to add must be greater than zero.")
-            return
-        updated_balance = await db.add_friend_balance(int(friend_id), amount)
+    if amount < 0:
+        await message.answer("Balance cannot be negative.")
+        return
+    updated_balance = await db.set_friend_balance(int(friend_id), amount)
 
     if updated_balance is None:
         await state.clear()
@@ -231,6 +282,33 @@ async def handle_member_balance_input(
 
     await state.clear()
     await message.answer("Balance updated.", reply_markup=admin_reply_keyboard())
+    await send_member_detail(message, db, int(friend_id))
+
+
+@admin_router.message(MemberEditForm.balance_currency)
+async def handle_member_balance_currency_input(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    data = await state.get_data()
+    friend_id = data.get("edit_member_id")
+    if not friend_id:
+        await state.clear()
+        await message.answer("Session expired. Open users again.")
+        return
+
+    currency = (message.text or "").strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        await message.answer("Currency must contain 3 letters. Example: USD")
+        return
+    updated = await db.set_friend_balance_currency(int(friend_id), currency)
+    if updated is None:
+        await state.clear()
+        await message.answer("User not found.")
+        return
+    await state.clear()
+    await message.answer("Balance currency updated.", reply_markup=admin_reply_keyboard())
     await send_member_detail(message, db, int(friend_id))
 
 

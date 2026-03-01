@@ -567,6 +567,7 @@ async def _run_reminder_pass(
             user_currency_cache: dict[tuple[int, str], str] = {}
             converted_share_cache: dict[tuple[str, str, float], Optional[float]] = {}
             user_balance_cache: dict[int, float] = {}
+            user_balance_currency_cache: dict[int, str] = {}
             balance_conversion_cache: dict[tuple[str, str, float], Optional[float]] = {}
             for cycle_due in open_cycles:
                 cycle_participants = participants_by_cycle.get(cycle_due, [])
@@ -700,11 +701,15 @@ async def _run_reminder_pass(
                         person_amount_value = share_amount * weight
                         share_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
                     remaining_amount_value = float(person_amount_value)
-                    balance_currency = converter.target_currency.upper()
+                    balance_currency = user_balance_currency_cache.get(telegram_id)
                     current_balance = user_balance_cache.get(telegram_id)
-                    if current_balance is None:
-                        current_balance = max(await db.get_friend_balance_by_telegram(telegram_id), 0.0)
+                    if current_balance is None or balance_currency is None:
+                        current_balance, balance_currency = await db.get_friend_balance_snapshot_by_telegram(
+                            telegram_id,
+                            converter.target_currency,
+                        )
                         user_balance_cache[telegram_id] = current_balance
+                        user_balance_currency_cache[telegram_id] = balance_currency
                     balance_after = current_balance
 
                     required_balance_amount: Optional[float]

@@ -166,14 +166,14 @@ def member_detail_keyboard(friend_id: int) -> InlineKeyboardMarkup:
 def member_balance_keyboard(friend_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="➕ Add",
-        callback_data=MemberAction(action="balance_add", friend_id=friend_id).pack(),
-    )
-    builder.button(
         text="✏️ Set",
         callback_data=MemberAction(action="balance_set", friend_id=friend_id).pack(),
     )
-    builder.adjust(2)
+    builder.button(
+        text="💱 Currency",
+        callback_data=MemberAction(action="balance_currency", friend_id=friend_id).pack(),
+    )
+    builder.adjust(1)
     builder.row(
         InlineKeyboardButton(
             text="⬅️ Back",
@@ -183,6 +183,53 @@ def member_balance_keyboard(friend_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
     )
     return builder.as_markup()
+
+
+def member_balance_currency_keyboard(
+    friend_id: int,
+    current_currency: str,
+) -> InlineKeyboardMarkup:
+    options = ("USD", "EUR", "RUB")
+    normalized_current = current_currency.upper()
+    rows: list[list[InlineKeyboardButton]] = []
+    option_buttons: list[InlineKeyboardButton] = []
+    for code in options:
+        is_active = code == normalized_current
+        if is_active:
+            option_buttons.append(
+                InlineKeyboardButton(
+                    text=code,
+                    callback_data=f"member_balance_currency:{friend_id}:{code}",
+                    style="success",
+                )
+            )
+        else:
+            option_buttons.append(
+                InlineKeyboardButton(
+                    text=code,
+                    callback_data=f"member_balance_currency:{friend_id}:{code}",
+                )
+            )
+    rows.append(option_buttons)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Other",
+                callback_data=MemberAction(action="balance_currency_other", friend_id=friend_id).pack(),
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Back",
+                callback_data=MemberAction(action="balance", friend_id=friend_id).pack(),
+                style="primary",
+            ),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def member_delete_confirm_keyboard(friend_id: int) -> InlineKeyboardMarkup:

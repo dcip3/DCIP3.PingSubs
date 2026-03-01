@@ -970,7 +970,10 @@ async def send_member_detail(target: Responder, db: Database, friend_id: int) ->
         balance_value = float(friend.get("balance") or 0.0)
     except (TypeError, ValueError):
         balance_value = 0.0
-    balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
+    default_balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
+    balance_currency = str(friend.get("balance_currency") or "").strip().upper()
+    if len(balance_currency) != 3 or not balance_currency.isalpha():
+        balance_currency = default_balance_currency
     subs = await db.list_subscriptions_for_user(friend["telegram_id"])
     if subs:
         sub_lines = "\n".join(f"• <code>{escape_html(sub['name'])}</code>" for sub in subs)

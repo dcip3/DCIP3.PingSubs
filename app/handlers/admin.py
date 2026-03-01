@@ -926,6 +926,7 @@ async def handle_cancel(message: Message, state: FSMContext, db: Database) -> No
         FriendForm.full_name.state,
         MemberEditForm.full_name.state,
         MemberEditForm.balance.state,
+        MemberEditForm.balance_currency.state,
     }:
         await send_member_list(message, db)
 

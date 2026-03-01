@@ -25,7 +25,8 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER NOT NULL UNIQUE,
                 full_name TEXT NOT NULL,
-                balance REAL NOT NULL DEFAULT 0
+                balance REAL NOT NULL DEFAULT 0,
+                balance_currency TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS admins (
@@ -241,11 +242,23 @@ class Database:
             "balance",
             "REAL NOT NULL DEFAULT 0",
         )
+        await self._ensure_column(
+            "friends",
+            "balance_currency",
+            "TEXT NOT NULL DEFAULT ''",
+        )
         assert self._conn is not None, "Database is not connected"
         await self._conn.execute(
             """
             UPDATE friends
             SET balance = COALESCE(balance, 0)
+            """
+        )
+        await self._conn.execute(
+            """
+            UPDATE friends
+            SET balance_currency = UPPER(TRIM(balance_currency))
+            WHERE balance_currency IS NOT NULL
             """
         )
 
@@ -437,6 +450,24 @@ class Database:
         except (TypeError, ValueError):
             return 0.0
 
+    async def get_friend_balance_currency(
+        self,
+        friend_id: int,
+        default_currency: str = "RUB",
+    ) -> str:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            "SELECT balance_currency FROM friends WHERE id = ?",
+            (friend_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return default_currency.strip().upper() or "RUB"
+        value = str(row["balance_currency"] or "").strip().upper()
+        if len(value) == 3 and value.isalpha():
+            return value
+        return default_currency.strip().upper() or "RUB"
+
     async def get_friend_balance_by_telegram(self, telegram_id: int) -> float:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
@@ -450,6 +481,46 @@ class Database:
             return float(row["balance"] or 0.0)
         except (TypeError, ValueError):
             return 0.0
+
+    async def get_friend_balance_currency_by_telegram(
+        self,
+        telegram_id: int,
+        default_currency: str = "RUB",
+    ) -> str:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            "SELECT balance_currency FROM friends WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return default_currency.strip().upper() or "RUB"
+        value = str(row["balance_currency"] or "").strip().upper()
+        if len(value) == 3 and value.isalpha():
+            return value
+        return default_currency.strip().upper() or "RUB"
+
+    async def get_friend_balance_snapshot_by_telegram(
+        self,
+        telegram_id: int,
+        default_currency: str = "RUB",
+    ) -> tuple[float, str]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            "SELECT balance, balance_currency FROM friends WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return 0.0, default_currency.strip().upper() or "RUB"
+        try:
+            balance_value = float(row["balance"] or 0.0)
+        except (TypeError, ValueError):
+            balance_value = 0.0
+        currency_value = str(row["balance_currency"] or "").strip().upper()
+        if len(currency_value) != 3 or not currency_value.isalpha():
+            currency_value = default_currency.strip().upper() or "RUB"
+        return max(balance_value, 0.0), currency_value
 
     async def add_friend_balance(self, friend_id: int, amount: float) -> Optional[float]:
         assert self._conn is not None, "Database is not connected"
@@ -488,6 +559,32 @@ class Database:
             return float(friend.get("balance") or 0.0)
         except (TypeError, ValueError):
             return 0.0
+
+    async def set_friend_balance_currency(
+        self,
+        friend_id: int,
+        currency: str,
+    ) -> Optional[str]:
+        assert self._conn is not None, "Database is not connected"
+        normalized = str(currency or "").strip().upper()
+        if len(normalized) != 3 or not normalized.isalpha():
+            return None
+        await self._conn.execute(
+            """
+            UPDATE friends
+            SET balance_currency = ?
+            WHERE id = ?
+            """,
+            (normalized, friend_id),
+        )
+        await self._conn.commit()
+        friend = await self.get_friend(friend_id)
+        if not friend:
+            return None
+        value = str(friend.get("balance_currency") or "").strip().upper()
+        if len(value) == 3 and value.isalpha():
+            return value
+        return normalized
 
     async def consume_friend_balance_by_telegram(
         self,
@@ -530,7 +627,7 @@ class Database:
     async def list_friends(self) -> List[Dict[str, Any]]:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
-            "SELECT id, telegram_id, full_name, balance FROM friends ORDER BY full_name"
+            "SELECT id, telegram_id, full_name, balance, balance_currency FROM friends ORDER BY full_name"
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]

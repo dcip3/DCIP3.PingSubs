@@ -58,6 +58,7 @@ class SubscriptionEditForm(StatesGroup):
 class MemberEditForm(StatesGroup):
     full_name = State()
     balance = State()
+    balance_currency = State()
 
 
 class SubscriptionAction(CallbackData, prefix="sub"):
