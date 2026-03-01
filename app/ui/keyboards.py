@@ -219,7 +219,7 @@ def member_report_keyboard(friend_id: int) -> InlineKeyboardMarkup:
 def build_public_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for sub in subs:
-        label = f"{sub['name']} ({sub['amount']:.2f} {sub['currency']})"
+        label = str(sub["name"])
         builder.button(
             text=label,
             callback_data=SubscriptionAction(action="open_public", subscription_id=sub["id"]).pack(),

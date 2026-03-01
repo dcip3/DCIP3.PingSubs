@@ -315,7 +315,6 @@ async def send_user_subscription_list(message: Message, db: Database, telegram_i
         lines.extend(
             [
                 f"{idx}. <code>{escape_html(sub['name'])}</code>",
-                f"Amount: <code>{sub['amount']:.2f} {escape_html(sub['currency'])}</code>",
                 f"Next charge: <code>{escape_html(due)}</code>",
                 "",
             ]
