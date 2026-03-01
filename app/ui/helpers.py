@@ -487,14 +487,21 @@ async def send_public_subscription_detail(
     sections = [
         "Subscription Info:",
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>",
-        f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>",
-        f"💱 My currency: <code>{escape_html(my_currency_display)}</code>",
-        f"💵 My amount: <code>{escape_html(my_amount_display)}</code>",
-        "",
-        "Cycle Info:",
-        f"📅 Next charge: <code>{escape_html(next_charge)}</code>",
-        f"🔁 Cadence: <code>{escape_html(cadence)}</code>",
     ]
+    if is_admin_view:
+        sections.append(
+            f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>"
+        )
+    sections.extend(
+        [
+            f"💱 My currency: <code>{escape_html(my_currency_display)}</code>",
+            f"💵 My amount: <code>{escape_html(my_amount_display)}</code>",
+            "",
+            "Cycle Info:",
+            f"📅 Next charge: <code>{escape_html(next_charge)}</code>",
+            f"🔁 Cadence: <code>{escape_html(cadence)}</code>",
+        ]
+    )
     if is_admin_view:
         sections.insert(5, f"💳 Payment mode: <code>{'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}</code>")
         if payment_mode == PAYMENT_MODE_FIXED:
