@@ -24,7 +24,8 @@ class Database:
             CREATE TABLE IF NOT EXISTS friends (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER NOT NULL UNIQUE,
-                full_name TEXT NOT NULL
+                full_name TEXT NOT NULL,
+                balance REAL NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS admins (
@@ -170,6 +171,7 @@ class Database:
         await self._ensure_subscription_columns()
         await self._ensure_cycle_columns()
         await self._ensure_participant_columns()
+        await self._ensure_friend_columns()
         await self._backfill_subscription_base_currencies()
         await self._backfill_subscription_payment_modes()
         await self._backfill_monthly_anchor_days()
@@ -231,6 +233,20 @@ class Database:
             "subscription_cycle_participants",
             "fixed_amount",
             "REAL",
+        )
+
+    async def _ensure_friend_columns(self) -> None:
+        await self._ensure_column(
+            "friends",
+            "balance",
+            "REAL NOT NULL DEFAULT 0",
+        )
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            UPDATE friends
+            SET balance = COALESCE(balance, 0)
+            """
         )
 
     async def _ensure_cycle_columns(self) -> None:
@@ -407,9 +423,115 @@ class Database:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_friend_balance(self, friend_id: int) -> float:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            "SELECT balance FROM friends WHERE id = ?",
+            (friend_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return 0.0
+        try:
+            return float(row["balance"] or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def get_friend_balance_by_telegram(self, telegram_id: int) -> float:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            "SELECT balance FROM friends WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return 0.0
+        try:
+            return float(row["balance"] or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def add_friend_balance(self, friend_id: int, amount: float) -> Optional[float]:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            UPDATE friends
+            SET balance = COALESCE(balance, 0) + ?
+            WHERE id = ?
+            """,
+            (amount, friend_id),
+        )
+        await self._conn.commit()
+        friend = await self.get_friend(friend_id)
+        if not friend:
+            return None
+        try:
+            return float(friend.get("balance") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def set_friend_balance(self, friend_id: int, amount: float) -> Optional[float]:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            UPDATE friends
+            SET balance = ?
+            WHERE id = ?
+            """,
+            (amount, friend_id),
+        )
+        await self._conn.commit()
+        friend = await self.get_friend(friend_id)
+        if not friend:
+            return None
+        try:
+            return float(friend.get("balance") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def consume_friend_balance_by_telegram(
+        self,
+        telegram_id: int,
+        amount: float,
+    ) -> tuple[float, float]:
+        assert self._conn is not None, "Database is not connected"
+        target_amount = max(float(amount), 0.0)
+        if target_amount <= 0:
+            return 0.0, await self.get_friend_balance_by_telegram(telegram_id)
+
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await self._conn.execute(
+                "SELECT balance FROM friends WHERE telegram_id = ?",
+                (telegram_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                await self._conn.rollback()
+                return 0.0, 0.0
+            current_balance = max(float(row["balance"] or 0.0), 0.0)
+            consumed = min(current_balance, target_amount)
+            next_balance = current_balance - consumed
+            if consumed > 0:
+                await self._conn.execute(
+                    """
+                    UPDATE friends
+                    SET balance = ?
+                    WHERE telegram_id = ?
+                    """,
+                    (next_balance, telegram_id),
+                )
+            await self._conn.commit()
+            return consumed, next_balance
+        except Exception:
+            await self._conn.rollback()
+            raise
+
     async def list_friends(self) -> List[Dict[str, Any]]:
         assert self._conn is not None, "Database is not connected"
-        cursor = await self._conn.execute("SELECT id, telegram_id, full_name FROM friends ORDER BY full_name")
+        cursor = await self._conn.execute(
+            "SELECT id, telegram_id, full_name, balance FROM friends ORDER BY full_name"
+        )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 

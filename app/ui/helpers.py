@@ -960,6 +960,11 @@ async def send_member_detail(target: Responder, db: Database, friend_id: int) ->
     if not friend:
         await respond_with_markup(target, "User not found.")
         return
+    try:
+        balance_value = float(friend.get("balance") or 0.0)
+    except (TypeError, ValueError):
+        balance_value = 0.0
+    balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
     subs = await db.list_subscriptions_for_user(friend["telegram_id"])
     if subs:
         sub_lines = "\n".join(f"• <code>{escape_html(sub['name'])}</code>" for sub in subs)
@@ -969,6 +974,7 @@ async def send_member_detail(target: Responder, db: Database, friend_id: int) ->
         "👤 User Info:\n"
         f"Name: <code>{escape_html(friend['full_name'])}</code>\n"
         f"Telegram ID: <code>{friend['telegram_id']}</code>\n\n"
+        f"Balance: <code>{balance_value:.2f} {escape_html(balance_currency)}</code>\n\n"
         "Subscriptions:\n"
         f"{sub_lines}"
     )

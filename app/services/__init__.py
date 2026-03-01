@@ -375,6 +375,51 @@ async def _auto_mark_admin_payments(
             await db.log_payment(subscription_id, cycle_due, admin_id)
 
 
+async def _close_fully_paid_cycles(
+    db: Database,
+    subscription: Dict[str, object],
+    open_cycles: list[date],
+    participants_by_cycle: dict[date, list[dict[str, object]]],
+) -> None:
+    if not open_cycles:
+        return
+
+    subscription_id = int(subscription["id"])
+    due_values = [due.isoformat() for due in open_cycles]
+    payment_rows = await db.list_payments_for_cycles(subscription_id, due_values)
+    paid_by_due: dict[str, set[int]] = {}
+    for row in payment_rows:
+        payer_id = row.get("paid_by_telegram_id")
+        due_value = str(row.get("due_date") or "")
+        if payer_id is None or not due_value:
+            continue
+        paid_by_due.setdefault(due_value, set()).add(int(payer_id))
+
+    next_charge_value = str(subscription.get("next_charge_at") or "")
+    period_days = int(subscription.get("period_days") or 30)
+    monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
+
+    for cycle_due in sorted(open_cycles):
+        participant_ids = {
+            int(person.get("telegram_id") or 0)
+            for person in participants_by_cycle.get(cycle_due, [])
+            if int(person.get("telegram_id") or 0) > 0
+        }
+        if not participant_ids:
+            continue
+        due_value = cycle_due.isoformat()
+        paid_ids = paid_by_due.get(due_value, set())
+        if not participant_ids.issubset(paid_ids):
+            continue
+
+        await db.close_cycle(subscription_id, cycle_due)
+        if next_charge_value == due_value:
+            next_due = calculate_next_charge_date(cycle_due, period_days, monthly_anchor_day)
+            await db.update_subscription_fields(subscription_id, next_charge_at=next_due)
+            next_charge_value = next_due.isoformat()
+            subscription["next_charge_at"] = next_charge_value
+
+
 async def _run_reminder_pass(
     bot: Bot,
     db: Database,
@@ -406,6 +451,7 @@ async def _run_reminder_pass(
     admin_base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
     sent_count = 0
     pending: dict[tuple[int, str], list[dict[str, object]]] = {}
+    auto_paid_notifications: list[dict[str, object]] = []
 
     subscriptions = await db.fetch_subscriptions_for_reminders()
     for item in subscriptions:
@@ -520,6 +566,8 @@ async def _run_reminder_pass(
             user_suppressed_cache: dict[tuple[str, date], set[int]] = {}
             user_currency_cache: dict[tuple[int, str], str] = {}
             converted_share_cache: dict[tuple[str, str, float], Optional[float]] = {}
+            user_balance_cache: dict[int, float] = {}
+            balance_conversion_cache: dict[tuple[str, str, float], Optional[float]] = {}
             for cycle_due in open_cycles:
                 cycle_participants = participants_by_cycle.get(cycle_due, [])
                 if not cycle_participants:
@@ -614,6 +662,23 @@ async def _run_reminder_pass(
                         if telegram_id in suppressed_ids:
                             continue
 
+                    ready_offsets: list[int] = []
+                    for event_offset in sorted(event_offsets):
+                        if register_reminders:
+                            if cycle_due not in frozen_due_dates:
+                                await db.freeze_cycle_snapshot(int(item["id"]), cycle_due)
+                                frozen_due_dates.add(cycle_due)
+                            if not await db.register_user_reminder_if_new(
+                                int(item["id"]),
+                                cycle_due,
+                                event_offset,
+                                telegram_id,
+                            ):
+                                continue
+                        ready_offsets.append(event_offset)
+                    if not ready_offsets:
+                        continue
+
                     currency_cache_key = (telegram_id, cycle_base_currency)
                     target_currency = user_currency_cache.get(currency_cache_key)
                     if target_currency is None:
@@ -634,60 +699,172 @@ async def _run_reminder_pass(
                     else:
                         person_amount_value = share_amount * weight
                         share_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
-                    amount_text = f"{person_amount_value:.2f} {cycle_currency}"
+                    remaining_amount_value = float(person_amount_value)
+                    balance_currency = converter.target_currency.upper()
+                    current_balance = user_balance_cache.get(telegram_id)
+                    if current_balance is None:
+                        current_balance = max(await db.get_friend_balance_by_telegram(telegram_id), 0.0)
+                        user_balance_cache[telegram_id] = current_balance
+                    balance_after = current_balance
 
-                    converted_cache_key = (
-                        source_currency,
-                        target_currency,
-                        round(person_amount_value, 8),
-                    )
-                    converted_base = converted_share_cache.get(converted_cache_key)
-                    if converted_cache_key not in converted_share_cache:
-                        if source_currency == target_currency:
-                            converted_base = None
-                        else:
+                    required_balance_amount: Optional[float]
+                    if source_currency == balance_currency:
+                        required_balance_amount = remaining_amount_value
+                    else:
+                        required_key = (
+                            source_currency,
+                            balance_currency,
+                            round(remaining_amount_value, 8),
+                        )
+                        required_balance_amount = balance_conversion_cache.get(required_key)
+                        if required_key not in balance_conversion_cache:
                             try:
-                                converted_base = await converter.convert_to(
-                                    person_amount_value,
+                                required_balance_amount = await converter.convert_to(
+                                    remaining_amount_value,
                                     source_currency,
-                                    target_currency,
+                                    balance_currency,
                                 )
                             except Exception as exc:  # noqa: BLE001
                                 logger.warning(
-                                    "Conversion failed for subscription %s and currency %s: %s",
+                                    "Balance conversion failed for subscription %s to %s: %s",
                                     item["id"],
-                                    target_currency,
+                                    balance_currency,
                                     exc,
                                 )
-                                converted_base = None
-                        converted_share_cache[converted_cache_key] = converted_base
+                                required_balance_amount = None
+                            balance_conversion_cache[required_key] = required_balance_amount
 
-                    share_amount_value = float(person_amount_value)
+                    spent_balance_amount = 0.0
+                    spent_source_amount = 0.0
+                    if (
+                        current_balance > 0
+                        and required_balance_amount is not None
+                        and required_balance_amount > 0
+                    ):
+                        spent_balance_amount, balance_after = await db.consume_friend_balance_by_telegram(
+                            telegram_id,
+                            required_balance_amount,
+                        )
+                        if spent_balance_amount > 0:
+                            user_balance_cache[telegram_id] = max(balance_after, 0.0)
+                            if source_currency == balance_currency:
+                                spent_source_amount = spent_balance_amount
+                            else:
+                                spent_key = (
+                                    balance_currency,
+                                    source_currency,
+                                    round(spent_balance_amount, 8),
+                                )
+                                spent_source_amount = balance_conversion_cache.get(spent_key) or 0.0
+                                if spent_key not in balance_conversion_cache:
+                                    try:
+                                        spent_source_amount = await converter.convert_to(
+                                            spent_balance_amount,
+                                            balance_currency,
+                                            source_currency,
+                                        )
+                                    except Exception as exc:  # noqa: BLE001
+                                        logger.warning(
+                                            "Balance reverse conversion failed for subscription %s to %s: %s",
+                                            item["id"],
+                                            source_currency,
+                                            exc,
+                                        )
+                                        spent_source_amount = 0.0
+                                    balance_conversion_cache[spent_key] = spent_source_amount
+                            if spent_source_amount <= 0 and required_balance_amount > 0:
+                                spent_ratio = min(spent_balance_amount / required_balance_amount, 1.0)
+                                spent_source_amount = remaining_amount_value * spent_ratio
+                            remaining_amount_value = max(remaining_amount_value - spent_source_amount, 0.0)
+                        else:
+                            user_balance_cache[telegram_id] = current_balance
+                    else:
+                        user_balance_cache[telegram_id] = current_balance
+
+                    is_fully_paid_from_balance = remaining_amount_value <= 0.005
+                    if is_fully_paid_from_balance:
+                        remaining_amount_value = 0.0
+
                     converted_value: Optional[float] = None
                     converted_display: Optional[str] = None
-                    if converted_base is not None:
-                        converted_value = float(converted_base)
-                        converted_display = format_converted_amount(
-                            converted_base,
+                    base_amount_value: Optional[float] = None
+                    amount_text = f"{remaining_amount_value:.2f} {cycle_currency}"
+                    if not is_fully_paid_from_balance:
+                        converted_cache_key = (
+                            source_currency,
                             target_currency,
-                            rounding_mode,
+                            round(remaining_amount_value, 8),
                         )
-                    base_amount_value: Optional[float] = converted_value
-                    if base_amount_value is None and source_currency == target_currency:
-                        base_amount_value = float(share_amount_value)
+                        converted_base = converted_share_cache.get(converted_cache_key)
+                        if converted_cache_key not in converted_share_cache:
+                            if source_currency == target_currency:
+                                converted_base = None
+                            else:
+                                try:
+                                    converted_base = await converter.convert_to(
+                                        remaining_amount_value,
+                                        source_currency,
+                                        target_currency,
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.warning(
+                                        "Conversion failed for subscription %s and currency %s: %s",
+                                        item["id"],
+                                        target_currency,
+                                        exc,
+                                    )
+                                    converted_base = None
+                            converted_share_cache[converted_cache_key] = converted_base
+
+                        if converted_base is not None:
+                            converted_value = float(converted_base)
+                            converted_display = format_converted_amount(
+                                converted_base,
+                                target_currency,
+                                rounding_mode,
+                            )
+                        base_amount_value = converted_value
+                        if base_amount_value is None and source_currency == target_currency:
+                            base_amount_value = float(remaining_amount_value)
+
+                    effective_comment = cycle_comment
+                    if spent_source_amount > 0 and remaining_amount_value > 0:
+                        balance_note = (
+                            f"Balance used: {spent_source_amount:.2f} {cycle_currency}. "
+                            f"Top up: {remaining_amount_value:.2f} {cycle_currency}."
+                        )
+                        effective_comment = (
+                            f"{balance_note}\n{cycle_comment}" if cycle_comment else balance_note
+                        )
                     status_text, due_date_text = _format_status_and_date(cycle_due, local_today)
-                    for event_offset in sorted(event_offsets):
-                        if register_reminders:
-                            if cycle_due not in frozen_due_dates:
-                                await db.freeze_cycle_snapshot(int(item["id"]), cycle_due)
-                                frozen_due_dates.add(cycle_due)
-                            if not await db.register_user_reminder_if_new(
-                                int(item["id"]),
-                                cycle_due,
-                                event_offset,
-                                telegram_id,
-                            ):
-                                continue
+                    for event_offset in ready_offsets:
+                        if is_fully_paid_from_balance:
+                            await db.log_payment(int(item["id"]), cycle_due, telegram_id)
+                            paid_map.add((due_key, telegram_id))
+                            auto_paid_notifications.append(
+                                {
+                                    "telegram_id": telegram_id,
+                                    "person_name": str(person.get("full_name") or f"User {telegram_id}"),
+                                    "subscription_name": raw_name,
+                                    "status_text": status_text,
+                                    "due_date_text": due_date_text,
+                                    "amount_text": f"{person_amount_value:.2f} {cycle_currency}",
+                                    "comment": cycle_comment,
+                                    "footer": (
+                                        "Paid automatically from your balance.\n"
+                                        f"Used: {spent_balance_amount:.2f} {balance_currency}\n"
+                                        f"Balance left: {balance_after:.2f} {balance_currency}"
+                                    ),
+                                }
+                            )
+                            if record_manual_suppressions:
+                                await db.register_reminder_suppression(
+                                    int(item["id"]),
+                                    cycle_due,
+                                    telegram_id,
+                                    local_today,
+                                )
+                            continue
 
                         key = (telegram_id, effective_time)
                         pending.setdefault(key, []).append(
@@ -702,8 +879,8 @@ async def _run_reminder_pass(
                                 "share_text": share_text,
                                 "amount_text": amount_text,
                                 "converted_text": converted_display,
-                                "comment": cycle_comment,
-                                "share_amount_value": share_amount_value,
+                                "comment": effective_comment,
+                                "share_amount_value": remaining_amount_value,
                                 "share_currency": cycle_currency,
                                 "converted_value": converted_value,
                                 "base_amount_value": base_amount_value,
@@ -752,6 +929,13 @@ async def _run_reminder_pass(
                         )
                         if sent is not None:
                             sent_count += 1
+            if target_telegram_id is None:
+                await _close_fully_paid_cycles(
+                    db,
+                    item,
+                    open_cycles,
+                    participants_by_cycle,
+                )
             continue
 
         if not admin_ids:
@@ -805,6 +989,29 @@ async def _run_reminder_pass(
                     )
                     if sent is not None:
                         sent_count += 1
+
+    for notice in auto_paid_notifications:
+        telegram_id = int(notice["telegram_id"])
+        message_text = _build_reminder_message(
+            person_name=str(notice["person_name"]),
+            subscription_name=str(notice["subscription_name"]),
+            status_text=str(notice["status_text"]),
+            due_date_text=str(notice["due_date_text"]),
+            share_text="paid",
+            amount_text=str(notice["amount_text"]),
+            converted_text=None,
+            comment=str(notice.get("comment") or ""),
+            footer=str(notice["footer"]),
+        )
+        sent = await _send_message_with_retry(
+            bot,
+            telegram_id,
+            message_text,
+            reply_markup=None,
+            logger=logger,
+        )
+        if sent is not None:
+            sent_count += 1
 
     for (telegram_id, _reminder_time), items in pending.items():
         if not items:
