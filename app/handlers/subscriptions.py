@@ -23,6 +23,7 @@ from app.ui.helpers import (
     period_prompt,
     require_edit_subscription_id,
     send_pricing_settings,
+    send_subscription_more,
     send_subscription_open_cycles,
     send_subscription_payment_report,
     send_subscription_user_amounts,
@@ -995,6 +996,17 @@ async def handle_subscription_reminders_callback(
     await send_reminder_settings(callback, db, callback_data.subscription_id)
 
 
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "more"))
+async def handle_subscription_more_callback(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    await send_subscription_more(callback, db, callback_data.subscription_id)
+
+
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "report"))
 async def handle_subscription_report_callback(
     callback: CallbackQuery,
@@ -1303,7 +1315,7 @@ async def handle_subscription_delete_prompt(
     )
     builder.button(
         text="⬅️ Back",
-        callback_data=SubscriptionAction(action="open", subscription_id=callback_data.subscription_id).pack(),
+        callback_data=SubscriptionAction(action="more", subscription_id=callback_data.subscription_id).pack(),
         style="primary",
     )
     await callback.message.edit_text(

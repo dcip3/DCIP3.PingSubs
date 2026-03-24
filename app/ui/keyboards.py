@@ -277,18 +277,23 @@ def build_public_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -
 
 def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="✏️ Rename", callback_data=SubscriptionAction(action="rename", subscription_id=subscription_id).pack())
-    builder.button(text="💰 Pricing", callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack())
-    builder.button(text="💳 Payment mode", callback_data=SubscriptionAction(action="paymentmode", subscription_id=subscription_id).pack())
-    builder.button(text="📅 Next charge", callback_data=SubscriptionAction(action="duedate", subscription_id=subscription_id).pack())
-    builder.button(text="🔁 Period", callback_data=SubscriptionAction(action="period", subscription_id=subscription_id).pack())
-    builder.button(text="🔔 Reminders", callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack())
-    builder.button(text="🗂 Open cycles", callback_data=SubscriptionAction(action="cycles", subscription_id=subscription_id).pack())
-    builder.button(text="📝 Comment", callback_data=SubscriptionAction(action="comment", subscription_id=subscription_id).pack())
-    builder.button(text="👥 Users", callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack())
-    builder.button(text="📊 Payments report", callback_data=SubscriptionAction(action="report", subscription_id=subscription_id).pack())
-    builder.button(text="🗑 Delete", callback_data=SubscriptionAction(action="delete", subscription_id=subscription_id).pack())
-    builder.adjust(2, 2, 2, 2, 2, 1)
+    builder.button(
+        text="💰 Pricing & schedule",
+        callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="👥 Participants",
+        callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="🔔 Reminders",
+        callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="📊 Reports & more",
+        callback_data=SubscriptionAction(action="more", subscription_id=subscription_id).pack(),
+    )
+    builder.adjust(1)
     builder.row(
         InlineKeyboardButton(
             text="⬅️ Back",
@@ -340,11 +345,11 @@ def build_back_keyboard(subscription_id: int, back_action: str) -> InlineKeyboar
 
 
 def subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    return build_back_keyboard(subscription_id, "open")
+    return build_back_keyboard(subscription_id, "more")
 
 
 def subscription_open_cycles_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    return build_back_keyboard(subscription_id, "open")
+    return build_back_keyboard(subscription_id, "more")
 
 
 def public_subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
@@ -368,6 +373,75 @@ def reminder_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder.button(
         text="📬 Send reminders now",
         callback_data=SubscriptionAction(action="reminders_send", subscription_id=subscription_id).pack(),
+    )
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+            style="primary",
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+    )
+    return builder.as_markup()
+
+
+def participants_settings_keyboard(
+    subscription_id: int,
+    current_mode: str,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="👥 Manage users",
+        callback_data=SubscriptionAction(action="participants_manage", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="💳 Payment mode",
+        callback_data=SubscriptionAction(action="paymentmode", subscription_id=subscription_id).pack(),
+    )
+    if current_mode == PAYMENT_MODE_FIXED:
+        builder.button(
+            text="👥 Amount per user",
+            callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
+        )
+    else:
+        builder.button(
+            text="➗ Shares & split",
+            callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack(),
+        )
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+            style="primary",
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+    )
+    return builder.as_markup()
+
+
+def subscription_more_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✏️ Rename",
+        callback_data=SubscriptionAction(action="rename", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="📊 Payments report",
+        callback_data=SubscriptionAction(action="report", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="🗂 Open cycles",
+        callback_data=SubscriptionAction(action="cycles", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="📝 Comment",
+        callback_data=SubscriptionAction(action="comment", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="🗑 Delete",
+        callback_data=SubscriptionAction(action="delete", subscription_id=subscription_id).pack(),
     )
     builder.adjust(1)
     builder.row(
@@ -608,6 +682,14 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         text="💱 Base currency",
         callback_data=SubscriptionAction(action="basecurrency", subscription_id=subscription_id).pack(),
     )
+    builder.button(
+        text="📅 Next charge",
+        callback_data=SubscriptionAction(action="duedate", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="🔁 Period",
+        callback_data=SubscriptionAction(action="period", subscription_id=subscription_id).pack(),
+    )
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(
@@ -672,7 +754,7 @@ def subscription_payment_mode_keyboard(
         [
             InlineKeyboardButton(
                 text="⬅️ Back",
-                callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+                callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
                 style="primary",
             ),
             InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
@@ -720,7 +802,7 @@ def subscription_user_amounts_keyboard(
         [
             InlineKeyboardButton(
                 text="⬅️ Back",
-                callback_data=SubscriptionAction(action="paymentmode", subscription_id=subscription_id).pack(),
+                callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
                 style="primary",
             ),
             InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
@@ -815,7 +897,7 @@ def build_participants_keyboard(friends: Sequence[Dict[str, object]], subscripti
         [
             InlineKeyboardButton(
                 text="⬅️ Back",
-                callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+                callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
                 style="primary",
             ),
             InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),

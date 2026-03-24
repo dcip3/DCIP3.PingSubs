@@ -35,6 +35,7 @@ from app.ui.keyboards import (
     dialog_keyboard,
     member_detail_keyboard,
     member_report_keyboard,
+    participants_settings_keyboard,
     pricing_settings_keyboard,
     subscription_user_amounts_keyboard,
     public_subscription_detail_keyboard,
@@ -43,6 +44,7 @@ from app.ui.keyboards import (
     reminder_send_targets_keyboard,
     settings_tests_keyboard,
     subscription_open_cycles_keyboard,
+    subscription_more_keyboard,
     subscription_report_keyboard,
     subscription_detail_keyboard,
     tests_menu_keyboard,
@@ -1046,6 +1048,35 @@ async def send_reminder_settings(target: Responder, db: Database, subscription_i
     )
 
 
+async def send_participants_settings(target: Responder, db: Database, subscription_id: int) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await respond_with_markup(target, "This subscription no longer exists.")
+        return
+
+    participants = await db.list_subscription_participants(subscription_id)
+    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    total_shares = sum(int(person.get("share_weight") or 1) for person in participants)
+    if payment_mode == PAYMENT_MODE_FIXED:
+        mode_details = "per-user amounts"
+    else:
+        _, share_text = _share_details(subscription, participants)
+        mode_details = share_text
+
+    text = (
+        "👥 Participants:\n\n"
+        f"👥 Users: <code>{len(participants)}</code>\n"
+        f"💳 Payment mode: <code>{'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}</code>\n"
+        f"➗ Shares: <code>{total_shares}</code>\n"
+        f"🧮 Mode details: <code>{escape_html(mode_details)}</code>"
+    )
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=participants_settings_keyboard(subscription_id, payment_mode),
+    )
+
+
 async def send_reminder_send_menu(target: Responder, db: Database, subscription_id: int) -> None:
     subscription = await db.get_subscription(subscription_id)
     if not subscription:
@@ -1138,16 +1169,44 @@ async def send_pricing_settings(target: Responder, db: Database, subscription_id
     if not subscription:
         await respond_with_markup(target, "This subscription no longer exists.")
         return
+    if subscription["period_days"] == MONTHLY_PERIOD_SENTINEL:
+        cadence = "every month"
+    else:
+        cadence = f"every {subscription['period_days']} days"
     text = (
-        "💰 Pricing:\n\n"
+        "💰 Pricing & schedule:\n\n"
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>"
+        f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>\n"
+        f"📅 Next charge: <code>{_format_iso_date(subscription['next_charge_at'])}</code>\n"
+        f"🔁 Period: <code>{escape_html(cadence)}</code>"
     )
 
     await respond_with_markup(
         target,
         text,
         reply_markup=pricing_settings_keyboard(subscription_id),
+    )
+
+
+async def send_subscription_more(target: Responder, db: Database, subscription_id: int) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await respond_with_markup(target, "This subscription no longer exists.")
+        return
+
+    open_cycles = await db.list_open_cycles(subscription_id)
+    comment_value = (subscription.get("comment") or "").strip()
+    text = (
+        "📊 Reports & more:\n\n"
+        f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
+        f"🗂 Open cycles: <code>{len(open_cycles)}</code>\n"
+        f"📝 Comment: <code>{escape_html(comment_value or 'not set')}</code>"
+    )
+
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=subscription_more_keyboard(subscription_id),
     )
 
 
@@ -1188,11 +1247,11 @@ async def send_participants_editor(callback: CallbackQuery, db: Database, subscr
         builder = InlineKeyboardBuilder()
         builder.button(
             text="⬅️ Back",
-            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+            callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
             style="primary",
         )
         await callback.message.edit_text(
-            "👥 Users:\nNo users in the database yet. Add someone first with <code>👥 Users</code>.",
+            "👥 Users:\nNo users in the database yet. Add someone first with <code>👥 Manage users</code>.",
             reply_markup=builder.as_markup(),
         )
         await callback.answer()
