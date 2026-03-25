@@ -824,6 +824,7 @@ def _build_subscription_detail_text(
     participants: Sequence[Dict[str, object]],
     base_time: str,
     base_timezone: str,
+    open_cycles_count: int,
 ) -> str:
     payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
     split_share_base = _split_share_base(subscription, participants)
@@ -831,7 +832,7 @@ def _build_subscription_detail_text(
     per_person = subscription["amount"] / split_share_base
     users_total = _sum_users_total(subscription, participants)
     comment_value = (subscription.get("comment") or "").strip()
-    comment_line = f"📝 Comment: <code>{escape_html(comment_value)}</code>" if comment_value else ""
+    comment_text = escape_html(comment_value or "not set")
 
     if participants:
         participants_lines = []
@@ -864,29 +865,41 @@ def _build_subscription_detail_text(
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
 
     lines = [
-        "Subscription Info:",
         f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>",
+        "",
+        "💰 Pricing & schedule:",
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>",
+        f"💱 Currency: <code>{escape_html(str(subscription['currency']).upper())}</code>",
         f"💱 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>",
-        f"💳 Payment mode: <code>{'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}</code>",
-        "",
-        "Cycle Info:",
         f"📅 Next charge: <code>{_format_iso_date(subscription['next_charge_at'])}</code>",
-        f"🔁 Cadence: <code>{escape_html(cadence)}</code>",
+        f"🔁 Period: <code>{escape_html(cadence)}</code>",
         "",
-        "Reminder Info:",
+        "👥 Participants:",
+        f"💳 Payment mode: <code>{'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}</code>",
+        f"👥 Users: <code>{len(participants)}</code>",
+    ]
+    if payment_mode == PAYMENT_MODE_FIXED:
+        lines.append(f"👥 Users total: <code>{users_total:.2f} {escape_html(subscription['currency'])}</code>")
+    else:
+        lines.append(f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>")
+        lines.append(f"➗ Split mode: <code>{escape_html(share_text)}</code>")
+
+    lines.extend(
+        [
+            "",
+            f"Users ({len(participants)}):",
+            participants_text,
+            "",
+            "🔔 Reminders:",
         f"⏰ Time: <code>{escape_html(reminder_time)}</code>",
         f"🔔 Days: <code>{escape_html(offsets_text)}</code>",
         f"📣 Post-due: <code>{escape_html(overdue_text)}</code>",
-    ]
-    if payment_mode == PAYMENT_MODE_FIXED:
-        lines.insert(5, f"👥 Users total: <code>{users_total:.2f} {escape_html(subscription['currency'])}</code>")
-    else:
-        lines.insert(5, f"👥 Per share: <code>≈ {per_person:.2f} {escape_html(subscription['currency'])}</code>")
-        lines.insert(6, f"➗ Split mode: <code>{escape_html(share_text)}</code>")
-    if comment_line:
-        lines.extend(["", comment_line])
-    lines.extend(["", f"Users ({len(participants)}):", participants_text])
+            "",
+            "📊 Reports & more:",
+            f"🗂 Open cycles: <code>{open_cycles_count}</code>",
+            f"📝 Comment: <code>{comment_text}</code>",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -897,12 +910,19 @@ async def send_subscription_detail(target: Responder, db: Database, subscription
         return
 
     participants = await db.list_subscription_participants(subscription_id)
+    open_cycles = await db.list_open_cycles(subscription_id)
     base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
     base_timezone = normalize_timezone_name(
         await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
         DEFAULT_REMINDER_TIMEZONE,
     ) or DEFAULT_REMINDER_TIMEZONE
-    text = _build_subscription_detail_text(subscription, participants, base_time, base_timezone)
+    text = _build_subscription_detail_text(
+        subscription,
+        participants,
+        base_time,
+        base_timezone,
+        len(open_cycles),
+    )
 
     await respond_with_markup(
         target,
