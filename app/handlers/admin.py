@@ -64,6 +64,27 @@ def _is_cancel_text(text: str | None) -> bool:
     return bool(text and text.lower() == "cancel")
 
 
+def _extract_forwarded_telegram_id(message: Message) -> tuple[int | None, bool]:
+    legacy_forward_user = getattr(message, "forward_from", None)
+    if legacy_forward_user:
+        return legacy_forward_user.id, True
+
+    forward_origin = getattr(message, "forward_origin", None)
+    sender_user = getattr(forward_origin, "sender_user", None)
+    if sender_user:
+        return sender_user.id, True
+
+    is_forwarded = any(
+        (
+            forward_origin is not None,
+            getattr(message, "forward_date", None) is not None,
+            getattr(message, "forward_sender_name", None) is not None,
+            getattr(message, "forward_from_chat", None) is not None,
+        )
+    )
+    return None, is_forwarded
+
+
 async def _public_settings_snapshot(
     db: Database,
     settings: Settings,
@@ -934,9 +955,15 @@ async def handle_cancel(message: Message, state: FSMContext, db: Database) -> No
 
 @admin_router.message(FriendForm.telegram_id)
 async def friend_form_id(message: Message, state: FSMContext) -> None:
-    if message.forward_from:
-        telegram_id = message.forward_from.id
-    else:
+    telegram_id, is_forwarded = _extract_forwarded_telegram_id(message)
+    if telegram_id is None and is_forwarded:
+        await message.answer(
+            "Couldn't extract Telegram ID from this forwarded message. "
+            "Ask the user to disable forward privacy or send the numeric ID manually."
+        )
+        return
+
+    if telegram_id is None:
         try:
             telegram_id = int((message.text or "").strip())
         except ValueError:
