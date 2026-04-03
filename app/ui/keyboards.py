@@ -761,7 +761,7 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         callback_data=SubscriptionAction(action="currency", subscription_id=subscription_id).pack(),
     )
     builder.button(
-        text="💱 Base currency",
+        text="🌐 Base currency",
         callback_data=SubscriptionAction(action="basecurrency", subscription_id=subscription_id).pack(),
     )
     builder.button(

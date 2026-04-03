@@ -751,7 +751,7 @@ async def handle_subscription_base_currency_callback(
     await state.clear()
     current_currency = str(subscription.get("base_currency") or subscription.get("currency") or "RUB").upper()
     text = (
-        "💱 Base currency:\n"
+        "🌐 Base currency:\n"
         f"Current: <code>{escape_html(current_currency)}</code>\n"
         "\n"
         "This is the default target currency for this subscription."
@@ -778,7 +778,7 @@ async def handle_subscription_base_currency_other(
         state,
         callback_data.subscription_id,
         SubscriptionEditForm.base_currency,
-        "💱 Base currency:\nSend a 3-letter currency code.\nExample: <code>EUR</code>.",
+        "🌐 Base currency:\nSend a 3-letter currency code.\nExample: <code>EUR</code>.",
     )
 
 
