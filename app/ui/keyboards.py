@@ -55,8 +55,7 @@ def public_reply_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         keyboard=[
             [KeyboardButton(text="👤 Account"), KeyboardButton(text="📋 Subscriptions")],
-            [KeyboardButton(text="📊 Payments report")],
-            [KeyboardButton(text="⚙️ Settings")],
+            [KeyboardButton(text="📊 Payments report"), KeyboardButton(text="⚙️ Settings")],
         ],
     )
 
