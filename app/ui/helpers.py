@@ -30,6 +30,7 @@ from app.ui.keyboards import (
     build_creation_payment_mode_keyboard,
     build_period_keyboard,
     build_public_subscription_list_keyboard,
+    public_account_keyboard,
     build_share_limit_keyboard,
     build_subscription_list_keyboard,
     dialog_keyboard,
@@ -1185,7 +1186,7 @@ async def send_public_account_detail(message: Message, db: Database, telegram_id
             )
             + f"\n\nTop-up method: <code>{escape_html(payment_label)}</code>"
         ),
-        reply_markup=public_reply_keyboard(),
+        reply_markup=public_account_keyboard(),
     )
 
 

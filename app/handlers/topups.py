@@ -266,6 +266,58 @@ async def _send_topup_review(
     )
 
 
+async def _start_public_topup_flow(
+    target: Message | CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    telegram_id: int,
+) -> None:
+    friend = await db.get_friend_by_telegram(telegram_id)
+    if not friend:
+        text = "Your profile is not set up yet. Ask an admin to add you to the users list."
+        if isinstance(target, CallbackQuery):
+            await target.answer(text, show_alert=True)
+        else:
+            await target.answer(text, reply_markup=public_reply_keyboard())
+        return
+    destination = await db.get_effective_payment_destination_for_user(telegram_id)
+    if not destination:
+        text = "Top-up is not configured for your account yet. Ask an admin to assign a payment method."
+        if isinstance(target, CallbackQuery):
+            await target.answer(text, show_alert=True)
+        else:
+            await target.answer(text, reply_markup=public_reply_keyboard())
+        return
+    current_balance = max(float(friend.get("balance") or 0.0), 0.0)
+    current_currency = str(friend.get("balance_currency") or "").strip().upper()
+    destination_currency = str(destination.get("currency") or "").strip().upper()
+    if current_balance > 0 and current_currency and current_currency != destination_currency:
+        text = (
+            "Your current balance currency does not match your assigned payment method.\n"
+            "Ask an admin to align the payment method or balance currency first."
+        )
+        if isinstance(target, CallbackQuery):
+            await target.answer(text, show_alert=True)
+        else:
+            await target.answer(text, reply_markup=public_reply_keyboard())
+        return
+    await state.clear()
+    await state.set_state(TopUpForm.amount)
+    await state.update_data(topup_destination_id=int(destination["id"]))
+    prompt = (
+        "💳 Top up balance:\n"
+        f"Method: <code>{escape_html(str(destination['title']))}</code>\n"
+        f"Currency: <code>{escape_html(destination_currency)}</code>\n\n"
+        "Send the amount you want to top up."
+    )
+    if isinstance(target, CallbackQuery):
+        if target.message:
+            await target.message.answer(prompt, reply_markup=dialog_keyboard())
+        await target.answer()
+        return
+    await target.answer(prompt, reply_markup=dialog_keyboard())
+
+
 @admin_router.message(F.text == "💳 Payment methods")
 async def handle_payment_methods_menu(message: Message, db: Database) -> None:
     await _send_payment_destinations_menu(message, db)
@@ -316,7 +368,10 @@ async def handle_payment_destination_title(
         return
     await state.update_data(payment_destination_title=title)
     await state.set_state(PaymentDestinationForm.currency)
-    await message.answer("Send the 3-letter currency code. Example: <code>RUB</code>.")
+    await message.answer(
+        "Send the 3-letter currency code. Example: <code>RUB</code>.",
+        reply_markup=dialog_keyboard(),
+    )
 
 
 @admin_router.message(PaymentDestinationForm.currency)
@@ -332,7 +387,8 @@ async def handle_payment_destination_currency(
     await state.set_state(PaymentDestinationForm.details)
     await message.answer(
         "Send the payment details text.\n"
-        "You can use multiple lines."
+        "You can use multiple lines.",
+        reply_markup=dialog_keyboard(),
     )
 
 
@@ -349,6 +405,7 @@ async def handle_payment_destination_details(
     await state.set_state(PaymentDestinationForm.payment_link)
     await message.answer(
         "Send the payment link, or <code>-</code> to skip.",
+        reply_markup=dialog_keyboard(),
     )
 
 
@@ -675,40 +732,19 @@ async def handle_public_topup_start(
     if not message.from_user:
         await message.answer("Unable to identify your account.")
         return
-    friend = await db.get_friend_by_telegram(message.from_user.id)
-    if not friend:
-        await message.answer(
-            "Your profile is not set up yet. Ask an admin to add you to the users list.",
-            reply_markup=public_reply_keyboard(),
-        )
+    await _start_public_topup_flow(message, state, db, message.from_user.id)
+
+
+@public_router.callback_query(TopUpAction.filter(F.action == "start"))
+async def handle_public_topup_start_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
         return
-    destination = await db.get_effective_payment_destination_for_user(message.from_user.id)
-    if not destination:
-        await message.answer(
-            "Top-up is not configured for your account yet. Ask an admin to assign a payment method.",
-            reply_markup=public_reply_keyboard(),
-        )
-        return
-    current_balance = max(float(friend.get("balance") or 0.0), 0.0)
-    current_currency = str(friend.get("balance_currency") or "").strip().upper()
-    destination_currency = str(destination.get("currency") or "").strip().upper()
-    if current_balance > 0 and current_currency and current_currency != destination_currency:
-        await message.answer(
-            "Your current balance currency does not match your assigned payment method.\n"
-            "Ask an admin to align the payment method or balance currency first.",
-            reply_markup=public_reply_keyboard(),
-        )
-        return
-    await state.clear()
-    await state.set_state(TopUpForm.amount)
-    await state.update_data(topup_destination_id=int(destination["id"]))
-    await message.answer(
-        "💳 Top up balance:\n"
-        f"Method: <code>{escape_html(str(destination['title']))}</code>\n"
-        f"Currency: <code>{escape_html(destination_currency)}</code>\n\n"
-        "Send the amount you want to top up.",
-        reply_markup=dialog_keyboard(),
-    )
+    await _start_public_topup_flow(callback, state, db, callback.from_user.id)
 
 
 @public_router.message(TopUpForm.amount)

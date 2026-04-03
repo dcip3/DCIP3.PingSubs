@@ -47,8 +47,8 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         keyboard=[
             [KeyboardButton(text="👥 Users"), KeyboardButton(text="📋 Subscriptions")],
-            [KeyboardButton(text="📊 Payments report"), KeyboardButton(text="⚙️ Settings")],
-            [KeyboardButton(text="💳 Payment methods")],
+            [KeyboardButton(text="💳 Payment methods"), KeyboardButton(text="📊 Payments report")],
+            [KeyboardButton(text="⚙️ Settings")],
         ],
     )
 
@@ -59,7 +59,6 @@ def public_reply_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="👤 Account"), KeyboardButton(text="📋 Subscriptions")],
             [KeyboardButton(text="📊 Payments report"), KeyboardButton(text="⚙️ Settings")],
-            [KeyboardButton(text="➕ Top up")],
         ],
     )
 
@@ -493,6 +492,17 @@ def topup_request_review_keyboard(request_id: int) -> InlineKeyboardMarkup:
         ),
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
     )
+    return builder.as_markup()
+
+
+def public_account_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="➕ Top up",
+        callback_data=TopUpAction(action="start", request_id=0).pack(),
+    )
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"))
     return builder.as_markup()
 
 
