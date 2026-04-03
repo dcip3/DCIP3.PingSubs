@@ -487,7 +487,7 @@ def participants_settings_keyboard(
     builder.row(split_button, fixed_button)
     if normalized_mode == PAYMENT_MODE_FIXED:
         builder.button(
-            text="👥 Amount per user",
+            text="💵 Amount per user",
             callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
         )
     else:
@@ -818,7 +818,7 @@ def subscription_payment_mode_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="👥 Amount per user",
+                    text="💵 Amount per user",
                     callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
                 )
             ]
