@@ -456,9 +456,11 @@ def participants_settings_keyboard(
     current_mode: str,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="👥 Manage users",
-        callback_data=SubscriptionAction(action="participants_manage", subscription_id=subscription_id).pack(),
+    builder.row(
+        InlineKeyboardButton(
+            text="👥 Manage users",
+            callback_data=SubscriptionAction(action="participants_manage", subscription_id=subscription_id).pack(),
+        )
     )
     normalized_mode = (current_mode or PAYMENT_MODE_SPLIT).strip().lower()
     if normalized_mode == PAYMENT_MODE_SPLIT:
@@ -485,16 +487,19 @@ def participants_settings_keyboard(
         )
     builder.row(split_button, fixed_button)
     if normalized_mode == PAYMENT_MODE_FIXED:
-        builder.button(
-            text="💵 Amount per user",
-            callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
+        builder.row(
+            InlineKeyboardButton(
+                text="💵 Amount per user",
+                callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
+            )
         )
     else:
-        builder.button(
-            text="➗ Shares & split",
-            callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack(),
+        builder.row(
+            InlineKeyboardButton(
+                text="➗ Shares & split",
+                callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack(),
+            )
         )
-    builder.adjust(1)
     builder.row(
         InlineKeyboardButton(
             text="⬅️ Back",
