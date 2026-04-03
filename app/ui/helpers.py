@@ -40,6 +40,7 @@ from app.ui.keyboards import (
     subscription_user_amounts_keyboard,
     public_subscription_detail_keyboard,
     public_subscription_report_keyboard,
+    public_reply_keyboard,
     reminder_settings_keyboard,
     reminder_send_targets_keyboard,
     settings_tests_keyboard,
@@ -66,6 +67,41 @@ from app.core.reminders import (
 from app.ui.text import escape_html, format_display_name
 
 MAX_TELEGRAM_MESSAGE_LEN = 3900
+
+
+def _build_user_info_text(
+    friend: Dict[str, object],
+    subscriptions: Sequence[Dict[str, object]],
+    *,
+    include_telegram_id: bool,
+    title: str,
+) -> str:
+    try:
+        balance_value = float(friend.get("balance") or 0.0)
+    except (TypeError, ValueError):
+        balance_value = 0.0
+    balance_currency = str(friend.get("balance_currency") or "").strip().upper() or "RUB"
+    if subscriptions:
+        sub_lines = "\n".join(f"• <code>{escape_html(sub['name'])}</code>" for sub in subscriptions)
+    else:
+        sub_lines = "<code>No subscriptions yet.</code>"
+
+    lines = [
+        title,
+        f"Name: <code>{escape_html(str(friend.get('full_name') or 'Unknown'))}</code>",
+    ]
+    if include_telegram_id:
+        lines.append(f"Telegram ID: <code>{friend['telegram_id']}</code>")
+    lines.extend(
+        [
+            "",
+            f"Balance: <code>{balance_value:.2f} {escape_html(balance_currency)}</code>",
+            "",
+            "Subscriptions:",
+            sub_lines,
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _normalize_payment_mode(raw_value: object) -> str:
@@ -1091,31 +1127,47 @@ async def send_member_detail(target: Responder, db: Database, friend_id: int) ->
     if not friend:
         await respond_with_markup(target, "User not found.")
         return
-    try:
-        balance_value = float(friend.get("balance") or 0.0)
-    except (TypeError, ValueError):
-        balance_value = 0.0
+    subs = await db.list_subscriptions_for_user(friend["telegram_id"])
     default_balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
     balance_currency = str(friend.get("balance_currency") or "").strip().upper()
     if len(balance_currency) != 3 or not balance_currency.isalpha():
-        balance_currency = default_balance_currency
-    subs = await db.list_subscriptions_for_user(friend["telegram_id"])
-    if subs:
-        sub_lines = "\n".join(f"• <code>{escape_html(sub['name'])}</code>" for sub in subs)
-    else:
-        sub_lines = "<code>No subscriptions yet.</code>"
-    text = (
-        "👤 User Info:\n"
-        f"Name: <code>{escape_html(friend['full_name'])}</code>\n"
-        f"Telegram ID: <code>{friend['telegram_id']}</code>\n\n"
-        f"Balance: <code>{balance_value:.2f} {escape_html(balance_currency)}</code>\n\n"
-        "Subscriptions:\n"
-        f"{sub_lines}"
+        friend = {**friend, "balance_currency": default_balance_currency}
+    text = _build_user_info_text(
+        friend,
+        subs,
+        include_telegram_id=True,
+        title="👤 User Info:",
     )
     await respond_with_markup(
         target,
         text,
         reply_markup=member_detail_keyboard(friend_id),
+    )
+
+
+async def send_public_account_detail(message: Message, db: Database, telegram_id: int) -> None:
+    friend = await db.get_friend_by_telegram(telegram_id)
+    if not friend:
+        await message.answer(
+            "👤 Account:\nYour profile is not set up yet. Ask an admin to add you to the users list.",
+            reply_markup=public_reply_keyboard(),
+        )
+        return
+
+    default_balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
+    balance_currency = str(friend.get("balance_currency") or "").strip().upper()
+    if len(balance_currency) != 3 or not balance_currency.isalpha():
+        friend = {**friend, "balance_currency": default_balance_currency}
+
+    subscriptions = await db.list_subscriptions_for_user(telegram_id)
+    await message.answer(
+        _build_user_info_text(
+            friend,
+            subscriptions,
+            include_telegram_id=False,
+            title="👤 Account:",
+        ),
+        reply_markup=public_reply_keyboard(),
     )
 
 

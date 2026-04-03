@@ -27,6 +27,7 @@ from app.ui.keyboards import (
 from app.ui.helpers import (
     _build_subscription_payment_report_text,
     send_chunked_responder_text,
+    send_public_account_detail,
     send_public_subscription_detail,
     send_public_subscription_payment_report,
     send_public_user_payment_report,
@@ -206,7 +207,12 @@ async def handle_public_help(message: Message, db: Database) -> None:
         return
 
     await message.answer(
-        "I track shared subscriptions and remind everyone about payments. "
+        "I track shared subscriptions and remind everyone about payments.\n\n"
+        "Buttons:\n"
+        "👤 Account — your balance and subscriptions.\n"
+        "📋 Subscriptions — your plans.\n"
+        "📊 Payments report — your payment history.\n"
+        "⚙️ Settings — your timezone and reminder time.\n\n"
         "Ask an admin to invite you if you need access."
     )
 
@@ -233,6 +239,17 @@ async def handle_public_subscriptions(message: Message, db: Database) -> None:
         await send_subscription_list(message, db)
         return
     await send_user_subscription_list(message, db, message.from_user.id)
+
+
+@public_router.message(F.text == "👤 Account")
+async def handle_public_account(message: Message, db: Database) -> None:
+    if not message.from_user:
+        await message.answer("Unable to identify your account.")
+        return
+    if await db.is_admin(message.from_user.id):
+        await message.answer("This shortcut is available in the user menu only.", reply_markup=admin_reply_keyboard())
+        return
+    await send_public_account_detail(message, db, message.from_user.id)
 
 
 @public_router.message(F.text == "📊 Payments report")
