@@ -30,6 +30,10 @@ class PublicSubscriptionCurrencyForm(StatesGroup):
     currency = State()
 
 
+class PublicAccountForm(StatesGroup):
+    full_name = State()
+
+
 class SubscriptionForm(StatesGroup):
     name = State()
     amount = State()

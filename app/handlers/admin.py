@@ -41,6 +41,7 @@ from app.ui.helpers import (
 from app.ui.states import (
     FriendForm,
     MemberEditForm,
+    PublicAccountForm,
     PublicReminderForm,
     PublicSubscriptionCurrencyForm,
     PublicSettingsForm,
@@ -224,11 +225,18 @@ async def handle_public_cancel(message: Message, state: FSMContext, db: Database
     reply_markup = public_reply_keyboard()
     if message.from_user and await db.is_admin(message.from_user.id):
         reply_markup = admin_reply_keyboard()
-    if await state.get_state() is None:
+    current_state = await state.get_state()
+    if current_state is None:
         await message.answer("There is no active dialog to cancel.", reply_markup=reply_markup)
         return
     await state.clear()
     await message.answer("Dialog canceled.", reply_markup=reply_markup)
+    if (
+        current_state == PublicAccountForm.full_name.state
+        and message.from_user
+        and not await db.is_admin(message.from_user.id)
+    ):
+        await send_public_account_detail(message, db, message.from_user.id)
 
 
 @public_router.message(F.text == "📋 Subscriptions")
@@ -251,6 +259,33 @@ async def handle_public_account(message: Message, db: Database) -> None:
         await message.answer("This shortcut is available in the user menu only.", reply_markup=admin_reply_keyboard())
         return
     await send_public_account_detail(message, db, message.from_user.id)
+
+
+@public_router.callback_query(F.data == "public_account:rename")
+async def handle_public_account_rename_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.", show_alert=True)
+        return
+    if await db.is_admin(callback.from_user.id):
+        await callback.answer("This shortcut is available in the user menu only.", show_alert=True)
+        return
+    friend = await db.get_friend_by_telegram(callback.from_user.id)
+    if not friend:
+        await callback.answer("Your profile is not set up yet.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(PublicAccountForm.full_name)
+    if callback.message:
+        await callback.message.answer(
+            "✏️ Rename account:\n"
+            "Send your new display name.",
+            reply_markup=dialog_keyboard(),
+        )
+    await callback.answer()
 
 
 @public_router.message(F.text == "📊 Payments report")
@@ -921,6 +956,34 @@ async def handle_public_settings_timezone_input(
     await state.clear()
     await message.answer("Timezone updated.", reply_markup=public_reply_keyboard())
     await _show_public_settings_menu(message, db, settings, message.from_user.id)
+
+
+@public_router.message(PublicAccountForm.full_name)
+async def handle_public_account_rename_input(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    if not message.from_user:
+        await state.clear()
+        await message.answer("Unable to identify your account.")
+        return
+    raw_name = (message.text or "").strip()
+    if not raw_name:
+        await message.answer("Name cannot be empty. Please try again.")
+        return
+    friend = await db.get_friend_by_telegram(message.from_user.id)
+    if not friend:
+        await state.clear()
+        await message.answer(
+            "Your profile is not set up yet. Ask an admin to add you to the users list.",
+            reply_markup=public_reply_keyboard(),
+        )
+        return
+    await db.update_friend_name(int(friend["id"]), raw_name)
+    await state.clear()
+    await message.answer("Name updated.", reply_markup=public_reply_keyboard())
+    await send_public_account_detail(message, db, message.from_user.id)
 
 
 async def send_admin_help(message: Message) -> None:

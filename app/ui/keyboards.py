@@ -388,10 +388,6 @@ def payment_destination_detail_keyboard(
         callback_data=PaymentDestinationAction(action="edit_link", destination_id=destination_id).pack(),
     )
     builder.button(
-        text="👥 Assigned users",
-        callback_data=PaymentDestinationAction(action="assignees", destination_id=destination_id).pack(),
-    )
-    builder.button(
         text="⭐ Default" if is_default else "☆ Set default",
         callback_data=PaymentDestinationAction(action="set_default", destination_id=destination_id).pack(),
         style="success" if is_default else None,
@@ -497,6 +493,10 @@ def topup_request_review_keyboard(request_id: int) -> InlineKeyboardMarkup:
 
 def public_account_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✏️ Rename",
+        callback_data="public_account:rename",
+    )
     builder.button(
         text="➕ Top up",
         callback_data=TopUpAction(action="start", request_id=0).pack(),
