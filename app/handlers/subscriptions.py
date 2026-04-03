@@ -22,7 +22,9 @@ from app.ui.helpers import (
     payment_mode_prompt,
     period_prompt,
     require_edit_subscription_id,
+    send_participants_settings,
     send_pricing_settings,
+    send_subscription_cycle_actions,
     send_subscription_more,
     send_subscription_open_cycles,
     send_subscription_payment_report,
@@ -44,7 +46,14 @@ from app.ui.keyboards import (
     subscription_reminder_time_keyboard,
     user_amount_clear_keyboard,
 )
-from app.ui.states import ReminderSendAction, Responder, SubscriptionAction, SubscriptionEditForm, SubscriptionForm
+from app.ui.states import (
+    CycleAction,
+    ReminderSendAction,
+    Responder,
+    SubscriptionAction,
+    SubscriptionEditForm,
+    SubscriptionForm,
+)
 from app.core.reminders import (
     DEFAULT_REMINDER_OFFSETS,
     format_offsets_for_display,
@@ -89,6 +98,50 @@ async def _load_subscription(
         await callback.answer("Subscription not found.", show_alert=True)
         return None
     return subscription
+
+
+async def _load_open_cycle(
+    callback: CallbackQuery,
+    db: Database,
+    subscription_id: int,
+    due_value: str,
+) -> Optional[Dict[str, object]]:
+    subscription = await _load_subscription(callback, db, subscription_id)
+    if not subscription:
+        return None
+    open_cycles = await db.list_open_cycles(subscription_id)
+    if due_value not in open_cycles:
+        await callback.answer("This cycle is already closed.", show_alert=True)
+        return None
+    return subscription
+
+
+def _resolve_cycle_participants(
+    cycle_state: Dict[str, object],
+    live_participants: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    cycle_participants = list(cycle_state.get("participants") or [])
+    snapshot_ready = bool(cycle_state.get("snapshot_ready"))
+    if not cycle_participants and not snapshot_ready:
+        return live_participants
+    return cycle_participants
+
+
+async def _advance_subscription_after_cycle_close(
+    db: Database,
+    subscription: Dict[str, object],
+    due_value: str,
+) -> None:
+    if str(subscription.get("next_charge_at") or "") != due_value:
+        return
+    try:
+        cycle_due = datetime.strptime(due_value, "%Y-%m-%d").date()
+    except ValueError:
+        return
+    period_days = int(subscription.get("period_days") or 30)
+    monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
+    next_due = calculate_next_charge_date(cycle_due, period_days, monthly_anchor_day)
+    await db.update_subscription_fields(int(subscription["id"]), next_charge_at=next_due)
 
 
 async def _show_payment_mode_menu(
@@ -740,10 +793,7 @@ async def handle_subscription_payment_mode_callback(
     if not subscription:
         return
     await state.clear()
-    current_mode = str(subscription.get("payment_mode") or PAYMENT_MODE_SPLIT).strip().lower()
-    if current_mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
-        current_mode = PAYMENT_MODE_SPLIT
-    await _show_payment_mode_menu(callback, callback_data.subscription_id, current_mode)
+    await send_participants_settings(callback, db, callback_data.subscription_id)
     await callback.answer()
 
 
@@ -770,7 +820,7 @@ async def handle_subscription_payment_mode_select(
     await db.update_subscription_fields(subscription_id, payment_mode=mode)
     await state.clear()
     await callback.answer(f"Payment mode set to {'fixed' if mode == PAYMENT_MODE_FIXED else 'split'}.")
-    await _show_payment_mode_menu(callback, subscription_id, mode)
+    await send_participants_settings(callback, db, subscription_id)
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "useramounts"))
@@ -787,7 +837,7 @@ async def handle_subscription_user_amounts_callback(
     current_mode = str(subscription.get("payment_mode") or PAYMENT_MODE_SPLIT).strip().lower()
     if current_mode != PAYMENT_MODE_FIXED:
         await callback.answer("Switch Payment mode to Fixed first.", show_alert=True)
-        await _show_payment_mode_menu(callback, callback_data.subscription_id, PAYMENT_MODE_SPLIT)
+        await send_participants_settings(callback, db, callback_data.subscription_id)
         return
     await send_subscription_user_amounts(callback, db, callback_data.subscription_id)
 
@@ -1027,6 +1077,109 @@ async def handle_subscription_cycles_callback(
 ) -> None:
     await state.clear()
     await send_subscription_open_cycles(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(CycleAction.filter(F.action == "open"))
+async def handle_cycle_open_callback(
+    callback: CallbackQuery,
+    callback_data: CycleAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    await send_subscription_cycle_actions(
+        callback,
+        db,
+        callback_data.subscription_id,
+        callback_data.due_date,
+    )
+
+
+@admin_router.callback_query(CycleAction.filter(F.action == "recreate"))
+async def handle_cycle_recreate_callback(
+    callback: CallbackQuery,
+    callback_data: CycleAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    subscription = await _load_open_cycle(
+        callback,
+        db,
+        callback_data.subscription_id,
+        callback_data.due_date,
+    )
+    if not subscription:
+        return
+
+    await db.reset_cycle(callback_data.subscription_id, callback_data.due_date)
+    await db.ensure_cycle(callback_data.subscription_id, callback_data.due_date)
+    await send_subscription_cycle_actions(
+        callback,
+        db,
+        callback_data.subscription_id,
+        callback_data.due_date,
+        notice="Cycle recreated. Snapshot and payment marks were cleared.",
+    )
+
+
+@admin_router.callback_query(CycleAction.filter(F.action == "force_close"))
+async def handle_cycle_force_close_callback(
+    callback: CallbackQuery,
+    callback_data: CycleAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    subscription = await _load_open_cycle(
+        callback,
+        db,
+        callback_data.subscription_id,
+        callback_data.due_date,
+    )
+    if not subscription:
+        return
+
+    await db.freeze_cycle_snapshot(callback_data.subscription_id, callback_data.due_date)
+    cycle_state_map = await db.list_cycle_participants_for_due_dates(
+        callback_data.subscription_id,
+        [callback_data.due_date],
+    )
+    cycle_state = cycle_state_map.get(callback_data.due_date) or {}
+    live_participants = await db.list_subscription_participants(callback_data.subscription_id)
+    cycle_participants = _resolve_cycle_participants(cycle_state, live_participants)
+    participant_ids = sorted(
+        {
+            int(person.get("telegram_id") or 0)
+            for person in cycle_participants
+            if int(person.get("telegram_id") or 0) > 0
+        }
+    )
+
+    payments = await db.list_payments_for_cycles(
+        callback_data.subscription_id,
+        [callback_data.due_date],
+    )
+    paid_ids = {
+        int(row["paid_by_telegram_id"])
+        for row in payments
+        if row.get("paid_by_telegram_id") is not None
+    }
+    added_count = 0
+    for telegram_id in participant_ids:
+        if telegram_id in paid_ids:
+            continue
+        await db.log_payment(callback_data.subscription_id, callback_data.due_date, telegram_id)
+        added_count += 1
+
+    await db.close_cycle(callback_data.subscription_id, callback_data.due_date)
+    await _advance_subscription_after_cycle_close(db, subscription, callback_data.due_date)
+    await send_subscription_open_cycles(
+        callback,
+        db,
+        callback_data.subscription_id,
+        notice=f"Cycle closed. Marked {added_count} unpaid user(s) as paid.",
+    )
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "reminders_send"))

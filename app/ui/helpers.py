@@ -43,6 +43,7 @@ from app.ui.keyboards import (
     reminder_settings_keyboard,
     reminder_send_targets_keyboard,
     settings_tests_keyboard,
+    subscription_cycle_actions_keyboard,
     subscription_open_cycles_keyboard,
     subscription_more_keyboard,
     subscription_report_keyboard,
@@ -148,6 +149,50 @@ def _format_cycle_status(value: str, today: date) -> str:
     if due_date == today:
         return "Due today"
     return f"Overdue by {(today - due_date).days} day(s)"
+
+
+def _build_open_cycle_summary(
+    subscription: Dict[str, object],
+    due_value: str,
+    today: date,
+    cycle_state_map: Dict[str, Dict[str, object]],
+    live_participants: Sequence[Dict[str, object]],
+    paid_by_due: Dict[str, set[int]],
+) -> Dict[str, object]:
+    cycle_state = cycle_state_map.get(due_value) or {}
+    cycle_participants = list(cycle_state.get("participants") or [])
+    snapshot_ready = bool(cycle_state.get("snapshot_ready"))
+    settings_snapshot_ready = bool(cycle_state.get("settings_snapshot_ready"))
+    if not cycle_participants and not snapshot_ready:
+        cycle_participants = list(live_participants)
+
+    participant_ids = {
+        int(person.get("telegram_id") or 0)
+        for person in cycle_participants
+        if int(person.get("telegram_id") or 0) > 0
+    }
+    users_count = len(participant_ids)
+    paid_count = len(participant_ids.intersection(paid_by_due.get(due_value, set())))
+
+    amount_source = cycle_state.get("amount") if settings_snapshot_ready else subscription.get("amount")
+    try:
+        amount_value = float(amount_source)
+    except (TypeError, ValueError):
+        amount_value = float(subscription.get("amount") or 0.0)
+    currency_source = cycle_state.get("currency") if settings_snapshot_ready else subscription.get("currency")
+    currency_value = str(currency_source or subscription.get("currency") or "").upper()
+
+    return {
+        "due_value": due_value,
+        "due_display": _format_iso_date(due_value),
+        "status": _format_cycle_status(due_value, today),
+        "amount": amount_value,
+        "currency": currency_value,
+        "users_count": users_count,
+        "paid_count": paid_count,
+        "snapshot_ready": snapshot_ready,
+        "settings_snapshot_ready": settings_snapshot_ready,
+    }
 
 
 async def respond_with_markup(
@@ -575,6 +620,7 @@ async def send_subscription_open_cycles(
     target: Responder,
     db: Database,
     subscription_id: int,
+    notice: Optional[str] = None,
 ) -> None:
     subscription = await db.get_subscription(subscription_id)
     if not subscription:
@@ -583,9 +629,12 @@ async def send_subscription_open_cycles(
 
     open_cycles = await db.list_open_cycles(subscription_id)
     if not open_cycles:
+        text = "🗂 Open cycles:\nNo open cycles for this subscription."
+        if notice:
+            text = f"{escape_html(notice)}\n\n{text}"
         await respond_with_markup(
             target,
-            "🗂 Open cycles:\nNo open cycles for this subscription.",
+            text,
             reply_markup=subscription_open_cycles_keyboard(subscription_id),
         )
         return
@@ -608,37 +657,27 @@ async def send_subscription_open_cycles(
         f"Subscription: <code>{escape_html(subscription['name'])}</code>",
         "",
     ]
+    if notice:
+        lines[0:0] = [escape_html(notice), ""]
     for idx, due_value in enumerate(open_cycles, 1):
-        cycle_state = cycle_state_map.get(due_value) or {}
-        cycle_participants = list(cycle_state.get("participants") or [])
-        snapshot_ready = bool(cycle_state.get("snapshot_ready"))
-        settings_snapshot_ready = bool(cycle_state.get("settings_snapshot_ready"))
-        if not cycle_participants and not snapshot_ready:
-            cycle_participants = live_participants
-
-        participant_ids = {
-            int(person.get("telegram_id") or 0)
-            for person in cycle_participants
-            if int(person.get("telegram_id") or 0) > 0
-        }
-        users_count = len(participant_ids)
-        paid_count = len(participant_ids.intersection(paid_by_due.get(due_value, set())))
-
-        amount_source = cycle_state.get("amount") if settings_snapshot_ready else subscription.get("amount")
-        try:
-            amount_value = float(amount_source)
-        except (TypeError, ValueError):
-            amount_value = float(subscription.get("amount") or 0.0)
-        currency_source = cycle_state.get("currency") if settings_snapshot_ready else subscription.get("currency")
-        currency_value = str(currency_source or subscription.get("currency") or "").upper()
+        summary = _build_open_cycle_summary(
+            subscription,
+            due_value,
+            today,
+            cycle_state_map,
+            live_participants,
+            paid_by_due,
+        )
 
         lines.extend(
             [
-                f"{idx}. <code>{escape_html(_format_iso_date(due_value))}</code> — "
-                f"<code>{escape_html(_format_cycle_status(due_value, today))}</code>",
-                f"💰 Amount: <code>{amount_value:.2f} {escape_html(currency_value)}</code>",
-                f"👥 Users: <code>{users_count}</code> | ✅ Paid: <code>{paid_count}/{users_count}</code>",
-                f"📦 Snapshot flags: <code>users={int(snapshot_ready)} settings={int(settings_snapshot_ready)}</code>",
+                f"{idx}. <code>{escape_html(str(summary['due_display']))}</code> — "
+                f"<code>{escape_html(str(summary['status']))}</code>",
+                f"💰 Amount: <code>{float(summary['amount']):.2f} {escape_html(str(summary['currency']))}</code>",
+                f"👥 Users: <code>{int(summary['users_count'])}</code> | "
+                f"✅ Paid: <code>{int(summary['paid_count'])}/{int(summary['users_count'])}</code>",
+                f"📦 Snapshot flags: <code>users={int(bool(summary['snapshot_ready']))} "
+                f"settings={int(bool(summary['settings_snapshot_ready']))}</code>",
                 "",
             ]
         )
@@ -646,7 +685,71 @@ async def send_subscription_open_cycles(
     await send_chunked_responder_text(
         target,
         "\n".join(lines).rstrip(),
-        reply_markup=subscription_open_cycles_keyboard(subscription_id),
+        reply_markup=subscription_open_cycles_keyboard(subscription_id, open_cycles),
+    )
+
+
+async def send_subscription_cycle_actions(
+    target: Responder,
+    db: Database,
+    subscription_id: int,
+    due_value: str,
+    notice: Optional[str] = None,
+) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await respond_with_markup(target, "This subscription no longer exists.")
+        return
+
+    open_cycles = await db.list_open_cycles(subscription_id)
+    if due_value not in open_cycles:
+        await respond_with_markup(
+            target,
+            "This cycle is no longer open.",
+            reply_markup=subscription_open_cycles_keyboard(subscription_id, open_cycles),
+        )
+        return
+
+    cycle_state_map = await db.list_cycle_participants_for_due_dates(subscription_id, [due_value])
+    payments = await db.list_payments_for_cycles(subscription_id, [due_value])
+    live_participants = await db.list_subscription_participants(subscription_id)
+
+    paid_by_due: dict[str, set[int]] = {}
+    for row in payments:
+        payer_id = row.get("paid_by_telegram_id")
+        if payer_id is None:
+            continue
+        paid_by_due.setdefault(str(row.get("due_date") or ""), set()).add(int(payer_id))
+
+    summary = _build_open_cycle_summary(
+        subscription,
+        due_value,
+        datetime.today().date(),
+        cycle_state_map,
+        live_participants,
+        paid_by_due,
+    )
+    unpaid_count = max(int(summary["users_count"]) - int(summary["paid_count"]), 0)
+
+    body = (
+        "🗂 Open cycle:\n"
+        f"Subscription: <code>{escape_html(subscription['name'])}</code>\n"
+        f"Cycle: <code>{escape_html(str(summary['due_display']))}</code>\n"
+        f"Status: <code>{escape_html(str(summary['status']))}</code>\n"
+        f"💰 Amount: <code>{float(summary['amount']):.2f} {escape_html(str(summary['currency']))}</code>\n"
+        f"👥 Users: <code>{int(summary['users_count'])}</code> | "
+        f"✅ Paid: <code>{int(summary['paid_count'])}/{int(summary['users_count'])}</code>\n"
+        f"📦 Snapshot flags: <code>users={int(bool(summary['snapshot_ready']))} "
+        f"settings={int(bool(summary['settings_snapshot_ready']))}</code>\n"
+        "\n"
+        "♻️ Recreate cycle resets this cycle to the current users/settings and clears its payment marks.\n"
+        f"✅ Force close marks <code>{unpaid_count}</code> unpaid user(s) as paid and closes the cycle."
+    )
+    text = body if not notice else f"{escape_html(notice)}\n\n{body}"
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=subscription_cycle_actions_keyboard(subscription_id, due_value),
     )
 
 

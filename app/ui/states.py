@@ -66,6 +66,12 @@ class SubscriptionAction(CallbackData, prefix="sub"):
     subscription_id: int
 
 
+class CycleAction(CallbackData, prefix="cycle"):
+    action: str
+    subscription_id: int
+    due_date: str
+
+
 class ParticipantAction(CallbackData, prefix="spart"):
     action: str
     subscription_id: int

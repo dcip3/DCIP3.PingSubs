@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Dict, Iterable, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
@@ -8,6 +8,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.core.constants import PAYMENT_MODE_FIXED, PAYMENT_MODE_SPLIT
 from app.ui.states import (
+    CycleAction,
     MemberAction,
     ParticipantAction,
     ReminderAction,
@@ -30,6 +31,13 @@ COMMON_TIMEZONES = (
     "America/Los_Angeles",
     "UTC",
 )
+
+
+def _format_cycle_button_label(due_value: str) -> str:
+    try:
+        return datetime.strptime(due_value, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        return due_value
 
 
 def admin_reply_keyboard() -> ReplyKeyboardMarkup:
@@ -278,6 +286,10 @@ def build_public_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -
 def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
+        text="✏️ Rename",
+        callback_data=SubscriptionAction(action="rename", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
         text="💰 Pricing & schedule",
         callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
     )
@@ -348,8 +360,62 @@ def subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     return build_back_keyboard(subscription_id, "more")
 
 
-def subscription_open_cycles_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    return build_back_keyboard(subscription_id, "more")
+def subscription_open_cycles_keyboard(
+    subscription_id: int,
+    due_dates: Sequence[str] = (),
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for due_value in due_dates:
+        builder.button(
+            text=f"📅 {_format_cycle_button_label(due_value)}",
+            callback_data=CycleAction(
+                action="open",
+                subscription_id=subscription_id,
+                due_date=due_value,
+            ).pack(),
+        )
+    if due_dates:
+        builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="more", subscription_id=subscription_id).pack(),
+            style="primary",
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+    )
+    return builder.as_markup()
+
+
+def subscription_cycle_actions_keyboard(subscription_id: int, due_value: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="♻️ Recreate cycle",
+        callback_data=CycleAction(
+            action="recreate",
+            subscription_id=subscription_id,
+            due_date=due_value,
+        ).pack(),
+    )
+    builder.button(
+        text="✅ Force close",
+        callback_data=CycleAction(
+            action="force_close",
+            subscription_id=subscription_id,
+            due_date=due_value,
+        ).pack(),
+        style="danger",
+    )
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="cycles", subscription_id=subscription_id).pack(),
+            style="primary",
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+    )
+    return builder.as_markup()
 
 
 def public_subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
@@ -395,11 +461,31 @@ def participants_settings_keyboard(
         text="👥 Manage users",
         callback_data=SubscriptionAction(action="participants_manage", subscription_id=subscription_id).pack(),
     )
-    builder.button(
-        text="💳 Payment mode",
-        callback_data=SubscriptionAction(action="paymentmode", subscription_id=subscription_id).pack(),
-    )
-    if current_mode == PAYMENT_MODE_FIXED:
+    normalized_mode = (current_mode or PAYMENT_MODE_SPLIT).strip().lower()
+    if normalized_mode == PAYMENT_MODE_SPLIT:
+        split_button = InlineKeyboardButton(
+            text="Split by shares",
+            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_SPLIT}",
+            style="success",
+        )
+    else:
+        split_button = InlineKeyboardButton(
+            text="Split by shares",
+            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_SPLIT}",
+        )
+    if normalized_mode == PAYMENT_MODE_FIXED:
+        fixed_button = InlineKeyboardButton(
+            text="Fixed per user",
+            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
+            style="success",
+        )
+    else:
+        fixed_button = InlineKeyboardButton(
+            text="Fixed per user",
+            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
+        )
+    builder.row(split_button, fixed_button)
+    if normalized_mode == PAYMENT_MODE_FIXED:
         builder.button(
             text="👥 Amount per user",
             callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
@@ -423,10 +509,6 @@ def participants_settings_keyboard(
 
 def subscription_more_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✏️ Rename",
-        callback_data=SubscriptionAction(action="rename", subscription_id=subscription_id).pack(),
-    )
     builder.button(
         text="📊 Payments report",
         callback_data=SubscriptionAction(action="report", subscription_id=subscription_id).pack(),

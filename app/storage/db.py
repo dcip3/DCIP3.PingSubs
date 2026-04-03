@@ -1362,6 +1362,24 @@ class Database:
         )
         await self._conn.commit()
 
+    async def reset_cycle(self, subscription_id: int, due_date: date | str) -> None:
+        assert self._conn is not None, "Database is not connected"
+        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
+        for table_name in (
+            "reminder_messages",
+            "reminder_suppressions",
+            "reminder_user_logs",
+            "reminder_logs",
+            "payment_logs",
+            "subscription_cycle_participants",
+            "subscription_cycles",
+        ):
+            await self._conn.execute(
+                f"DELETE FROM {table_name} WHERE subscription_id = ? AND due_date = ?",
+                (subscription_id, due_value),
+            )
+        await self._conn.commit()
+
     async def list_open_cycles(self, subscription_id: int) -> List[str]:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
