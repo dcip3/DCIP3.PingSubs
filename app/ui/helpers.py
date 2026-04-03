@@ -1138,6 +1138,17 @@ async def send_member_detail(target: Responder, db: Database, friend_id: int) ->
         include_telegram_id=True,
         title="👤 User Info:",
     )
+    assigned_destination_id = await db.get_user_payment_destination_id(int(friend["telegram_id"]))
+    effective_destination = await db.get_effective_payment_destination_for_user(int(friend["telegram_id"]))
+    if effective_destination:
+        payment_label = (
+            f"{effective_destination['title']} ({effective_destination['currency']})"
+            if assigned_destination_id is not None
+            else f"Default ({effective_destination['title']} · {effective_destination['currency']})"
+        )
+    else:
+        payment_label = "Not configured"
+    text = f"{text}\n\nPayment method: <code>{escape_html(payment_label)}</code>"
     await respond_with_markup(
         target,
         text,
@@ -1160,12 +1171,19 @@ async def send_public_account_detail(message: Message, db: Database, telegram_id
         friend = {**friend, "balance_currency": default_balance_currency}
 
     subscriptions = await db.list_subscriptions_for_user(telegram_id)
+    effective_destination = await db.get_effective_payment_destination_for_user(telegram_id)
+    payment_label = "Not configured"
+    if effective_destination:
+        payment_label = f"{effective_destination['title']} ({effective_destination['currency']})"
     await message.answer(
-        _build_user_info_text(
+        (
+            _build_user_info_text(
             friend,
             subscriptions,
             include_telegram_id=False,
             title="👤 Account:",
+            )
+            + f"\n\nTop-up method: <code>{escape_html(payment_label)}</code>"
         ),
         reply_markup=public_reply_keyboard(),
     )

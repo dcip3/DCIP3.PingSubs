@@ -61,6 +61,24 @@ class MemberEditForm(StatesGroup):
     balance_currency = State()
 
 
+class PaymentDestinationForm(StatesGroup):
+    title = State()
+    currency = State()
+    details = State()
+    payment_link = State()
+
+
+class PaymentDestinationEditForm(StatesGroup):
+    title = State()
+    currency = State()
+    details = State()
+    payment_link = State()
+
+
+class TopUpForm(StatesGroup):
+    amount = State()
+
+
 class SubscriptionAction(CallbackData, prefix="sub"):
     action: str
     subscription_id: int
@@ -101,6 +119,16 @@ class TestPaidAction(CallbackData, prefix="testpaid"):
 class MemberAction(CallbackData, prefix="member"):
     action: str
     friend_id: int
+
+
+class PaymentDestinationAction(CallbackData, prefix="paydest"):
+    action: str
+    destination_id: int
+
+
+class TopUpAction(CallbackData, prefix="topup"):
+    action: str
+    request_id: int
 
 
 Responder = Union[Message, CallbackQuery]

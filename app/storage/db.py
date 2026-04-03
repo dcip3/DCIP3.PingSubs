@@ -134,6 +134,35 @@ class Database:
         )
         await self._conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS payment_destinations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                currency TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT '',
+                payment_link TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS topup_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                friend_id INTEGER NOT NULL REFERENCES friends(id) ON DELETE CASCADE,
+                destination_id INTEGER REFERENCES payment_destinations(id) ON DELETE SET NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,
+                destination_title TEXT NOT NULL,
+                destination_details TEXT NOT NULL DEFAULT '',
+                destination_link TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'new',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                submitted_at TEXT,
+                decided_at TEXT,
+                approved_by_telegram_id INTEGER,
+                rejected_by_telegram_id INTEGER
+            );
+            """
+        )
+        await self._conn.executescript(
+            """
             CREATE TABLE IF NOT EXISTS subscription_cycles (
                 subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
                 due_date TEXT NOT NULL,
@@ -1108,6 +1137,10 @@ class Database:
     def _user_subscription_setting_key(telegram_id: int, subscription_id: int, key: str) -> str:
         return f"user:{telegram_id}:subscription:{subscription_id}:{key}"
 
+    @staticmethod
+    def _payment_destination_default_key() -> str:
+        return "payment_destination:default"
+
     async def get_user_setting(self, telegram_id: int, key: str) -> Optional[str]:
         return await self.get_setting(self._user_setting_key(telegram_id, key))
 
@@ -1156,6 +1189,412 @@ class Database:
             (self._user_subscription_setting_key(telegram_id, subscription_id, key),),
         )
         await self._conn.commit()
+
+    async def list_payment_destinations(self) -> List[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT pd.id,
+                   pd.title,
+                   pd.currency,
+                   pd.details,
+                   pd.payment_link,
+                   pd.created_at,
+                   (
+                       SELECT COUNT(*)
+                       FROM settings s
+                       WHERE s.key LIKE 'user:%:payment_destination_id'
+                         AND s.value = CAST(pd.id AS TEXT)
+                   ) AS assigned_count
+            FROM payment_destinations pd
+            ORDER BY pd.title, pd.id
+            """
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_payment_destination(self, destination_id: int) -> Optional[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT id, title, currency, details, payment_link, created_at
+            FROM payment_destinations
+            WHERE id = ?
+            """,
+            (destination_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def create_payment_destination(
+        self,
+        *,
+        title: str,
+        currency: str,
+        details: str,
+        payment_link: str = "",
+    ) -> int:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            INSERT INTO payment_destinations (title, currency, details, payment_link)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                title.strip(),
+                currency.strip().upper(),
+                details.strip(),
+                payment_link.strip(),
+            ),
+        )
+        await self._conn.commit()
+        return int(cursor.lastrowid)
+
+    async def update_payment_destination_fields(
+        self,
+        destination_id: int,
+        **fields: Any,
+    ) -> Optional[Dict[str, Any]]:
+        allowed = {"title", "currency", "details", "payment_link"}
+        updates = {
+            key: value
+            for key, value in fields.items()
+            if key in allowed and value is not None
+        }
+        if not updates:
+            return await self.get_payment_destination(destination_id)
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, value in updates.items():
+            if key == "currency":
+                normalized = str(value).strip().upper()
+                assignments.append(f"{key} = ?")
+                values.append(normalized)
+                continue
+            assignments.append(f"{key} = ?")
+            values.append(str(value).strip())
+        values.append(destination_id)
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            f"""
+            UPDATE payment_destinations
+            SET {", ".join(assignments)}
+            WHERE id = ?
+            """,
+            values,
+        )
+        await self._conn.commit()
+        return await self.get_payment_destination(destination_id)
+
+    async def get_default_payment_destination_id(self) -> Optional[int]:
+        raw_value = await self.get_setting(self._payment_destination_default_key())
+        if not raw_value:
+            return None
+        try:
+            return int(raw_value)
+        except ValueError:
+            return None
+
+    async def set_default_payment_destination_id(self, destination_id: Optional[int]) -> None:
+        if destination_id is None:
+            assert self._conn is not None, "Database is not connected"
+            await self._conn.execute(
+                "DELETE FROM settings WHERE key = ?",
+                (self._payment_destination_default_key(),),
+            )
+            await self._conn.commit()
+            return
+        await self.set_setting(self._payment_destination_default_key(), str(destination_id))
+
+    async def get_user_payment_destination_id(self, telegram_id: int) -> Optional[int]:
+        raw_value = await self.get_user_setting(telegram_id, "payment_destination_id")
+        if not raw_value:
+            return None
+        try:
+            return int(raw_value)
+        except ValueError:
+            return None
+
+    async def set_user_payment_destination_id(
+        self,
+        telegram_id: int,
+        destination_id: int,
+    ) -> None:
+        await self.set_user_setting(telegram_id, "payment_destination_id", str(destination_id))
+
+    async def clear_user_payment_destination_id(self, telegram_id: int) -> None:
+        await self.delete_user_setting(telegram_id, "payment_destination_id")
+
+    async def get_effective_payment_destination_for_user(
+        self,
+        telegram_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        user_destination_id = await self.get_user_payment_destination_id(telegram_id)
+        if user_destination_id is not None:
+            user_destination = await self.get_payment_destination(user_destination_id)
+            if user_destination:
+                return user_destination
+        default_destination_id = await self.get_default_payment_destination_id()
+        if default_destination_id is None:
+            return None
+        return await self.get_payment_destination(default_destination_id)
+
+    async def list_payment_destination_assignees(
+        self,
+        destination_id: int,
+    ) -> List[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT f.id, f.telegram_id, f.full_name
+            FROM settings s
+            JOIN friends f
+              ON s.key = 'user:' || f.telegram_id || ':payment_destination_id'
+            WHERE s.value = ?
+            ORDER BY f.full_name, f.id
+            """,
+            (str(destination_id),),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def clear_payment_destination_references(self, destination_id: int) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute(
+            """
+            DELETE FROM settings
+            WHERE key = ?
+              AND value = ?
+            """,
+            (self._payment_destination_default_key(), str(destination_id)),
+        )
+        await self._conn.execute(
+            """
+            DELETE FROM settings
+            WHERE key LIKE 'user:%:payment_destination_id'
+              AND value = ?
+            """,
+            (str(destination_id),),
+        )
+        await self._conn.commit()
+
+    async def delete_payment_destination(self, destination_id: int) -> None:
+        assert self._conn is not None, "Database is not connected"
+        await self.clear_payment_destination_references(destination_id)
+        await self._conn.execute(
+            "DELETE FROM payment_destinations WHERE id = ?",
+            (destination_id,),
+        )
+        await self._conn.commit()
+
+    async def create_topup_request(
+        self,
+        *,
+        friend_id: int,
+        destination_id: Optional[int],
+        amount: float,
+        currency: str,
+        destination_title: str,
+        destination_details: str,
+        destination_link: str = "",
+    ) -> int:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            INSERT INTO topup_requests (
+                friend_id,
+                destination_id,
+                amount,
+                currency,
+                destination_title,
+                destination_details,
+                destination_link
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                friend_id,
+                destination_id,
+                amount,
+                currency.strip().upper(),
+                destination_title.strip(),
+                destination_details.strip(),
+                destination_link.strip(),
+            ),
+        )
+        await self._conn.commit()
+        return int(cursor.lastrowid)
+
+    async def get_topup_request(self, request_id: int) -> Optional[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT tr.*,
+                   f.telegram_id,
+                   f.full_name,
+                   f.balance,
+                   f.balance_currency
+            FROM topup_requests tr
+            JOIN friends f ON f.id = tr.friend_id
+            WHERE tr.id = ?
+            """,
+            (request_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_pending_topup_requests(self) -> List[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT tr.id,
+                   tr.friend_id,
+                   tr.amount,
+                   tr.currency,
+                   tr.destination_title,
+                   tr.created_at,
+                   tr.submitted_at,
+                   f.full_name,
+                   f.telegram_id
+            FROM topup_requests tr
+            JOIN friends f ON f.id = tr.friend_id
+            WHERE tr.status = 'pending'
+            ORDER BY COALESCE(tr.submitted_at, tr.created_at), tr.id
+            """
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def mark_topup_request_pending(self, request_id: int) -> Optional[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await self._conn.execute(
+                """
+                SELECT id
+                FROM topup_requests
+                WHERE id = ? AND status = 'new'
+                """,
+                (request_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                await self._conn.rollback()
+                return await self.get_topup_request(request_id)
+            await self._conn.execute(
+                """
+                UPDATE topup_requests
+                SET status = 'pending',
+                    submitted_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (request_id,),
+            )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        return await self.get_topup_request(request_id)
+
+    async def approve_topup_request(
+        self,
+        request_id: int,
+        admin_telegram_id: int,
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await self._conn.execute(
+                """
+                SELECT tr.*,
+                       f.telegram_id,
+                       f.full_name,
+                       f.balance,
+                       f.balance_currency
+                FROM topup_requests tr
+                JOIN friends f ON f.id = tr.friend_id
+                WHERE tr.id = ? AND tr.status = 'pending'
+                """,
+                (request_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                await self._conn.rollback()
+                return await self.get_topup_request(request_id), "not_pending"
+
+            request = dict(row)
+            amount = float(request.get("amount") or 0.0)
+            request_currency = str(request.get("currency") or "RUB").strip().upper()
+            current_balance = max(float(request.get("balance") or 0.0), 0.0)
+            current_currency = str(request.get("balance_currency") or "").strip().upper()
+            if len(current_currency) != 3 or not current_currency.isalpha() or current_balance <= 0:
+                current_currency = request_currency
+            if current_currency != request_currency and current_balance > 0:
+                await self._conn.rollback()
+                return request, "currency_mismatch"
+
+            await self._conn.execute(
+                """
+                UPDATE friends
+                SET balance = COALESCE(balance, 0) + ?,
+                    balance_currency = ?
+                WHERE id = ?
+                """,
+                (amount, request_currency, int(request["friend_id"])),
+            )
+            await self._conn.execute(
+                """
+                UPDATE topup_requests
+                SET status = 'approved',
+                    approved_by_telegram_id = ?,
+                    rejected_by_telegram_id = NULL,
+                    decided_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (admin_telegram_id, request_id),
+            )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        return await self.get_topup_request(request_id), None
+
+    async def reject_topup_request(
+        self,
+        request_id: int,
+        admin_telegram_id: int,
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        assert self._conn is not None, "Database is not connected"
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await self._conn.execute(
+                """
+                SELECT id
+                FROM topup_requests
+                WHERE id = ? AND status = 'pending'
+                """,
+                (request_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                await self._conn.rollback()
+                return await self.get_topup_request(request_id), "not_pending"
+            await self._conn.execute(
+                """
+                UPDATE topup_requests
+                SET status = 'rejected',
+                    rejected_by_telegram_id = ?,
+                    approved_by_telegram_id = NULL,
+                    decided_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (admin_telegram_id, request_id),
+            )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        return await self.get_topup_request(request_id), None
 
     async def get_effective_subscription_base_currency(
         self,
