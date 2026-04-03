@@ -404,7 +404,6 @@ def subscription_cycle_actions_keyboard(subscription_id: int, due_value: str) ->
             subscription_id=subscription_id,
             due_date=due_value,
         ).pack(),
-        style="danger",
     )
     builder.adjust(1)
     builder.row(
@@ -761,7 +760,7 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         callback_data=SubscriptionAction(action="currency", subscription_id=subscription_id).pack(),
     )
     builder.button(
-        text="🌐 Base currency",
+        text="🌐 Convert currency",
         callback_data=SubscriptionAction(action="basecurrency", subscription_id=subscription_id).pack(),
     )
     builder.button(

@@ -973,7 +973,7 @@ def _build_subscription_detail_text(
         "💰 Pricing & schedule:",
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>",
         f"💱 Currency: <code>{escape_html(str(subscription['currency']).upper())}</code>",
-        f"🌐 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>",
+        f"🌐 Convert currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>",
         f"📅 Next charge: <code>{_format_iso_date(subscription['next_charge_at'])}</code>",
         f"🔁 Period: <code>{escape_html(cadence)}</code>",
         "",
@@ -1190,8 +1190,8 @@ async def send_participants_settings(target: Responder, db: Database, subscripti
         "👥 Participants:\n\n"
         f"💳 Payment mode: <code>{'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}</code>\n"
         f"👥 Users: <code>{len(participants)}</code>\n"
-        f"🧮 Shares: <code>{total_shares}</code>\n"
-        f"🧮 Mode details: <code>{escape_html(mode_details)}</code>"
+        f"➗ Shares: <code>{total_shares}</code>\n"
+        f"ℹ️ Mode details: <code>{escape_html(mode_details)}</code>"
     )
     await respond_with_markup(
         target,
@@ -1299,7 +1299,7 @@ async def send_pricing_settings(target: Responder, db: Database, subscription_id
     text = (
         "💰 Pricing & schedule:\n\n"
         f"💰 Amount: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        f"🌐 Base currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>\n"
+        f"🌐 Convert currency: <code>{escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}</code>\n"
         f"📅 Next charge: <code>{_format_iso_date(subscription['next_charge_at'])}</code>\n"
         f"🔁 Period: <code>{escape_html(cadence)}</code>"
     )
@@ -1321,7 +1321,6 @@ async def send_subscription_more(target: Responder, db: Database, subscription_i
     comment_value = (subscription.get("comment") or "").strip()
     text = (
         "📊 Reports & more:\n\n"
-        f"🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
         f"🗂 Open cycles: <code>{len(open_cycles)}</code>\n"
         f"📝 Comment: <code>{escape_html(comment_value or 'not set')}</code>"
     )

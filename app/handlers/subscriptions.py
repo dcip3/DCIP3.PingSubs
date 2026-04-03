@@ -366,7 +366,7 @@ async def handle_subscription_base_currency_quick_select(
 
     await db.update_subscription_fields(subscription_id, base_currency=currency)
     await state.clear()
-    await callback.answer(f"Base currency set to {currency}")
+    await callback.answer(f"Convert currency set to {currency}")
     await send_pricing_settings(callback, db, subscription_id)
 
 
@@ -751,7 +751,7 @@ async def handle_subscription_base_currency_callback(
     await state.clear()
     current_currency = str(subscription.get("base_currency") or subscription.get("currency") or "RUB").upper()
     text = (
-        "🌐 Base currency:\n"
+        "🌐 Convert currency:\n"
         f"Current: <code>{escape_html(current_currency)}</code>\n"
         "\n"
         "This is the default target currency for this subscription."
@@ -778,7 +778,7 @@ async def handle_subscription_base_currency_other(
         state,
         callback_data.subscription_id,
         SubscriptionEditForm.base_currency,
-        "🌐 Base currency:\nSend a 3-letter currency code.\nExample: <code>EUR</code>.",
+        "🌐 Convert currency:\nSend a 3-letter currency code.\nExample: <code>EUR</code>.",
     )
 
 
@@ -1557,7 +1557,7 @@ async def edit_subscription_base_currency(message: Message, state: FSMContext, d
 
     await db.update_subscription_fields(sub_id, base_currency=currency)
     await state.clear()
-    await message.answer("Base currency updated.", reply_markup=admin_reply_keyboard())
+    await message.answer("Convert currency updated.", reply_markup=admin_reply_keyboard())
     await send_subscription_detail(message, db, sub_id)
 
 
