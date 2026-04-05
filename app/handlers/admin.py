@@ -68,6 +68,8 @@ from app.ui.text import validate_person_name
 
 from . import admin_router, public_router
 
+TEST_REMINDER_CURRENCY_FALLBACKS = ("RUB", "USD", "EUR", "GBP")
+
 
 def _is_cancel_text(text: str | None) -> bool:
     return bool(text and text.lower() == "cancel")
@@ -1380,10 +1382,17 @@ async def handle_test_reminder_send(
         subscription_default=amount_currency,
         default_currency=converter.target_currency,
     )
+    test_amount_currency = amount_currency
+    if test_amount_currency == target_currency:
+        for candidate_currency in TEST_REMINDER_CURRENCY_FALLBACKS:
+            if candidate_currency != target_currency:
+                test_amount_currency = candidate_currency
+                break
+
     converted_text = None
-    if target_currency != amount_currency:
+    if target_currency != test_amount_currency:
         try:
-            converted_amount = await converter.convert_to(100.0, amount_currency, target_currency)
+            converted_amount = await converter.convert_to(100.0, test_amount_currency, target_currency)
         except Exception:  # noqa: BLE001
             converted_amount = None
         if converted_amount is not None:
@@ -1400,7 +1409,7 @@ async def handle_test_reminder_send(
         status_text=status_text,
         due_date_text=due_date_text,
         share_text="1/1",
-        amount_text=f"100.00 {amount_currency}",
+        amount_text=f"100.00 {test_amount_currency}",
         converted_text=converted_text,
         payment_label=payment_label,
         payment_details=payment_details,
