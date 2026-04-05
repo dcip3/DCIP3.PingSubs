@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from datetime import date, datetime
 from typing import Dict, Optional, Sequence, Tuple, Union
 
@@ -68,6 +69,26 @@ from app.core.reminders import (
 from app.ui.text import escape_html, format_display_name
 
 MAX_TELEGRAM_MESSAGE_LEN = 3900
+
+
+def _display_width(value: str) -> int:
+    width = 0
+    for char in value:
+        if char == "\u200d":
+            continue
+        if "\U0001F3FB" <= char <= "\U0001F3FF":
+            continue
+        if unicodedata.combining(char):
+            continue
+        if unicodedata.category(char) in {"Cf", "Mn", "Me"}:
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+    return width
+
+
+def _pad_preformatted_cell(value: str, width: int) -> str:
+    padding = max(0, width - _display_width(value))
+    return f"{escape_html(value)}{' ' * padding}"
 
 
 def _build_user_info_text(
@@ -906,10 +927,10 @@ async def _build_subscription_payment_report_text(
     else:
         filtered = list(participants)
 
-    names = [escape_html(format_display_name(person.get("full_name"))) for person in filtered]
+    names = [format_display_name(person.get("full_name")) for person in filtered]
 
-    name_width = max(len("Name"), max(len(name) for name in names))
-    header = f"{'Name':<{name_width}} | " + " ".join(month_labels)
+    name_width = max(_display_width("Name"), max(_display_width(name) for name in names))
+    header = f"{_pad_preformatted_cell('Name', name_width)} | " + " ".join(month_labels)
     lines = [header]
 
     for person, display_name in zip(filtered, names):
@@ -929,7 +950,7 @@ async def _build_subscription_payment_report_text(
                 squares += "🟩"
             else:
                 squares += "⬜"
-        lines.append(f"{display_name:<{name_width}} | {squares}")
+        lines.append(f"{_pad_preformatted_cell(display_name, name_width)} | {squares}")
 
     return (
         "📊 Payments report:\n"
