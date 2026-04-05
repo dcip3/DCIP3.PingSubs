@@ -15,6 +15,7 @@ from app.ui.states import (
     ReminderAction,
     ReminderSendAction,
     SubscriptionAction,
+    TestListAction,
     TestPaidAction,
     TestSendAction,
     TopUpAction,
@@ -1031,20 +1032,60 @@ def reminder_send_targets_keyboard(
     return builder.as_markup()
 
 
-def settings_tests_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for person in subs:
-        label = str(person.get("full_name") or "Unknown")
-        builder.button(
-            text=label,
-            callback_data=TestSendAction(telegram_id=int(person["telegram_id"])).pack(),
+def settings_tests_keyboard(
+    friends: Sequence[Dict[str, object]],
+    *,
+    page: int = 1,
+    total_pages: int = 1,
+    total_users: int = 0,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+
+    columns = 2 if total_users > 4 else 1
+    friend_buttons = [
+        InlineKeyboardButton(
+            text=str(friend.get("full_name") or "Unknown"),
+            callback_data=TestSendAction(telegram_id=int(friend["telegram_id"])).pack(),
         )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:tests", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        for friend in friends
+    ]
+    for index in range(0, len(friend_buttons), columns):
+        rows.append(friend_buttons[index : index + columns])
+
+    if total_pages > 1:
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="⬅️ Back",
+                    callback_data=TestListAction(action="page", page=page - 1).pack(),
+                    style="primary",
+                )
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"{page}/{total_pages}",
+                callback_data=TestListAction(action="page", page=page).pack(),
+                style="primary",
+            )
+        )
+        if page < total_pages:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="Next ▶️",
+                    callback_data=TestListAction(action="page", page=page + 1).pack(),
+                    style="primary",
+                )
+            )
+        rows.append(nav_row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(text="⬅️ Back", callback_data="settings:tests", style="primary"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
     )
-    return builder.as_markup()
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def tests_menu_keyboard() -> InlineKeyboardMarkup:

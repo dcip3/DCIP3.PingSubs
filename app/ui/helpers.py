@@ -1391,26 +1391,47 @@ async def send_settings_tests_menu(target: Responder, db: Database) -> None:
     )
 
 
-async def send_test_user_list(target: Responder, db: Database) -> None:
+async def send_test_user_list(
+    target: Responder,
+    db: Database,
+    *,
+    page: int = 1,
+) -> None:
     friends = await db.list_friends()
     if not friends:
         await respond_with_markup(
             target,
             "🧪 Tests:\nNo users yet.",
-            reply_markup=settings_tests_keyboard([]),
+            reply_markup=settings_tests_keyboard([], page=1, total_pages=1, total_users=0),
         )
         return
 
-    text = "🧪 Tests:\nChoose a user to send the test message:"
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=settings_tests_keyboard(friends),
+    sorted_friends = sorted(
+        friends,
+        key=lambda item: (str(item.get("full_name") or "").casefold(), int(item.get("id") or 0)),
     )
+    per_page = 6
+    total_users = len(sorted_friends)
+    total_pages = max(1, (total_users + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+
+    start = (page - 1) * per_page
+    page_friends = sorted_friends[start : start + per_page]
+
+    lines = ["🧪 Tests:", "Choose a user to send the test message:"]
+    for idx, friend in enumerate(page_friends, start + 1):
+        lines.append(f"{idx}. <code>{escape_html(str(friend['full_name']))}</code>")
+    if total_pages > 1:
+        lines.append(f"Page: <code>{page}/{total_pages}</code>")
     await respond_with_markup(
         target,
-        text,
-        reply_markup=test_reminder_targets_keyboard(subscription_id, participants),
+        "\n".join(lines),
+        reply_markup=settings_tests_keyboard(
+            page_friends,
+            page=page,
+            total_pages=total_pages,
+            total_users=total_users,
+        ),
     )
 
 

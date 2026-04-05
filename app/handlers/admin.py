@@ -48,6 +48,7 @@ from app.ui.states import (
     PublicSettingsForm,
     SettingsForm,
     SubscriptionAction,
+    TestListAction,
     TestSendAction,
 )
 from app.core.config import Settings
@@ -1337,6 +1338,15 @@ async def handle_settings_tests(callback: CallbackQuery, db: Database) -> None:
 @admin_router.callback_query(F.data == "tests:send")
 async def handle_test_send_menu(callback: CallbackQuery, db: Database) -> None:
     await send_test_user_list(callback, db)
+
+
+@admin_router.callback_query(TestListAction.filter(F.action == "page"))
+async def handle_test_list_page(
+    callback: CallbackQuery,
+    callback_data: TestListAction,
+    db: Database,
+) -> None:
+    await send_test_user_list(callback, db, page=max(1, callback_data.page))
 
 
 @admin_router.callback_query(TestSendAction.filter())

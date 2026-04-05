@@ -114,6 +114,11 @@ class TestSendAction(CallbackData, prefix="testsend"):
     telegram_id: int
 
 
+class TestListAction(CallbackData, prefix="testlist"):
+    action: str
+    page: int
+
+
 class TestPaidAction(CallbackData, prefix="testpaid"):
     subscription_id: int
     due_date: str
