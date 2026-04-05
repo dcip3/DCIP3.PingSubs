@@ -34,8 +34,7 @@ from app.ui.helpers import (
     send_member_list,
     send_settings_tests_menu,
     send_subscription_list,
-    send_test_subscription_list,
-    send_test_reminder_targets,
+    send_test_user_list,
     send_user_subscription_list,
 )
 from app.ui.states import (
@@ -57,7 +56,7 @@ from app.core.reminders import (
     parse_time_string,
 )
 from app.storage.db import Database
-from app.services import CurrencyConverter, send_test_reminders
+from app.services import CurrencyConverter
 from app.ui.text import validate_person_name
 
 from . import admin_router, public_router
@@ -1328,16 +1327,7 @@ async def handle_settings_tests(callback: CallbackQuery, db: Database) -> None:
 
 @admin_router.callback_query(F.data == "tests:send")
 async def handle_test_send_menu(callback: CallbackQuery, db: Database) -> None:
-    await send_test_subscription_list(callback, db)
-
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "test_select"))
-async def handle_test_subscription_select(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-) -> None:
-    await send_test_reminder_targets(callback, db, callback_data.subscription_id)
+    await send_test_user_list(callback, db)
 
 
 @admin_router.callback_query(TestSendAction.filter())
@@ -1345,21 +1335,29 @@ async def handle_test_reminder_send(
     callback: CallbackQuery,
     callback_data: TestSendAction,
     bot: Bot,
-    settings: Settings,
     db: Database,
-    converter: CurrencyConverter,
 ) -> None:
-    target_id = callback_data.telegram_id or None
-    sent_count = await send_test_reminders(
-        bot,
-        db,
-        converter,
-        subscription_id=callback_data.subscription_id,
-        rounding_mode=settings.currency_rounding,
-        target_telegram_id=target_id,
+    friends = await db.list_friends()
+    person = next(
+        (friend for friend in friends if int(friend["telegram_id"]) == callback_data.telegram_id),
+        None,
     )
-    await callback.answer(f"Sent {sent_count} test notification(s).")
-    await send_test_reminder_targets(callback, db, callback_data.subscription_id)
+    if person is None:
+        await callback.answer("This user no longer exists.", show_alert=True)
+        await send_test_user_list(callback, db)
+        return
+
+    full_name = str(person.get("full_name") or "Unknown")
+    text = (
+        "🧪 Test reminder\n"
+        "\n"
+        "This is a placeholder test message.\n"
+        "\n"
+        f"User: <code>{html.escape(full_name)}</code>"
+    )
+    await bot.send_message(int(person["telegram_id"]), text)
+    await callback.answer("Test message sent.")
+    await send_test_user_list(callback, db)
 
 
 @admin_router.callback_query(F.data.startswith("settings_notify:"))

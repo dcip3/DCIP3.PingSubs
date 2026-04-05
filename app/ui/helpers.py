@@ -54,7 +54,6 @@ from app.ui.keyboards import (
     subscription_report_keyboard,
     subscription_detail_keyboard,
     tests_menu_keyboard,
-    test_reminder_targets_keyboard,
 )
 from app.ui.states import Responder, SubscriptionAction
 from app.core.reminders import (
@@ -241,7 +240,7 @@ def _payment_info_lines(
     comment_value: str,
 ) -> list[str]:
     lines = [
-        "💳 Payment & comment:",
+        "💳 Payment:",
         f"💳 Payment: <code>{escape_html(payment_label)}</code>",
     ]
     if payment_details:
@@ -1392,49 +1391,21 @@ async def send_settings_tests_menu(target: Responder, db: Database) -> None:
     )
 
 
-async def send_test_subscription_list(target: Responder, db: Database) -> None:
-    subs = await db.list_subscriptions()
-    if not subs:
+async def send_test_user_list(target: Responder, db: Database) -> None:
+    friends = await db.list_friends()
+    if not friends:
         await respond_with_markup(
             target,
-            "🧪 Tests:\nNo subscriptions yet. Create one first.",
+            "🧪 Tests:\nNo users yet.",
             reply_markup=settings_tests_keyboard([]),
         )
         return
 
-    text = "🧪 Tests:\nChoose a subscription to send test reminders:"
+    text = "🧪 Tests:\nChoose a user to send the test message:"
     await respond_with_markup(
         target,
         text,
-        reply_markup=settings_tests_keyboard(subs),
-    )
-
-
-async def send_test_reminder_targets(target: Responder, db: Database, subscription_id: int) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        subs = await db.list_subscriptions()
-        await respond_with_markup(
-            target,
-            "This subscription no longer exists.",
-            reply_markup=settings_tests_keyboard(subs),
-        )
-        return
-
-    participants = await db.list_subscription_participants(subscription_id)
-    if not participants:
-        subs = await db.list_subscriptions()
-        await respond_with_markup(
-            target,
-            "No users are assigned yet. Add them via 📋 Subscriptions.",
-            reply_markup=settings_tests_keyboard(subs),
-        )
-        return
-
-    text = (
-        f"🧪 Test reminder send:\n🏷️ Name: <code>{escape_html(subscription['name'])}</code>\n"
-        "\n"
-        "Choose who should receive the test reminder."
+        reply_markup=settings_tests_keyboard(friends),
     )
     await respond_with_markup(
         target,

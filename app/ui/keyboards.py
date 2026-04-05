@@ -561,6 +561,10 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack(),
     )
     builder.button(
+        text="💳 Payment",
+        callback_data=SubscriptionAction(action="paymentinfo", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
         text="📊 Reports & more",
         callback_data=SubscriptionAction(action="more", subscription_id=subscription_id).pack(),
     )
@@ -781,10 +785,6 @@ def subscription_more_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         callback_data=SubscriptionAction(action="cycles", subscription_id=subscription_id).pack(),
     )
     builder.button(
-        text="💳 Payment & comment",
-        callback_data=SubscriptionAction(action="paymentinfo", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
         text="🗑 Delete",
         callback_data=SubscriptionAction(action="delete", subscription_id=subscription_id).pack(),
     )
@@ -814,7 +814,7 @@ def subscription_payment_info_keyboard(subscription_id: int) -> InlineKeyboardMa
     builder.row(
         InlineKeyboardButton(
             text="⬅️ Back",
-            callback_data=SubscriptionAction(action="more", subscription_id=subscription_id).pack(),
+            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
             style="primary",
         ),
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
@@ -1033,11 +1033,11 @@ def reminder_send_targets_keyboard(
 
 def settings_tests_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for sub in subs:
-        label = f"{sub['name']} ({sub['amount']:.2f} {sub['currency']})"
+    for person in subs:
+        label = str(person.get("full_name") or "Unknown")
         builder.button(
             text=label,
-            callback_data=SubscriptionAction(action="test_select", subscription_id=sub["id"]).pack(),
+            callback_data=TestSendAction(telegram_id=int(person["telegram_id"])).pack(),
         )
     builder.adjust(1)
     builder.row(
@@ -1056,32 +1056,6 @@ def tests_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
     )
     return builder.as_markup()
-
-
-def test_reminder_targets_keyboard(
-    subscription_id: int,
-    participants: Sequence[Dict[str, object]],
-) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="📬 All",
-        callback_data=TestSendAction(subscription_id=subscription_id, telegram_id=0).pack(),
-    )
-    for person in participants:
-        builder.button(
-            text=str(person.get("full_name") or "Unknown"),
-            callback_data=TestSendAction(
-                subscription_id=subscription_id,
-                telegram_id=int(person["telegram_id"]),
-            ).pack(),
-        )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="tests:send", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
-    )
-    return builder.as_markup()
-
 
 def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()

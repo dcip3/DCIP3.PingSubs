@@ -111,7 +111,6 @@ class ReminderSendAction(CallbackData, prefix="remsend"):
 
 
 class TestSendAction(CallbackData, prefix="testsend"):
-    subscription_id: int
     telegram_id: int
 
 
