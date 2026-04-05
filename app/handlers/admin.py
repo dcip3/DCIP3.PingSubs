@@ -58,7 +58,12 @@ from app.core.reminders import (
     parse_time_string,
 )
 from app.storage.db import Database
-from app.services import _build_reminder_message, _format_status_and_date
+from app.services import (
+    CurrencyConverter,
+    _build_reminder_message,
+    _format_status_and_date,
+    format_converted_amount,
+)
 from app.ui.text import validate_person_name
 
 from . import admin_router, public_router
@@ -1338,6 +1343,7 @@ async def handle_test_reminder_send(
     callback_data: TestSendAction,
     bot: Bot,
     db: Database,
+    converter: CurrencyConverter,
 ) -> None:
     friends = await db.list_friends()
     person = next(
@@ -1368,6 +1374,25 @@ async def handle_test_reminder_send(
         payment_details = str(default_destination.get("details") or "").strip()
         payment_link = str(default_destination.get("payment_link") or "").strip()
 
+    target_currency = await db.get_effective_target_currency(
+        int(person["telegram_id"]),
+        0,
+        subscription_default=amount_currency,
+        default_currency=converter.target_currency,
+    )
+    converted_text = None
+    if target_currency != amount_currency:
+        try:
+            converted_amount = await converter.convert_to(100.0, amount_currency, target_currency)
+        except Exception:  # noqa: BLE001
+            converted_amount = None
+        if converted_amount is not None:
+            converted_text = format_converted_amount(
+                converted_amount,
+                target_currency,
+                "precise",
+            )
+
     status_text, due_date_text = _format_status_and_date(today, today)
     text = _build_reminder_message(
         person_name=full_name,
@@ -1376,7 +1401,7 @@ async def handle_test_reminder_send(
         due_date_text=due_date_text,
         share_text="1/1",
         amount_text=f"100.00 {amount_currency}",
-        converted_text=None,
+        converted_text=converted_text,
         payment_label=payment_label,
         payment_details=payment_details,
         payment_link=payment_link,
