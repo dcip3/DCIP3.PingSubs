@@ -1371,7 +1371,7 @@ async def handle_test_reminder_send(
     if default_destination:
         amount_currency = str(default_destination.get("currency") or "RUB").upper()
         payment_label = (
-            f"Default ({default_destination['title']} ({amount_currency}))"
+            f"Default ({default_destination['title']} · {amount_currency})"
         )
         payment_details = str(default_destination.get("details") or "").strip()
         payment_link = str(default_destination.get("payment_link") or "").strip()
@@ -1389,10 +1389,23 @@ async def handle_test_reminder_send(
                 test_amount_currency = candidate_currency
                 break
 
+    test_amount_value = 100.0
+    if test_amount_currency != "RUB":
+        try:
+            converted_from_rub = await converter.convert_to(100.0, "RUB", test_amount_currency)
+        except Exception:  # noqa: BLE001
+            converted_from_rub = None
+        if converted_from_rub is not None and converted_from_rub > 0:
+            test_amount_value = converted_from_rub
+
     converted_text = None
     if target_currency != test_amount_currency:
         try:
-            converted_amount = await converter.convert_to(100.0, test_amount_currency, target_currency)
+            converted_amount = await converter.convert_to(
+                test_amount_value,
+                test_amount_currency,
+                target_currency,
+            )
         except Exception:  # noqa: BLE001
             converted_amount = None
         if converted_amount is not None:
@@ -1409,7 +1422,7 @@ async def handle_test_reminder_send(
         status_text=status_text,
         due_date_text=due_date_text,
         share_text="1/1",
-        amount_text=f"100.00 {test_amount_currency}",
+        amount_text=f"{test_amount_value:.2f} {test_amount_currency}",
         converted_text=converted_text,
         payment_label=payment_label,
         payment_details=payment_details,

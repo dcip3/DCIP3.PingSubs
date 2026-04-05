@@ -248,11 +248,11 @@ def _build_subscription_blocks(
         [
             "💳 Payment:",
             f"💵 My amount: <code>{safe_amount}</code>",
-            f"🏦 Method: <code>{safe_payment_label}</code>",
         ],
     ]
     if safe_converted:
         blocks[-1].append(f"≈ <code>{safe_converted}</code>")
+    blocks[-1].append(f"🏦 Method: <code>{safe_payment_label}</code>")
     if safe_payment_details:
         blocks[-1].append(f"<pre>{safe_payment_details}</pre>")
     if safe_payment_link:
@@ -494,9 +494,7 @@ async def _run_reminder_pass(
         current_payment_details = ""
         current_payment_link = ""
         if current_payment_destination:
-            label_base = (
-                f"{current_payment_destination['title']} ({current_payment_destination['currency']})"
-            )
+            label_base = f"{current_payment_destination['title']} · {current_payment_destination['currency']}"
             current_payment_label = (
                 label_base if current_payment_destination_id is not None else f"Default ({label_base})"
             )
@@ -1251,7 +1249,7 @@ async def send_test_reminders(
             )
         except (TypeError, ValueError):
             selected_destination_id = None
-        label_base = f"{current_payment_destination['title']} ({current_payment_destination['currency']})"
+        label_base = f"{current_payment_destination['title']} · {current_payment_destination['currency']}"
         raw_payment_label = label_base if selected_destination_id is not None else f"Default ({label_base})"
         raw_payment_details = str(current_payment_destination.get("details") or "").strip()
         raw_payment_link = str(current_payment_destination.get("payment_link") or "").strip()
