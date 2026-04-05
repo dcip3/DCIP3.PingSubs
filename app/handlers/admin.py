@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import html
+from datetime import date
 
 from aiogram import Bot, F
 
@@ -12,6 +13,7 @@ from aiogram.types import CallbackQuery, Message
 from app.ui.keyboards import (
     admin_reply_keyboard,
     admin_settings_keyboard,
+    build_test_payment_confirmation_keyboard,
     dialog_keyboard,
     public_settings_keyboard,
     public_subscription_currency_keyboard,
@@ -56,7 +58,7 @@ from app.core.reminders import (
     parse_time_string,
 )
 from app.storage.db import Database
-from app.services import CurrencyConverter
+from app.services import _build_reminder_message, _format_status_and_date
 from app.ui.text import validate_person_name
 
 from . import admin_router, public_router
@@ -1348,14 +1350,44 @@ async def handle_test_reminder_send(
         return
 
     full_name = str(person.get("full_name") or "Unknown")
-    text = (
-        "🧪 Test reminder\n"
-        "\n"
-        "This is a placeholder test message.\n"
-        "\n"
-        f"User: <code>{html.escape(full_name)}</code>"
+    today = date.today()
+    default_destination = None
+    default_destination_id = await db.get_default_payment_destination_id()
+    if default_destination_id is not None:
+        default_destination = await db.get_payment_destination(default_destination_id)
+
+    payment_label = "not set"
+    payment_details = ""
+    payment_link = ""
+    amount_currency = "RUB"
+    if default_destination:
+        amount_currency = str(default_destination.get("currency") or "RUB").upper()
+        payment_label = (
+            f"Default ({default_destination['title']} ({amount_currency}))"
+        )
+        payment_details = str(default_destination.get("details") or "").strip()
+        payment_link = str(default_destination.get("payment_link") or "").strip()
+
+    status_text, due_date_text = _format_status_and_date(today, today)
+    text = _build_reminder_message(
+        person_name=full_name,
+        subscription_name="Test subscription",
+        status_text=status_text,
+        due_date_text=due_date_text,
+        share_text="1/1",
+        amount_text=f"100.00 {amount_currency}",
+        converted_text=None,
+        payment_label=payment_label,
+        payment_details=payment_details,
+        payment_link=payment_link,
+        comment="Test comment",
+        footer="This is a test reminder. Tapping “Paid” will not record anything.",
     )
-    await bot.send_message(int(person["telegram_id"]), text)
+    await bot.send_message(
+        int(person["telegram_id"]),
+        text,
+        reply_markup=build_test_payment_confirmation_keyboard(0, today),
+    )
     await callback.answer("Test message sent.")
     await send_test_user_list(callback, db)
 
