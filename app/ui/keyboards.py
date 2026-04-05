@@ -70,6 +70,10 @@ def dialog_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def dialog_cancel_inline_button() -> InlineKeyboardButton:
+    return InlineKeyboardButton(text="Cancel", callback_data="dialog:cancel", style="danger")
+
+
 def build_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
@@ -1139,6 +1143,8 @@ def user_amount_clear_keyboard(subscription_id: int, friend_id: int) -> InlineKe
         callback_data=f"sub_user_amount_clear:{subscription_id}:{friend_id}",
         style="danger",
     )
+    builder.adjust(1)
+    builder.row(dialog_cancel_inline_button())
     return builder.as_markup()
 
 
@@ -1232,6 +1238,7 @@ def build_currency_keyboard(options: Iterable[str]) -> InlineKeyboardMarkup:
     for code in options:
         builder.button(text=code.upper(), callback_data=f"currency:{code.upper()}")
     builder.adjust(3)
+    builder.row(dialog_cancel_inline_button())
     return builder.as_markup()
 
 
@@ -1561,6 +1568,7 @@ def build_period_keyboard() -> InlineKeyboardMarkup:
         builder.button(text=f"{days} d", callback_data=f"period:{days}")
     builder.button(text="Monthly", callback_data="period:month")
     builder.adjust(2)
+    builder.row(dialog_cancel_inline_button())
     return builder.as_markup()
 
 
@@ -1568,6 +1576,7 @@ def build_share_limit_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Split across all", callback_data="sharelimit:all")
     builder.adjust(1)
+    builder.row(dialog_cancel_inline_button())
     return builder.as_markup()
 
 
@@ -1576,6 +1585,7 @@ def build_creation_payment_mode_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="Split by shares", callback_data=f"create_payment_mode:{PAYMENT_MODE_SPLIT}")
     builder.button(text="Fixed per user", callback_data=f"create_payment_mode:{PAYMENT_MODE_FIXED}")
     builder.adjust(2)
+    builder.row(dialog_cancel_inline_button())
     return builder.as_markup()
 
 
@@ -1631,6 +1641,9 @@ def comment_edit_keyboard(
                 callback_data=SubscriptionAction(action="comment_clear", subscription_id=subscription_id).pack(),
             )
         )
+    builder.row(
+        dialog_cancel_inline_button(),
+    )
     builder.row(
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
     )

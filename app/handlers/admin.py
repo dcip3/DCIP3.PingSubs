@@ -222,21 +222,7 @@ async def handle_public_help(message: Message, db: Database) -> None:
 
 @public_router.message(F.text.func(_is_cancel_text))
 async def handle_public_cancel(message: Message, state: FSMContext, db: Database) -> None:
-    reply_markup = public_reply_keyboard()
-    if message.from_user and await db.is_admin(message.from_user.id):
-        reply_markup = admin_reply_keyboard()
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer("There is no active dialog to cancel.", reply_markup=reply_markup)
-        return
-    await state.clear()
-    await message.answer("Dialog canceled.", reply_markup=reply_markup)
-    if (
-        current_state == PublicAccountForm.full_name.state
-        and message.from_user
-        and not await db.is_admin(message.from_user.id)
-    ):
-        await send_public_account_detail(message, db, message.from_user.id)
+    await _cancel_dialog_message(message, state, db)
 
 
 @public_router.message(F.text == "📋 Subscriptions")
@@ -1002,6 +988,32 @@ async def send_admin_help(message: Message) -> None:
     await message.answer(text, reply_markup=admin_reply_keyboard())
 
 
+async def _cancel_dialog_message(message: Message, state: FSMContext, db: Database) -> None:
+    is_admin_user = bool(message.from_user and await db.is_admin(message.from_user.id))
+    reply_markup = admin_reply_keyboard() if is_admin_user else public_reply_keyboard()
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("There is no active dialog to cancel.", reply_markup=reply_markup)
+        return
+
+    await state.clear()
+    await message.answer("Dialog canceled.", reply_markup=reply_markup)
+    if current_state in {
+        FriendForm.telegram_id.state,
+        FriendForm.full_name.state,
+        MemberEditForm.full_name.state,
+        MemberEditForm.balance.state,
+        MemberEditForm.balance_currency.state,
+    }:
+        await send_member_list(message, db)
+    if (
+        current_state == PublicAccountForm.full_name.state
+        and message.from_user
+        and not is_admin_user
+    ):
+        await send_public_account_detail(message, db, message.from_user.id)
+
+
 @public_router.callback_query(F.data == "menu:close")
 @admin_router.callback_query(F.data == "menu:close")
 async def handle_menu_close(callback: CallbackQuery) -> None:
@@ -1014,24 +1026,26 @@ async def handle_menu_close(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@public_router.callback_query(F.data == "dialog:cancel")
+@admin_router.callback_query(F.data == "dialog:cancel")
+async def handle_dialog_cancel_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    if callback.message:
+        with contextlib.suppress(Exception):
+            await callback.message.edit_reply_markup(reply_markup=None)
+        await _cancel_dialog_message(callback.message, state, db)
+    else:
+        await state.clear()
+    await callback.answer()
+
+
 
 @admin_router.message(F.text.func(_is_cancel_text))
 async def handle_cancel(message: Message, state: FSMContext, db: Database) -> None:
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer("There is no active dialog to cancel.", reply_markup=admin_reply_keyboard())
-        return
-
-    await state.clear()
-    await message.answer("Dialog canceled.", reply_markup=admin_reply_keyboard())
-    if current_state in {
-        FriendForm.telegram_id.state,
-        FriendForm.full_name.state,
-        MemberEditForm.full_name.state,
-        MemberEditForm.balance.state,
-        MemberEditForm.balance_currency.state,
-    }:
-        await send_member_list(message, db)
+    await _cancel_dialog_message(message, state, db)
 
 
 

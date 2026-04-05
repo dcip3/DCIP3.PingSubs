@@ -226,7 +226,10 @@ async def handle_member_rename(
     await state.set_state(MemberEditForm.full_name)
     await state.update_data(edit_member_id=callback_data.friend_id)
     if callback.message:
-        await callback.message.answer("Rename User:\n🏷️ Send new name:")
+        await callback.message.answer(
+            "Rename User:\n🏷️ Send new name:",
+            reply_markup=dialog_keyboard(),
+        )
     await callback.answer()
 
 
