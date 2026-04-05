@@ -252,6 +252,7 @@ async def handle_member_rename_input(
         return
     await db.update_friend_name(int(friend_id), raw_name)
     await state.clear()
+    await message.answer("Name updated.", reply_markup=admin_reply_keyboard())
     await send_member_detail(message, db, int(friend_id))
 
 
