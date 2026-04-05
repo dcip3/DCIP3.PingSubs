@@ -44,6 +44,7 @@ class Database:
                 amount REAL NOT NULL,
                 currency TEXT NOT NULL,
                 base_currency TEXT NOT NULL DEFAULT '',
+                payment_destination_id INTEGER,
                 payment_mode TEXT NOT NULL DEFAULT 'split',
                 next_charge_at TEXT NOT NULL,
                 period_days INTEGER NOT NULL DEFAULT 30,
@@ -172,6 +173,10 @@ class Database:
                 amount_snapshot REAL,
                 currency_snapshot TEXT,
                 base_currency_snapshot TEXT,
+                payment_destination_id_snapshot INTEGER,
+                payment_destination_title_snapshot TEXT,
+                payment_destination_details_snapshot TEXT,
+                payment_destination_link_snapshot TEXT,
                 payment_mode_snapshot TEXT,
                 share_limit_snapshot INTEGER,
                 comment_snapshot TEXT,
@@ -247,6 +252,11 @@ class Database:
             "payment_mode",
             "TEXT NOT NULL DEFAULT 'split'",
         )
+        await self._ensure_column(
+            "subscriptions",
+            "payment_destination_id",
+            "INTEGER",
+        )
 
     async def _ensure_participant_columns(self) -> None:
         await self._ensure_column(
@@ -315,6 +325,26 @@ class Database:
         await self._ensure_column(
             "subscription_cycles",
             "base_currency_snapshot",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "payment_destination_id_snapshot",
+            "INTEGER",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "payment_destination_title_snapshot",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "payment_destination_details_snapshot",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "subscription_cycles",
+            "payment_destination_link_snapshot",
             "TEXT",
         )
         await self._ensure_column(
@@ -898,7 +928,7 @@ class Database:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
             """
-            SELECT id, name, amount, currency, base_currency, next_charge_at, period_days, share_limit,
+            SELECT id, name, amount, currency, base_currency, payment_destination_id, next_charge_at, period_days, share_limit,
                    reminder_time, reminder_offsets, remind_after_due, comment, monthly_anchor_day,
                    payment_mode
             FROM subscriptions
@@ -1334,6 +1364,27 @@ class Database:
             user_destination = await self.get_payment_destination(user_destination_id)
             if user_destination:
                 return user_destination
+        default_destination_id = await self.get_default_payment_destination_id()
+        if default_destination_id is None:
+            return None
+        return await self.get_payment_destination(default_destination_id)
+
+    async def get_effective_subscription_payment_destination(
+        self,
+        subscription_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        subscription = await self.get_subscription(subscription_id)
+        if not subscription:
+            return None
+        raw_destination_id = subscription.get("payment_destination_id")
+        try:
+            destination_id = int(raw_destination_id) if raw_destination_id is not None else None
+        except (TypeError, ValueError):
+            destination_id = None
+        if destination_id is not None:
+            destination = await self.get_payment_destination(destination_id)
+            if destination:
+                return destination
         default_destination_id = await self.get_default_payment_destination_id()
         if default_destination_id is None:
             return None
@@ -1932,31 +1983,52 @@ class Database:
             return
         if int(cycle_row["settings_snapshot_ready"] or 0) == 1:
             return
+        subscription = await self.get_subscription(subscription_id)
+        if not subscription:
+            return
+        destination = await self.get_effective_subscription_payment_destination(subscription_id)
+        payment_destination_id_snapshot = None
+        payment_destination_title_snapshot = ""
+        payment_destination_details_snapshot = ""
+        payment_destination_link_snapshot = ""
+        if destination:
+            payment_destination_id_snapshot = int(destination["id"])
+            payment_destination_title_snapshot = str(destination.get("title") or "")
+            payment_destination_details_snapshot = str(destination.get("details") or "")
+            payment_destination_link_snapshot = str(destination.get("payment_link") or "")
         await self._conn.execute(
             """
             UPDATE subscription_cycles
-            SET amount_snapshot = (SELECT amount FROM subscriptions WHERE id = ?),
-                currency_snapshot = (SELECT currency FROM subscriptions WHERE id = ?),
-                base_currency_snapshot = (SELECT base_currency FROM subscriptions WHERE id = ?),
-                payment_mode_snapshot = (SELECT payment_mode FROM subscriptions WHERE id = ?),
-                share_limit_snapshot = (SELECT share_limit FROM subscriptions WHERE id = ?),
-                comment_snapshot = (SELECT comment FROM subscriptions WHERE id = ?),
-                reminder_time_snapshot = (SELECT reminder_time FROM subscriptions WHERE id = ?),
-                reminder_offsets_snapshot = (SELECT reminder_offsets FROM subscriptions WHERE id = ?),
-                remind_after_due_snapshot = (SELECT remind_after_due FROM subscriptions WHERE id = ?),
+            SET amount_snapshot = ?,
+                currency_snapshot = ?,
+                base_currency_snapshot = ?,
+                payment_destination_id_snapshot = ?,
+                payment_destination_title_snapshot = ?,
+                payment_destination_details_snapshot = ?,
+                payment_destination_link_snapshot = ?,
+                payment_mode_snapshot = ?,
+                share_limit_snapshot = ?,
+                comment_snapshot = ?,
+                reminder_time_snapshot = ?,
+                reminder_offsets_snapshot = ?,
+                remind_after_due_snapshot = ?,
                 settings_snapshot_ready = 1
             WHERE subscription_id = ? AND due_date = ?
             """,
             (
-                subscription_id,
-                subscription_id,
-                subscription_id,
-                subscription_id,
-                subscription_id,
-                subscription_id,
-                subscription_id,
-                subscription_id,
-                subscription_id,
+                subscription.get("amount"),
+                subscription.get("currency"),
+                subscription.get("base_currency"),
+                payment_destination_id_snapshot,
+                payment_destination_title_snapshot,
+                payment_destination_details_snapshot,
+                payment_destination_link_snapshot,
+                subscription.get("payment_mode"),
+                subscription.get("share_limit"),
+                subscription.get("comment"),
+                subscription.get("reminder_time"),
+                subscription.get("reminder_offsets"),
+                subscription.get("remind_after_due"),
                 subscription_id,
                 due_value,
             ),
@@ -2011,6 +2083,10 @@ class Database:
                    c.amount_snapshot,
                    c.currency_snapshot,
                    c.base_currency_snapshot,
+                   c.payment_destination_id_snapshot,
+                   c.payment_destination_title_snapshot,
+                   c.payment_destination_details_snapshot,
+                   c.payment_destination_link_snapshot,
                    c.payment_mode_snapshot,
                    c.share_limit_snapshot,
                    c.comment_snapshot,
@@ -2039,6 +2115,10 @@ class Database:
                 "amount": None,
                 "currency": None,
                 "base_currency": None,
+                "payment_destination_id": None,
+                "payment_destination_title": "",
+                "payment_destination_details": "",
+                "payment_destination_link": "",
                 "payment_mode": PAYMENT_MODE_SPLIT,
                 "share_limit": None,
                 "comment": "",
@@ -2060,6 +2140,10 @@ class Database:
                 state["amount"] = row["amount_snapshot"]
                 state["currency"] = row["currency_snapshot"]
                 state["base_currency"] = row["base_currency_snapshot"]
+                state["payment_destination_id"] = row["payment_destination_id_snapshot"]
+                state["payment_destination_title"] = row["payment_destination_title_snapshot"] or ""
+                state["payment_destination_details"] = row["payment_destination_details_snapshot"] or ""
+                state["payment_destination_link"] = row["payment_destination_link_snapshot"] or ""
                 state["payment_mode"] = row["payment_mode_snapshot"] or PAYMENT_MODE_SPLIT
                 state["share_limit"] = row["share_limit_snapshot"]
                 state["comment"] = row["comment_snapshot"] or ""

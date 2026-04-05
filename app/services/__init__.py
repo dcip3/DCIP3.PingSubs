@@ -185,6 +185,9 @@ def _build_reminder_message(
     share_text: str,
     amount_text: str,
     converted_text: Optional[str],
+    payment_label: str,
+    payment_details: str,
+    payment_link: str,
     comment: str,
     footer: str,
 ) -> str:
@@ -197,6 +200,9 @@ def _build_reminder_message(
         share_text=share_text,
         amount_text=amount_text,
         converted_text=converted_text,
+        payment_label=payment_label,
+        payment_details=payment_details,
+        payment_link=payment_link,
         comment=comment,
     )
     if footer:
@@ -213,6 +219,9 @@ def _build_subscription_blocks(
     share_text: str,
     amount_text: str,
     converted_text: Optional[str],
+    payment_label: str,
+    payment_details: str,
+    payment_link: str,
     comment: str,
 ) -> list[list[str]]:
     if index is None:
@@ -225,6 +234,9 @@ def _build_subscription_blocks(
     _ = share_text  # kept for compatibility with existing call sites
     safe_amount = escape_html(amount_text)
     safe_converted = escape_html(converted_text) if converted_text else None
+    safe_payment_label = escape_html(payment_label) if payment_label else "not set"
+    safe_payment_details = escape_html(payment_details) if payment_details else ""
+    safe_payment_link = escape_html(payment_link) if payment_link else ""
     safe_comment = escape_html(comment) if comment else ""
     blocks: list[list[str]] = [
         [
@@ -236,10 +248,15 @@ def _build_subscription_blocks(
         [
             "💳 Payment:",
             f"💵 My amount: <code>{safe_amount}</code>",
+            f"🏦 Method: <code>{safe_payment_label}</code>",
         ],
     ]
     if safe_converted:
         blocks[-1].append(f"≈ <code>{safe_converted}</code>")
+    if safe_payment_details:
+        blocks[-1].append(f"<pre>{safe_payment_details}</pre>")
+    if safe_payment_link:
+        blocks[-1].append(f"🔗 Link: {safe_payment_link}")
     if safe_comment:
         blocks.append(["📝 Comment:", f"<code>{safe_comment}</code>"])
     return blocks
@@ -262,6 +279,9 @@ def _build_batch_reminder_message(
             share_text=str(item["share_text"]),
             amount_text=str(item["amount_text"]),
             converted_text=item.get("converted_text"),
+            payment_label=str(item.get("payment_label") or ""),
+            payment_details=str(item.get("payment_details") or ""),
+            payment_link=str(item.get("payment_link") or ""),
             comment=str(item.get("comment") or ""),
         )
     if total_text:
@@ -462,6 +482,26 @@ async def _run_reminder_pass(
         raw_base_currency = str(item.get("base_currency") or converter.target_currency).upper()
         raw_payment_mode = normalize_payment_mode(item.get("payment_mode"))
         raw_comment = str(item.get("comment", "")).strip()
+        current_payment_destination = await db.get_effective_subscription_payment_destination(int(item["id"]))
+        payment_destination_raw_id = item.get("payment_destination_id")
+        try:
+            current_payment_destination_id = (
+                int(payment_destination_raw_id) if payment_destination_raw_id is not None else None
+            )
+        except (TypeError, ValueError):
+            current_payment_destination_id = None
+        current_payment_label = "not set"
+        current_payment_details = ""
+        current_payment_link = ""
+        if current_payment_destination:
+            label_base = (
+                f"{current_payment_destination['title']} ({current_payment_destination['currency']})"
+            )
+            current_payment_label = (
+                label_base if current_payment_destination_id is not None else f"Default ({label_base})"
+            )
+            current_payment_details = str(current_payment_destination.get("details") or "").strip()
+            current_payment_link = str(current_payment_destination.get("payment_link") or "").strip()
         safe_name = escape_html(raw_name)
         default_subscription_override_time = normalize_time_string(item.get("reminder_time"))
         default_offsets = parse_offsets(item.get("reminder_offsets"))
@@ -517,11 +557,29 @@ async def _run_reminder_pass(
             cycle_remind_after_due = bool(remind_after_due_source)
             cycle_reminder_time_raw = cycle_state.get("reminder_time") if settings_snapshot_ready else item.get("reminder_time")
             cycle_override_time = normalize_time_string(cycle_reminder_time_raw)
+            cycle_payment_label = (
+                str(cycle_state.get("payment_destination_title") or "").strip()
+                if settings_snapshot_ready
+                else current_payment_label
+            )
+            cycle_payment_details = (
+                str(cycle_state.get("payment_destination_details") or "").strip()
+                if settings_snapshot_ready
+                else current_payment_details
+            )
+            cycle_payment_link = (
+                str(cycle_state.get("payment_destination_link") or "").strip()
+                if settings_snapshot_ready
+                else current_payment_link
+            )
             cycle_meta_by_due[cycle_due] = {
                 "settings_snapshot_ready": settings_snapshot_ready,
                 "amount": cycle_amount,
                 "currency": cycle_currency,
                 "base_currency": cycle_base_currency,
+                "payment_label": cycle_payment_label,
+                "payment_details": cycle_payment_details,
+                "payment_link": cycle_payment_link,
                 "payment_mode": cycle_payment_mode,
                 "share_limit": cycle_share_limit,
                 "comment": cycle_comment,
@@ -577,6 +635,9 @@ async def _run_reminder_pass(
                 cycle_currency = str(cycle_meta.get("currency") or raw_currency).upper()
                 cycle_base_currency = str(cycle_meta.get("base_currency") or raw_base_currency).upper()
                 cycle_payment_mode = normalize_payment_mode(cycle_meta.get("payment_mode"))
+                cycle_payment_label = str(cycle_meta.get("payment_label") or "")
+                cycle_payment_details = str(cycle_meta.get("payment_details") or "")
+                cycle_payment_link = str(cycle_meta.get("payment_link") or "")
                 cycle_comment = str(cycle_meta.get("comment") or "")
                 cycle_amount = float(cycle_meta.get("amount") or item["amount"])
                 cycle_share_limit = cycle_meta.get("share_limit")
@@ -854,6 +915,9 @@ async def _run_reminder_pass(
                                     "status_text": status_text,
                                     "due_date_text": due_date_text,
                                     "amount_text": f"{person_amount_value:.2f} {cycle_currency}",
+                                    "payment_label": cycle_payment_label,
+                                    "payment_details": cycle_payment_details,
+                                    "payment_link": cycle_payment_link,
                                     "comment": cycle_comment,
                                     "footer": (
                                         "Paid automatically from your balance.\n"
@@ -884,6 +948,9 @@ async def _run_reminder_pass(
                                 "share_text": share_text,
                                 "amount_text": amount_text,
                                 "converted_text": converted_display,
+                                "payment_label": cycle_payment_label,
+                                "payment_details": cycle_payment_details,
+                                "payment_link": cycle_payment_link,
                                 "comment": effective_comment,
                                 "share_amount_value": remaining_amount_value,
                                 "share_currency": cycle_currency,
@@ -897,6 +964,7 @@ async def _run_reminder_pass(
                             "count": len(cycle_participants),
                             "amount": cycle_amount,
                             "currency": cycle_currency,
+                            "payment_label": cycle_payment_label,
                             "comment": cycle_comment,
                         }
 
@@ -1005,6 +1073,9 @@ async def _run_reminder_pass(
             share_text="paid",
             amount_text=str(notice["amount_text"]),
             converted_text=None,
+            payment_label=str(notice.get("payment_label") or ""),
+            payment_details=str(notice.get("payment_details") or ""),
+            payment_link=str(notice.get("payment_link") or ""),
             comment=str(notice.get("comment") or ""),
             footer=str(notice["footer"]),
         )
@@ -1032,6 +1103,9 @@ async def _run_reminder_pass(
                 share_text=str(item["share_text"]),
                 amount_text=str(item["amount_text"]),
                 converted_text=item.get("converted_text"),
+                payment_label=str(item.get("payment_label") or ""),
+                payment_details=str(item.get("payment_details") or ""),
+                payment_link=str(item.get("payment_link") or ""),
                 comment=str(item.get("comment") or ""),
                 footer="Tap “Paid” when the bill is covered.",
             )
@@ -1164,6 +1238,23 @@ async def send_test_reminders(
     raw_name = str(subscription.get("name", ""))
     raw_currency = str(subscription.get("currency", ""))
     raw_comment = str(subscription.get("comment", "")).strip()
+    current_payment_destination = await db.get_effective_subscription_payment_destination(subscription_id)
+    raw_payment_label = "not set"
+    raw_payment_details = ""
+    raw_payment_link = ""
+    if current_payment_destination:
+        try:
+            selected_destination_id = (
+                int(subscription.get("payment_destination_id"))
+                if subscription.get("payment_destination_id") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            selected_destination_id = None
+        label_base = f"{current_payment_destination['title']} ({current_payment_destination['currency']})"
+        raw_payment_label = label_base if selected_destination_id is not None else f"Default ({label_base})"
+        raw_payment_details = str(current_payment_destination.get("details") or "").strip()
+        raw_payment_link = str(current_payment_destination.get("payment_link") or "").strip()
     source_currency = raw_currency.upper()
     admin_timezone_name = normalize_timezone_name(
         await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
@@ -1229,6 +1320,9 @@ async def send_test_reminders(
             share_text=share_text,
             amount_text=amount_text,
             converted_text=converted_display,
+            payment_label=raw_payment_label,
+            payment_details=raw_payment_details,
+            payment_link=raw_payment_link,
             comment=raw_comment,
             footer="This is a test reminder. Tapping “Paid” will not record anything.",
         )

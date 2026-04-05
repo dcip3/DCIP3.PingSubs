@@ -33,6 +33,7 @@ from app.ui.helpers import (
     send_reminder_settings,
     send_subscription_detail,
     send_subscription_list,
+    send_subscription_payment_info,
     share_limit_prompt,
     start_subscription_edit_flow,
 )
@@ -40,6 +41,7 @@ from app.ui.keyboards import (
     admin_reply_keyboard,
     comment_edit_keyboard,
     dialog_keyboard,
+    subscription_payment_destination_keyboard,
     subscription_payment_mode_keyboard,
     subscription_currency_keyboard,
     subscription_base_currency_keyboard,
@@ -202,6 +204,55 @@ async def _show_subscription_currency_menu(
         reply_markup=subscription_currency_keyboard(
             subscription_id,
             current_currency,
+        ),
+    )
+
+
+async def _show_subscription_payment_destination_menu(
+    callback: CallbackQuery,
+    db: Database,
+    subscription_id: int,
+) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription or not callback.message:
+        return
+    destinations = await db.list_payment_destinations()
+    if not destinations:
+        await callback.message.edit_text(
+            "💳 Payment method:\nNo payment methods configured yet.",
+            reply_markup=subscription_payment_destination_keyboard(
+                subscription_id,
+                [],
+                None,
+                await db.get_default_payment_destination_id(),
+            ),
+        )
+        return
+    default_destination_id = await db.get_default_payment_destination_id()
+    try:
+        selected_destination_id = (
+            int(subscription.get("payment_destination_id"))
+            if subscription.get("payment_destination_id") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        selected_destination_id = None
+    current_destination = await db.get_effective_subscription_payment_destination(subscription_id)
+    current_label = "not set"
+    if current_destination:
+        if selected_destination_id is None:
+            current_label = f"Default ({current_destination['title']} · {current_destination['currency']})"
+        else:
+            current_label = f"{current_destination['title']} ({current_destination['currency']})"
+    await callback.message.edit_text(
+        "💳 Payment method:\n"
+        f"Current: <code>{escape_html(current_label)}</code>\n\n"
+        "Choose the payment method for this subscription.",
+        reply_markup=subscription_payment_destination_keyboard(
+            subscription_id,
+            destinations,
+            selected_destination_id,
+            default_destination_id,
         ),
     )
 
@@ -1055,6 +1106,61 @@ async def handle_subscription_more_callback(
 ) -> None:
     await state.clear()
     await send_subscription_more(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "paymentinfo"))
+async def handle_subscription_payment_info_callback(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    await send_subscription_payment_info(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "paymentmethod"))
+async def handle_subscription_payment_method_callback(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    await _show_subscription_payment_destination_menu(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(F.data.startswith("sub_payment_destination:"))
+async def handle_subscription_payment_method_select(
+    callback: CallbackQuery,
+    db: Database,
+) -> None:
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Invalid action.", show_alert=True)
+        return
+    try:
+        subscription_id = int(parts[1])
+    except ValueError:
+        await callback.answer("Invalid subscription.", show_alert=True)
+        return
+    selected_value = parts[2].strip().lower()
+    if selected_value == "default":
+        await db.update_subscription_fields(subscription_id, payment_destination_id=None)
+        await callback.answer("Using default payment method.")
+        await send_subscription_payment_info(callback, db, subscription_id)
+        return
+    try:
+        destination_id = int(selected_value)
+    except ValueError:
+        await callback.answer("Invalid payment method.", show_alert=True)
+        return
+    if not await db.get_payment_destination(destination_id):
+        await callback.answer("Payment method not found.", show_alert=True)
+        return
+    await db.update_subscription_fields(subscription_id, payment_destination_id=destination_id)
+    await callback.answer("Payment method updated.")
+    await send_subscription_payment_info(callback, db, subscription_id)
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "report"))

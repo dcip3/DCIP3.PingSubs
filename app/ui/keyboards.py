@@ -495,6 +495,26 @@ def topup_request_review_keyboard(request_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def topup_destination_keyboard(
+    destinations: Sequence[Dict[str, object]],
+    default_destination_id: int | None,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in destinations:
+        destination_id = int(item["id"])
+        prefix = "⭐ " if default_destination_id == destination_id else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{prefix}{item['title']} ({item['currency']})",
+                    callback_data=f"topup_destination:{destination_id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def public_account_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
@@ -761,8 +781,8 @@ def subscription_more_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         callback_data=SubscriptionAction(action="cycles", subscription_id=subscription_id).pack(),
     )
     builder.button(
-        text="📝 Comment",
-        callback_data=SubscriptionAction(action="comment", subscription_id=subscription_id).pack(),
+        text="💳 Payment & comment",
+        callback_data=SubscriptionAction(action="paymentinfo", subscription_id=subscription_id).pack(),
     )
     builder.button(
         text="🗑 Delete",
@@ -778,6 +798,76 @@ def subscription_more_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
     )
     return builder.as_markup()
+
+
+def subscription_payment_info_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="💳 Payment method",
+        callback_data=SubscriptionAction(action="paymentmethod", subscription_id=subscription_id).pack(),
+    )
+    builder.button(
+        text="📝 Comment",
+        callback_data=SubscriptionAction(action="comment", subscription_id=subscription_id).pack(),
+    )
+    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=SubscriptionAction(action="more", subscription_id=subscription_id).pack(),
+            style="primary",
+        ),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+    )
+    return builder.as_markup()
+
+
+def subscription_payment_destination_keyboard(
+    subscription_id: int,
+    destinations: Sequence[Dict[str, object]],
+    selected_destination_id: int | None,
+    default_destination_id: int | None,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    default_label = "Default"
+    if default_destination_id is not None:
+        default_target = next(
+            (item for item in destinations if int(item.get("id") or 0) == default_destination_id),
+            None,
+        )
+        if default_target:
+            default_label = f"Default ({default_target['title']} · {default_target['currency']})"
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=default_label,
+                callback_data=f"sub_payment_destination:{subscription_id}:default",
+                style="success" if selected_destination_id is None else None,
+            )
+        ]
+    )
+    for item in destinations:
+        destination_id = int(item["id"])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{item['title']} ({item['currency']})",
+                    callback_data=f"sub_payment_destination:{subscription_id}:{destination_id}",
+                    style="success" if selected_destination_id == destination_id else None,
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Back",
+                callback_data=SubscriptionAction(action="paymentinfo", subscription_id=subscription_id).pack(),
+                style="primary",
+            ),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def subscription_reminder_time_edit_keyboard(subscription_id: int) -> InlineKeyboardMarkup:

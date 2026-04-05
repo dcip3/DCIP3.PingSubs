@@ -49,6 +49,8 @@ from app.ui.keyboards import (
     subscription_cycle_actions_keyboard,
     subscription_open_cycles_keyboard,
     subscription_more_keyboard,
+    subscription_payment_destination_keyboard,
+    subscription_payment_info_keyboard,
     subscription_report_keyboard,
     subscription_detail_keyboard,
     tests_menu_keyboard,
@@ -213,6 +215,41 @@ def _format_cycle_status(value: str, today: date) -> str:
     if due_date == today:
         return "Due today"
     return f"Overdue by {(today - due_date).days} day(s)"
+
+
+def _subscription_payment_label(
+    subscription: Dict[str, object],
+    destination: Optional[Dict[str, object]],
+) -> str:
+    raw_destination_id = subscription.get("payment_destination_id")
+    try:
+        selected_destination_id = int(raw_destination_id) if raw_destination_id is not None else None
+    except (TypeError, ValueError):
+        selected_destination_id = None
+    if not destination:
+        return "not set"
+    base = f"{destination['title']} ({destination['currency']})"
+    if selected_destination_id is None:
+        return f"Default ({base})"
+    return base
+
+
+def _payment_info_lines(
+    payment_label: str,
+    payment_details: str,
+    payment_link: str,
+    comment_value: str,
+) -> list[str]:
+    lines = [
+        "💳 Payment & comment:",
+        f"💳 Payment: <code>{escape_html(payment_label)}</code>",
+    ]
+    if payment_details:
+        lines.append(f"<pre>{escape_html(payment_details)}</pre>")
+    if payment_link:
+        lines.append(f"🔗 Link: {escape_html(payment_link)}")
+    lines.append(f"📝 Comment: <code>{escape_html(comment_value or 'not set')}</code>")
+    return lines
 
 
 def _build_open_cycle_summary(
@@ -587,7 +624,10 @@ async def send_public_subscription_detail(
     offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     overdue_text = "enabled" if subscription.get("remind_after_due") else "disabled"
     comment_value = (subscription.get("comment") or "").strip()
-    comment_line = f"📝 Comment: <code>{escape_html(comment_value)}</code>" if comment_value else ""
+    payment_destination = await db.get_effective_subscription_payment_destination(subscription_id)
+    payment_label = _subscription_payment_label(subscription, payment_destination)
+    payment_details = str(payment_destination.get("details") or "").strip() if payment_destination else ""
+    payment_link = str(payment_destination.get("payment_link") or "").strip() if payment_destination else ""
 
     if unpaid_overdue:
         overdue_lines = "\n".join(f"• <code>{_format_iso_date(value)}</code>" for value in unpaid_overdue)
@@ -622,8 +662,6 @@ async def send_public_subscription_detail(
             sections.insert(7, f"➗ Split mode: <code>{escape_html(share_text)}</code>")
     if overdue_block:
         sections.extend(["", overdue_block])
-    if comment_line:
-        sections.extend(["", comment_line])
     sections.extend(
         [
             "",
@@ -631,6 +669,7 @@ async def send_public_subscription_detail(
             f"⏰ Time: <code>{escape_html(reminder_time_display)} ({escape_html(reminder_timezone)})</code>",
         ]
     )
+    sections.extend(["", *_payment_info_lines(payment_label, payment_details, payment_link, comment_value)])
     if is_admin_view:
         sections.extend(
             [
@@ -997,6 +1036,9 @@ def _build_subscription_detail_text(
     base_time: str,
     base_timezone: str,
     open_cycles_count: int,
+    payment_label: str,
+    payment_details: str,
+    payment_link: str,
 ) -> str:
     payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
     split_share_base = _split_share_base(subscription, participants)
@@ -1004,7 +1046,6 @@ def _build_subscription_detail_text(
     per_person = subscription["amount"] / split_share_base
     users_total = _sum_users_total(subscription, participants)
     comment_value = (subscription.get("comment") or "").strip()
-    comment_text = escape_html(comment_value or "not set")
 
     if participants:
         participants_lines = []
@@ -1069,9 +1110,9 @@ def _build_subscription_detail_text(
             "",
             "📊 Reports & more:",
             f"🗂 Open cycles: <code>{open_cycles_count}</code>",
-            f"📝 Comment: <code>{comment_text}</code>",
         ]
     )
+    lines.extend(["", *_payment_info_lines(payment_label, payment_details, payment_link, comment_value)])
     return "\n".join(lines)
 
 
@@ -1083,6 +1124,7 @@ async def send_subscription_detail(target: Responder, db: Database, subscription
 
     participants = await db.list_subscription_participants(subscription_id)
     open_cycles = await db.list_open_cycles(subscription_id)
+    payment_destination = await db.get_effective_subscription_payment_destination(subscription_id)
     base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
     base_timezone = normalize_timezone_name(
         await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
@@ -1094,6 +1136,9 @@ async def send_subscription_detail(target: Responder, db: Database, subscription
         base_time,
         base_timezone,
         len(open_cycles),
+        _subscription_payment_label(subscription, payment_destination),
+        str(payment_destination.get("details") or "").strip() if payment_destination else "",
+        str(payment_destination.get("payment_link") or "").strip() if payment_destination else "",
     )
 
     await respond_with_markup(
@@ -1204,10 +1249,18 @@ async def send_public_account_detail(message: Message, db: Database, telegram_id
         friend = {**friend, "balance_currency": default_balance_currency}
 
     subscriptions = await db.list_subscriptions_for_user(telegram_id)
-    effective_destination = await db.get_effective_payment_destination_for_user(telegram_id)
+    destinations = await db.list_payment_destinations()
+    default_destination_id = await db.get_default_payment_destination_id()
+    default_destination = (
+        next((item for item in destinations if int(item.get("id") or 0) == default_destination_id), None)
+        if default_destination_id is not None
+        else None
+    )
     payment_label = "Not configured"
-    if effective_destination:
-        payment_label = f"{effective_destination['title']} ({effective_destination['currency']})"
+    if destinations:
+        payment_label = "Choose when topping up"
+        if default_destination:
+            payment_label += f" (default: {default_destination['title']} · {default_destination['currency']})"
     await message.answer(
         (
             _build_user_info_text(
@@ -1216,7 +1269,7 @@ async def send_public_account_detail(message: Message, db: Database, telegram_id
             include_telegram_id=False,
             title="👤 Account:",
             )
-            + f"\n\nTop-up method: <code>{escape_html(payment_label)}</code>"
+            + f"\n\nTop-up methods: <code>{escape_html(payment_label)}</code>"
         ),
         reply_markup=public_account_keyboard(),
     )
@@ -1421,17 +1474,37 @@ async def send_subscription_more(target: Responder, db: Database, subscription_i
         return
 
     open_cycles = await db.list_open_cycles(subscription_id)
-    comment_value = (subscription.get("comment") or "").strip()
     text = (
         "📊 Reports & more:\n\n"
-        f"🗂 Open cycles: <code>{len(open_cycles)}</code>\n"
-        f"📝 Comment: <code>{escape_html(comment_value or 'not set')}</code>"
+        f"🗂 Open cycles: <code>{len(open_cycles)}</code>"
     )
 
     await respond_with_markup(
         target,
         text,
         reply_markup=subscription_more_keyboard(subscription_id),
+    )
+
+
+async def send_subscription_payment_info(
+    target: Responder,
+    db: Database,
+    subscription_id: int,
+) -> None:
+    subscription = await db.get_subscription(subscription_id)
+    if not subscription:
+        await respond_with_markup(target, "This subscription no longer exists.")
+        return
+    payment_destination = await db.get_effective_subscription_payment_destination(subscription_id)
+    payment_label = _subscription_payment_label(subscription, payment_destination)
+    payment_details = str(payment_destination.get("details") or "").strip() if payment_destination else ""
+    payment_link = str(payment_destination.get("payment_link") or "").strip() if payment_destination else ""
+    comment_value = str(subscription.get("comment") or "").strip()
+    text = "\n".join(_payment_info_lines(payment_label, payment_details, payment_link, comment_value))
+    await respond_with_markup(
+        target,
+        text,
+        reply_markup=subscription_payment_info_keyboard(subscription_id),
     )
 
 
