@@ -86,9 +86,15 @@ def _display_width(value: str) -> int:
     return width
 
 
-def _pad_preformatted_cell(value: str, width: int) -> str:
+def _pad_preformatted_cell(value: str, width: int, *, align: str = "left") -> str:
     padding = max(0, width - _display_width(value))
-    return f"{escape_html(value)}{' ' * padding}"
+    if align == "right":
+        left_padding = padding
+        right_padding = 0
+    else:
+        left_padding = 0
+        right_padding = padding
+    return f"{' ' * left_padding}{escape_html(value)}{' ' * right_padding}"
 
 
 def _build_user_info_text(
@@ -930,7 +936,12 @@ async def _build_subscription_payment_report_text(
     names = [format_display_name(person.get("full_name")) for person in filtered]
 
     name_width = max(_display_width("Name"), max(_display_width(name) for name in names))
-    header = f"{_pad_preformatted_cell('Name', name_width)} | " + " ".join(month_labels)
+    month_cell_width = max(_display_width(symbol) for symbol in ("⬜", "🟩", "🟥"))
+    month_header = "".join(
+        _pad_preformatted_cell(label, month_cell_width, align="right")
+        for label in month_labels
+    )
+    header = f"{_pad_preformatted_cell('Name', name_width)} | {month_header}"
     lines = [header]
 
     for person, display_name in zip(filtered, names):
