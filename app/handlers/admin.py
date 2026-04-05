@@ -58,6 +58,7 @@ from app.core.reminders import (
 )
 from app.storage.db import Database
 from app.services import CurrencyConverter, send_test_reminders
+from app.ui.text import validate_person_name
 
 from . import admin_router, public_router
 
@@ -185,7 +186,8 @@ async def handle_start(message: Message, db: Database) -> None:
         return
 
     if not has_admin:
-        claimed = await db.ensure_first_admin(user_id, message.from_user.full_name or f"Admin {user_id}")
+        admin_name, _ = validate_person_name(message.from_user.full_name)
+        claimed = await db.ensure_first_admin(user_id, admin_name or "Admin")
         if claimed or await db.is_admin(user_id):
             await message.answer(
                 f"{greeting}\n\nYou are the first user, so admin access is enabled for you.",
@@ -954,9 +956,9 @@ async def handle_public_account_rename_input(
         await state.clear()
         await message.answer("Unable to identify your account.")
         return
-    raw_name = (message.text or "").strip()
-    if not raw_name:
-        await message.answer("Name cannot be empty. Please try again.")
+    normalized_name, error_message = validate_person_name(message.text)
+    if error_message:
+        await message.answer(error_message)
         return
     friend = await db.get_friend_by_telegram(message.from_user.id)
     if not friend:
@@ -966,7 +968,7 @@ async def handle_public_account_rename_input(
             reply_markup=public_reply_keyboard(),
         )
         return
-    await db.update_friend_name(int(friend["id"]), raw_name)
+    await db.update_friend_name(int(friend["id"]), normalized_name)
     await state.clear()
     await message.answer("Name updated.", reply_markup=public_reply_keyboard())
     await send_public_account_detail(message, db, message.from_user.id)
@@ -1073,9 +1075,9 @@ async def friend_form_id(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(FriendForm.full_name)
 async def friend_form_name(message: Message, state: FSMContext, db: Database) -> None:
-    full_name = (message.text or "").strip()
-    if not full_name:
-        await message.answer("Name cannot be empty. Please try again.")
+    full_name, error_message = validate_person_name(message.text)
+    if error_message:
+        await message.answer(error_message)
         return
 
     data = await state.get_data()

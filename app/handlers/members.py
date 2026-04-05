@@ -14,6 +14,7 @@ from app.ui.keyboards import (
 )
 from app.ui.states import FriendForm, MemberAction, MemberEditForm
 from app.storage.db import Database
+from app.ui.text import validate_person_name
 
 from . import admin_router
 
@@ -239,9 +240,9 @@ async def handle_member_rename_input(
     state: FSMContext,
     db: Database,
 ) -> None:
-    raw_name = (message.text or "").strip()
-    if not raw_name:
-        await message.answer("Name cannot be empty. Please try again.")
+    raw_name, error_message = validate_person_name(message.text)
+    if error_message:
+        await message.answer(error_message)
         return
     data = await state.get_data()
     friend_id = data.get("edit_member_id")
