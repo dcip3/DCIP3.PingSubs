@@ -91,9 +91,6 @@ def _pad_preformatted_cell(value: str, width: int, *, align: str = "left") -> st
     if align == "right":
         left_padding = padding
         right_padding = 0
-    elif align == "center":
-        left_padding = padding // 2
-        right_padding = padding - left_padding
     else:
         left_padding = 0
         right_padding = padding
@@ -939,9 +936,9 @@ async def _build_subscription_payment_report_text(
     names = [format_display_name(person.get("full_name")) for person in filtered]
 
     name_width = max(_display_width("Name"), max(_display_width(name) for name in names))
-    month_cell_width = max(_display_width(symbol) for symbol in ("⬜", "🟩", "🟥")) + 1
+    month_cell_width = max(_display_width(symbol) for symbol in ("⬜", "🟩", "🟥"))
     month_header = "".join(
-        _pad_preformatted_cell(label, month_cell_width, align="center")
+        _pad_preformatted_cell(label, month_cell_width, align="right")
         for label in month_labels
     )
     header = f"{_pad_preformatted_cell('Name', name_width)} | {month_header}"
@@ -949,7 +946,7 @@ async def _build_subscription_payment_report_text(
 
     for person, display_name in zip(filtered, names):
         payer_id = person["telegram_id"]
-        month_cells: list[str] = []
+        squares = ""
         for month in months:
             month_overdue = False
             for open_due in open_cycle_dates:
@@ -959,12 +956,11 @@ async def _build_subscription_payment_report_text(
                     month_overdue = True
                     break
             if month_overdue:
-                month_cells.append(_pad_preformatted_cell("🟥", month_cell_width))
+                squares += "🟥"
             elif (payer_id, month) in paid_month_map:
-                month_cells.append(_pad_preformatted_cell("🟩", month_cell_width))
+                squares += "🟩"
             else:
-                month_cells.append(_pad_preformatted_cell("⬜", month_cell_width))
-        squares = "".join(month_cells)
+                squares += "⬜"
         lines.append(f"{_pad_preformatted_cell(display_name, name_width)} | {squares}")
 
     return (
