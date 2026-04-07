@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import html
-from datetime import date
+from datetime import date, datetime
 
 from aiogram import Bot, F
 
@@ -76,25 +76,15 @@ def _is_cancel_text(text: str | None) -> bool:
     return bool(text and text.lower() == "cancel")
 
 
-def _extract_forwarded_telegram_id(message: Message) -> tuple[int | None, bool]:
-    legacy_forward_user = getattr(message, "forward_from", None)
-    if legacy_forward_user:
-        return legacy_forward_user.id, True
-
-    forward_origin = getattr(message, "forward_origin", None)
-    sender_user = getattr(forward_origin, "sender_user", None)
-    if sender_user:
-        return sender_user.id, True
-
-    is_forwarded = any(
-        (
-            forward_origin is not None,
-            getattr(message, "forward_date", None) is not None,
-            getattr(message, "forward_sender_name", None) is not None,
-            getattr(message, "forward_from_chat", None) is not None,
-        )
-    )
-    return None, is_forwarded
+def _extract_start_payload(message: Message) -> str | None:
+    text = (message.text or "").strip()
+    if not text.startswith("/start"):
+        return None
+    parts = text.split(maxsplit=1)
+    if len(parts) != 2:
+        return None
+    payload = parts[1].strip()
+    return payload or None
 
 
 async def _public_settings_snapshot(
@@ -189,9 +179,65 @@ async def handle_start(message: Message, db: Database) -> None:
     user_id = message.from_user.id
     is_admin = await db.is_admin(user_id)
     has_admin = await db.has_admins()
+    start_payload = _extract_start_payload(message)
 
     if is_admin:
         await message.answer(greeting, reply_markup=admin_reply_keyboard())
+        return
+
+    if start_payload and start_payload.startswith("join_"):
+        invited_friend = await db.get_friend_by_invite_token(start_payload)
+        if not invited_friend:
+            await message.answer(
+                "This authorization link is invalid or has already been used.",
+                reply_markup=public_reply_keyboard(),
+            )
+            return
+
+        invite_expires_at = str(invited_friend.get("invite_expires_at") or "").strip()
+        if invite_expires_at:
+            try:
+                expires_at = datetime.fromisoformat(invite_expires_at)
+            except ValueError:
+                expires_at = None
+            if expires_at is not None and expires_at < datetime.utcnow():
+                await message.answer(
+                    "This authorization link has expired. Ask an admin for a new one.",
+                    reply_markup=public_reply_keyboard(),
+                )
+                return
+
+        existing_friend = await db.get_friend_by_telegram(user_id)
+        if existing_friend and int(existing_friend["id"]) != int(invited_friend["id"]):
+            await message.answer(
+                "This Telegram account is already linked to another user.",
+                reply_markup=public_reply_keyboard(),
+            )
+            return
+
+        if invited_friend.get("telegram_id") is not None:
+            await message.answer(
+                "This authorization link has already been used.",
+                reply_markup=public_reply_keyboard(),
+            )
+            return
+
+        claimed = await db.claim_friend_invite(
+            int(invited_friend["id"]),
+            user_id,
+            datetime.utcnow().replace(microsecond=0).isoformat(),
+        )
+        if not claimed:
+            await message.answer(
+                "Unable to complete authorization. Please try again or ask an admin for a new link.",
+                reply_markup=public_reply_keyboard(),
+            )
+            return
+
+        await message.answer(
+            f"{greeting}\n\nYour account is now linked. You can use the user menu below.",
+            reply_markup=public_reply_keyboard(),
+        )
         return
 
     if not has_admin:
@@ -1010,7 +1056,6 @@ async def _cancel_dialog_message(message: Message, state: FSMContext, db: Databa
     await state.clear()
     await message.answer("Dialog canceled.", reply_markup=reply_markup)
     if current_state in {
-        FriendForm.telegram_id.state,
         FriendForm.full_name.state,
         MemberEditForm.full_name.state,
         MemberEditForm.balance.state,
@@ -1058,43 +1103,6 @@ async def handle_dialog_cancel_callback(
 async def handle_cancel(message: Message, state: FSMContext, db: Database) -> None:
     await _cancel_dialog_message(message, state, db)
 
-
-
-@admin_router.message(FriendForm.telegram_id)
-async def friend_form_id(message: Message, state: FSMContext) -> None:
-    telegram_id, is_forwarded = _extract_forwarded_telegram_id(message)
-    if telegram_id is None and is_forwarded:
-        await message.answer(
-            "Couldn't extract Telegram ID from this forwarded message. "
-            "Ask the user to disable forward privacy or send the numeric ID manually."
-        )
-        return
-
-    if telegram_id is None:
-        try:
-            telegram_id = int((message.text or "").strip())
-        except ValueError:
-            await message.answer("The ID must be numeric. Try again.")
-            return
-
-    await state.update_data(telegram_id=telegram_id)
-    await state.set_state(FriendForm.full_name)
-    await message.answer("Great! Now enter their full name:")
-
-
-@admin_router.message(FriendForm.full_name)
-async def friend_form_name(message: Message, state: FSMContext, db: Database) -> None:
-    full_name, error_message = validate_person_name(message.text)
-    if error_message:
-        await message.answer(error_message)
-        return
-
-    data = await state.get_data()
-    telegram_id = int(data["telegram_id"])
-    friend_id = await db.upsert_friend(telegram_id, full_name)
-    await state.clear()
-    await message.answer("User saved.", reply_markup=admin_reply_keyboard())
-    await send_member_list(message, db)
 
 
 @admin_router.message(F.text == "📊 Payments report")
@@ -1359,7 +1367,12 @@ async def handle_test_reminder_send(
 ) -> None:
     friends = await db.list_friends()
     person = next(
-        (friend for friend in friends if int(friend["telegram_id"]) == callback_data.telegram_id),
+        (
+            friend
+            for friend in friends
+            if friend.get("telegram_id") is not None
+            and int(friend["telegram_id"]) == callback_data.telegram_id
+        ),
         None,
     )
     if person is None:

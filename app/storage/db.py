@@ -23,10 +23,13 @@ class Database:
             """
             CREATE TABLE IF NOT EXISTS friends (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id INTEGER NOT NULL UNIQUE,
+                telegram_id INTEGER UNIQUE,
                 full_name TEXT NOT NULL,
                 balance REAL NOT NULL DEFAULT 0,
-                balance_currency TEXT NOT NULL DEFAULT ''
+                balance_currency TEXT NOT NULL DEFAULT '',
+                invite_token TEXT,
+                invite_expires_at TEXT,
+                claimed_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS admins (
@@ -276,6 +279,7 @@ class Database:
         )
 
     async def _ensure_friend_columns(self) -> None:
+        await self._ensure_friend_schema()
         await self._ensure_column(
             "friends",
             "balance",
@@ -285,6 +289,21 @@ class Database:
             "friends",
             "balance_currency",
             "TEXT NOT NULL DEFAULT ''",
+        )
+        await self._ensure_column(
+            "friends",
+            "invite_token",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "friends",
+            "invite_expires_at",
+            "TEXT",
+        )
+        await self._ensure_column(
+            "friends",
+            "claimed_at",
+            "TEXT",
         )
         assert self._conn is not None, "Database is not connected"
         await self._conn.execute(
@@ -300,6 +319,66 @@ class Database:
             WHERE balance_currency IS NOT NULL
             """
         )
+        await self._conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS friends_invite_token_unique
+            ON friends (invite_token)
+            WHERE invite_token IS NOT NULL
+            """
+        )
+
+    async def _ensure_friend_schema(self) -> None:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute("PRAGMA table_info(friends)")
+        columns = await cursor.fetchall()
+        telegram_id_column = next((row for row in columns if row[1] == "telegram_id"), None)
+        if telegram_id_column is None or int(telegram_id_column[3] or 0) == 0:
+            return
+
+        await self._conn.commit()
+        await self._conn.execute("PRAGMA foreign_keys = OFF;")
+        try:
+            await self._conn.execute("BEGIN")
+            await self._conn.execute(
+                """
+                CREATE TABLE friends_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id INTEGER UNIQUE,
+                    full_name TEXT NOT NULL,
+                    balance REAL NOT NULL DEFAULT 0,
+                    balance_currency TEXT NOT NULL DEFAULT '',
+                    invite_token TEXT,
+                    invite_expires_at TEXT,
+                    claimed_at TEXT
+                )
+                """
+            )
+            await self._conn.execute(
+                """
+                INSERT INTO friends_new (
+                    id,
+                    telegram_id,
+                    full_name,
+                    balance,
+                    balance_currency
+                )
+                SELECT
+                    id,
+                    telegram_id,
+                    full_name,
+                    COALESCE(balance, 0),
+                    COALESCE(balance_currency, '')
+                FROM friends
+                """
+            )
+            await self._conn.execute("DROP TABLE friends")
+            await self._conn.execute("ALTER TABLE friends_new RENAME TO friends")
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        finally:
+            await self._conn.execute("PRAGMA foreign_keys = ON;")
 
     async def _ensure_cycle_columns(self) -> None:
         await self._ensure_column(
@@ -477,8 +556,76 @@ class Database:
         await self._conn.commit()
         return cursor.lastrowid
 
-    async def get_friend_by_telegram(self, telegram_id: int) -> Optional[Dict[str, Any]]:
+    async def create_friend_invite(
+        self,
+        full_name: str,
+        invite_token: str,
+        invite_expires_at: str,
+    ) -> int:
         assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            INSERT INTO friends (telegram_id, full_name, invite_token, invite_expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (None, full_name, invite_token, invite_expires_at),
+        )
+        await self._conn.commit()
+        return cursor.lastrowid
+
+    async def refresh_friend_invite(
+        self,
+        friend_id: int,
+        invite_token: str,
+        invite_expires_at: str,
+    ) -> bool:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            UPDATE friends
+            SET invite_token = ?,
+                invite_expires_at = ?
+            WHERE id = ? AND telegram_id IS NULL
+            """,
+            (invite_token, invite_expires_at, friend_id),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def get_friend_by_invite_token(self, invite_token: str) -> Optional[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            "SELECT * FROM friends WHERE invite_token = ?",
+            (invite_token,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def claim_friend_invite(
+        self,
+        friend_id: int,
+        telegram_id: int,
+        claimed_at: str,
+    ) -> bool:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            UPDATE friends
+            SET telegram_id = ?,
+                claimed_at = ?,
+                invite_token = NULL,
+                invite_expires_at = NULL
+            WHERE id = ? AND telegram_id IS NULL
+            """,
+            (telegram_id, claimed_at, friend_id),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def get_friend_by_telegram(self, telegram_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        if telegram_id is None:
+            return None
         cursor = await self._conn.execute(
             "SELECT * FROM friends WHERE telegram_id = ?",
             (telegram_id,),
@@ -686,7 +833,19 @@ class Database:
     async def list_friends(self) -> List[Dict[str, Any]]:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
-            "SELECT id, telegram_id, full_name, balance, balance_currency FROM friends ORDER BY full_name"
+            """
+            SELECT
+                id,
+                telegram_id,
+                full_name,
+                balance,
+                balance_currency,
+                invite_token,
+                invite_expires_at,
+                claimed_at
+            FROM friends
+            ORDER BY full_name
+            """
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
@@ -787,8 +946,10 @@ class Database:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
-    async def list_subscriptions_for_user(self, telegram_id: int) -> List[Dict[str, Any]]:
+    async def list_subscriptions_for_user(self, telegram_id: Optional[int]) -> List[Dict[str, Any]]:
         assert self._conn is not None, "Database is not connected"
+        if telegram_id is None:
+            return []
         cursor = await self._conn.execute(
             """
             SELECT s.id, s.name, s.amount, s.currency, s.base_currency, s.next_charge_at, s.period_days
@@ -837,6 +998,7 @@ class Database:
             FROM friends f
             LEFT JOIN subscription_participants sp
                 ON sp.friend_id = f.id AND sp.subscription_id = ?
+            WHERE f.telegram_id IS NOT NULL
             ORDER BY f.full_name
             """,
             (subscription_id,),
@@ -1912,6 +2074,7 @@ class Database:
             FROM subscription_participants sp
             JOIN friends f ON f.id = sp.friend_id
             WHERE sp.subscription_id = ?
+              AND f.telegram_id IS NOT NULL
             """,
             (subscription_id,),
         )

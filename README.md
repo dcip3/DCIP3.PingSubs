@@ -78,6 +78,7 @@ docker compose up -d --build
 ## Usage
 
 - Admins manage subscriptions and members via the admin menu
+- Admins add users by name and share a generated Telegram authorization link
 - Members can view their subscriptions and mark payments as completed
 - Reminders are sent automatically based on the configured schedule
 - On first launch without `ADMIN_IDS`, the first user who sends `/start` becomes admin automatically

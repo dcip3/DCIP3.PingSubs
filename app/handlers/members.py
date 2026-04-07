@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from aiogram import F
+import secrets
+from datetime import datetime, timedelta
+
+from aiogram import Bot, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -17,6 +20,24 @@ from app.storage.db import Database
 from app.ui.text import validate_person_name
 
 from . import admin_router
+
+INVITE_TTL_DAYS = 7
+
+
+def _generate_invite_payload() -> str:
+    return f"join_{secrets.token_urlsafe(18)}"
+
+
+def _invite_expires_at() -> str:
+    return (datetime.utcnow() + timedelta(days=INVITE_TTL_DAYS)).replace(microsecond=0).isoformat()
+
+
+async def _build_invite_link(bot: Bot, payload: str) -> str:
+    bot_user = await bot.get_me()
+    username = (bot_user.username or "").strip()
+    if not username:
+        raise RuntimeError("Bot username is not configured.")
+    return f"https://t.me/{username}?start={payload}"
 
 
 @admin_router.message(F.text == "👥 Users")
@@ -53,14 +74,52 @@ async def handle_members_page(
 @admin_router.callback_query(MemberAction.filter(F.action == "add"))
 async def handle_member_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await state.set_state(FriendForm.telegram_id)
+    await state.set_state(FriendForm.full_name)
     if callback.message:
         await callback.message.answer(
             "👥 New User:\n"
-            "Send Telegram ID (numbers only) or forward user's message.\n",
+            "Send the user's full name.\n"
+            "I'll create the profile and generate an authorization link.\n",
             reply_markup=dialog_keyboard(),
         )
     await callback.answer()
+
+
+@admin_router.message(FriendForm.full_name)
+async def handle_member_create(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    bot: Bot,
+) -> None:
+    full_name, error_message = validate_person_name(message.text)
+    if error_message:
+        await message.answer(error_message)
+        return
+
+    invite_payload = _generate_invite_payload()
+    invite_expires_at = _invite_expires_at()
+    friend_id = await db.create_friend_invite(full_name, invite_payload, invite_expires_at)
+    try:
+        invite_link = await _build_invite_link(bot, invite_payload)
+    except RuntimeError:
+        await state.clear()
+        await message.answer(
+            "User created, but I couldn't build a Telegram link because the bot username is not configured.",
+            reply_markup=admin_reply_keyboard(),
+        )
+        await send_member_detail(message, db, friend_id)
+        return
+
+    await state.clear()
+    await message.answer(
+        "User created.\n\n"
+        "Share this authorization link with the user:\n"
+        f"<code>{invite_link}</code>\n\n"
+        f"Expires at (UTC): <code>{invite_expires_at}</code>",
+        reply_markup=admin_reply_keyboard(),
+    )
+    await send_member_detail(message, db, friend_id)
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "open"))
@@ -79,6 +138,42 @@ async def handle_member_report(
     db: Database,
 ) -> None:
     await send_member_report(callback, db, callback_data.friend_id)
+
+
+@admin_router.callback_query(MemberAction.filter(F.action == "invite"))
+async def handle_member_invite_refresh(
+    callback: CallbackQuery,
+    callback_data: MemberAction,
+    db: Database,
+    bot: Bot,
+) -> None:
+    friend = await db.get_friend(callback_data.friend_id)
+    if not friend:
+        await callback.answer("User not found.", show_alert=True)
+        return
+    if friend.get("telegram_id") is not None:
+        await callback.answer("This user is already linked.", show_alert=True)
+        return
+
+    invite_payload = _generate_invite_payload()
+    invite_expires_at = _invite_expires_at()
+    await db.refresh_friend_invite(callback_data.friend_id, invite_payload, invite_expires_at)
+    try:
+        invite_link = await _build_invite_link(bot, invite_payload)
+    except RuntimeError:
+        await callback.answer("Bot username is not configured.", show_alert=True)
+        await send_member_detail(callback, db, callback_data.friend_id)
+        return
+
+    if callback.message:
+        await callback.message.answer(
+            "Authorization link refreshed:\n"
+            f"<code>{invite_link}</code>\n\n"
+            f"Expires at (UTC): <code>{invite_expires_at}</code>",
+            reply_markup=admin_reply_keyboard(),
+        )
+    await callback.answer("Authorization link refreshed.")
+    await send_member_detail(callback, db, callback_data.friend_id)
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "balance"))

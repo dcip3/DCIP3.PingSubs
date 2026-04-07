@@ -149,12 +149,17 @@ def build_members_list_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def member_detail_keyboard(friend_id: int) -> InlineKeyboardMarkup:
+def member_detail_keyboard(friend_id: int, *, is_pending: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
         text="✏️ Rename",
         callback_data=MemberAction(action="rename", friend_id=friend_id).pack(),
     )
+    if is_pending:
+        builder.button(
+            text="🔗 Auth link",
+            callback_data=MemberAction(action="invite", friend_id=friend_id).pack(),
+        )
     builder.button(
         text="📊 Payments report",
         callback_data=MemberAction(action="report", friend_id=friend_id).pack(),

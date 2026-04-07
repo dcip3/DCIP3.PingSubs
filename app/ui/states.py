@@ -8,7 +8,6 @@ from aiogram.types import CallbackQuery, Message
 
 
 class FriendForm(StatesGroup):
-    telegram_id = State()
     full_name = State()
 
 

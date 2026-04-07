@@ -120,7 +120,11 @@ def _build_user_info_text(
         f"Name: <code>{escape_html(str(friend.get('full_name') or 'Unknown'))}</code>",
     ]
     if include_telegram_id:
-        lines.append(f"Telegram ID: <code>{friend['telegram_id']}</code>")
+        telegram_id = friend.get("telegram_id")
+        if telegram_id is None:
+            lines.append("Telegram ID: <code>not linked</code>")
+        else:
+            lines.append(f"Telegram ID: <code>{telegram_id}</code>")
     lines.extend(
         [
             "",
@@ -1183,7 +1187,8 @@ async def send_member_list(
 
     lines = ["👥 Users:", "Choose a user to manage:"]
     for idx, friend in enumerate(page_friends, start + 1):
-        lines.append(f"{idx}. <code>{escape_html(friend['full_name'])}</code>")
+        status_suffix = " (pending)" if friend.get("telegram_id") is None else ""
+        lines.append(f"{idx}. <code>{escape_html(friend['full_name'])}{status_suffix}</code>")
     if total_pages > 1:
         lines.append(f"Page: <code>{page}/{total_pages}</code>")
 
@@ -1204,7 +1209,9 @@ async def send_member_detail(target: Responder, db: Database, friend_id: int) ->
     if not friend:
         await respond_with_markup(target, "User not found.")
         return
-    subs = await db.list_subscriptions_for_user(friend["telegram_id"])
+    telegram_id = friend.get("telegram_id")
+    is_pending = telegram_id is None
+    subs = await db.list_subscriptions_for_user(telegram_id)
     default_balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
     balance_currency = str(friend.get("balance_currency") or "").strip().upper()
     if len(balance_currency) != 3 or not balance_currency.isalpha():
@@ -1215,21 +1222,28 @@ async def send_member_detail(target: Responder, db: Database, friend_id: int) ->
         include_telegram_id=True,
         title="👤 User Info:",
     )
-    assigned_destination_id = await db.get_user_payment_destination_id(int(friend["telegram_id"]))
-    effective_destination = await db.get_effective_payment_destination_for_user(int(friend["telegram_id"]))
-    if effective_destination:
-        payment_label = (
-            f"{effective_destination['title']} ({effective_destination['currency']})"
-            if assigned_destination_id is not None
-            else f"Default ({effective_destination['title']} · {effective_destination['currency']})"
-        )
+    if is_pending:
+        invite_expires_at = str(friend.get("invite_expires_at") or "").strip()
+        pending_lines = ["Status: <code>Awaiting authorization</code>"]
+        if invite_expires_at:
+            pending_lines.append(f"Invite expires at (UTC): <code>{escape_html(invite_expires_at)}</code>")
+        text = f"{text}\n\n" + "\n".join(pending_lines)
     else:
-        payment_label = "Not configured"
-    text = f"{text}\n\nPayment method: <code>{escape_html(payment_label)}</code>"
+        assigned_destination_id = await db.get_user_payment_destination_id(int(telegram_id))
+        effective_destination = await db.get_effective_payment_destination_for_user(int(telegram_id))
+        if effective_destination:
+            payment_label = (
+                f"{effective_destination['title']} ({effective_destination['currency']})"
+                if assigned_destination_id is not None
+                else f"Default ({effective_destination['title']} · {effective_destination['currency']})"
+            )
+        else:
+            payment_label = "Not configured"
+        text = f"{text}\n\nPayment method: <code>{escape_html(payment_label)}</code>"
     await respond_with_markup(
         target,
         text,
-        reply_markup=member_detail_keyboard(friend_id),
+        reply_markup=member_detail_keyboard(friend_id, is_pending=is_pending),
     )
 
 
@@ -1278,6 +1292,13 @@ async def send_member_report(target: Responder, db: Database, friend_id: int) ->
     friend = await db.get_friend(friend_id)
     if not friend:
         await respond_with_markup(target, "User not found.")
+        return
+    if friend.get("telegram_id") is None:
+        await respond_with_markup(
+            target,
+            "This user has not authorized their Telegram account yet.",
+            reply_markup=member_report_keyboard(friend_id),
+        )
         return
     blocks = await _build_user_payment_blocks(db, friend["telegram_id"])
     if not blocks:
@@ -1397,11 +1418,11 @@ async def send_test_user_list(
     *,
     page: int = 1,
 ) -> None:
-    friends = await db.list_friends()
+    friends = [friend for friend in await db.list_friends() if friend.get("telegram_id") is not None]
     if not friends:
         await respond_with_markup(
             target,
-            "🧪 Tests:\nNo users yet.",
+            "🧪 Tests:\nNo linked users yet.",
             reply_markup=settings_tests_keyboard([], page=1, total_pages=1, total_users=0),
         )
         return

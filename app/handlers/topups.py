@@ -217,6 +217,12 @@ async def _send_member_payment_destination_menu(
     if not friend:
         await respond_with_markup(target, "User not found.")
         return
+    if friend.get("telegram_id") is None:
+        await respond_with_markup(
+            target,
+            "This user has not authorized their Telegram account yet. Generate and share the authorization link first.",
+        )
+        return
     destinations = await db.list_payment_destinations()
     if not destinations:
         await respond_with_markup(target, "No payment methods configured yet.")
@@ -684,6 +690,9 @@ async def handle_member_payment_destination_default(
     if not friend:
         await callback.answer("User not found.", show_alert=True)
         return
+    if friend.get("telegram_id") is None:
+        await callback.answer("User has not linked Telegram yet.", show_alert=True)
+        return
     await db.clear_user_payment_destination_id(int(friend["telegram_id"]))
     await callback.answer("User now uses the default payment method.")
     await send_member_detail(callback, db, friend_id)
@@ -708,6 +717,9 @@ async def handle_member_payment_destination_assign(
     destination = await db.get_payment_destination(destination_id)
     if not friend:
         await callback.answer("User not found.", show_alert=True)
+        return
+    if friend.get("telegram_id") is None:
+        await callback.answer("User has not linked Telegram yet.", show_alert=True)
         return
     if not destination:
         await callback.answer("Payment method not found.", show_alert=True)
