@@ -115,7 +115,7 @@ async def handle_member_create(
     await message.answer(
         "User created.\n\n"
         "Share this authorization link with the user:\n"
-        f"<code>{invite_link}</code>\n\n"
+        f"{invite_link}\n\n"
         f"Expires at (UTC): <code>{invite_expires_at}</code>",
         reply_markup=admin_reply_keyboard(),
     )
@@ -168,7 +168,7 @@ async def handle_member_invite_refresh(
     if callback.message:
         await callback.message.answer(
             "Authorization link refreshed:\n"
-            f"<code>{invite_link}</code>\n\n"
+            f"{invite_link}\n\n"
             f"Expires at (UTC): <code>{invite_expires_at}</code>",
             reply_markup=admin_reply_keyboard(),
         )
