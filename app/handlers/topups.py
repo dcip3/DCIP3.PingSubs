@@ -11,7 +11,7 @@ from app.storage.db import Database
 from app.ui.helpers import respond_with_markup, send_member_detail
 from app.ui.keyboards import (
     admin_reply_keyboard,
-    dialog_keyboard,
+    dialog_cancel_inline_keyboard,
     member_payment_destination_keyboard,
     payment_destination_delete_keyboard,
     payment_destination_detail_keyboard,
@@ -352,7 +352,7 @@ async def handle_payment_destination_create_start(
             "💳 New payment method:\n"
             "Send the title.\n"
             "Example: <code>Main RUB card</code>.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -370,7 +370,7 @@ async def handle_payment_destination_title(
     await state.set_state(PaymentDestinationForm.currency)
     await message.answer(
         "Send the 3-letter currency code. Example: <code>RUB</code>.",
-        reply_markup=dialog_keyboard(),
+        reply_markup=dialog_cancel_inline_keyboard(),
     )
 
 
@@ -388,7 +388,7 @@ async def handle_payment_destination_currency(
     await message.answer(
         "Send the payment details text.\n"
         "You can use multiple lines.",
-        reply_markup=dialog_keyboard(),
+        reply_markup=dialog_cancel_inline_keyboard(),
     )
 
 
@@ -405,7 +405,7 @@ async def handle_payment_destination_details(
     await state.set_state(PaymentDestinationForm.payment_link)
     await message.answer(
         "Send the payment link, or <code>-</code> to skip.",
-        reply_markup=dialog_keyboard(),
+        reply_markup=dialog_cancel_inline_keyboard(),
     )
 
 
@@ -447,7 +447,7 @@ async def _start_destination_edit(
     else:
         await state.set_state(PaymentDestinationEditForm.payment_link)
     if callback.message:
-        await callback.message.answer(prompt, reply_markup=dialog_keyboard())
+        await callback.message.answer(prompt, reply_markup=dialog_cancel_inline_keyboard())
     await callback.answer()
 
 
@@ -792,7 +792,7 @@ async def handle_public_topup_destination_select(
             f"Method: <code>{escape_html(str(destination['title']))}</code>\n"
             f"Currency: <code>{escape_html(destination_currency)}</code>\n\n"
             "Send the amount you want to top up.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 

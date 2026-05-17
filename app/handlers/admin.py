@@ -14,7 +14,7 @@ from app.ui.keyboards import (
     admin_reply_keyboard,
     admin_settings_keyboard,
     build_test_payment_confirmation_keyboard,
-    dialog_keyboard,
+    dialog_cancel_inline_keyboard,
     public_settings_keyboard,
     public_subscription_currency_keyboard,
     public_subscription_reminder_time_keyboard,
@@ -70,10 +70,6 @@ from app.ui.text import validate_person_name
 from . import admin_router, public_router
 
 TEST_REMINDER_CURRENCY_FALLBACKS = ("RUB", "USD", "EUR", "GBP")
-
-
-def _is_cancel_text(text: str | None) -> bool:
-    return bool(text and text.lower() == "cancel")
 
 
 def _extract_start_payload(message: Message) -> str | None:
@@ -277,11 +273,6 @@ async def handle_public_help(message: Message, db: Database) -> None:
 
 
 
-@public_router.message(F.text.func(_is_cancel_text))
-async def handle_public_cancel(message: Message, state: FSMContext, db: Database) -> None:
-    await _cancel_dialog_message(message, state, db)
-
-
 @public_router.message(F.text == "📋 Subscriptions")
 async def handle_public_subscriptions(message: Message, db: Database) -> None:
     if not message.from_user:
@@ -326,7 +317,7 @@ async def handle_public_account_rename_start(
         await callback.message.answer(
             "✏️ Rename account:\n"
             "Send your new display name.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -418,7 +409,7 @@ async def handle_public_settings_time_other(callback: CallbackQuery, state: FSMC
             "⏰ Base time:\n"
             "\n"
             "Send time in <code>HH:MM</code>.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -501,7 +492,7 @@ async def handle_public_settings_timezone_other(callback: CallbackQuery, state: 
             "\n"
             "Send an IANA timezone.\n"
             "Examples: <code>Europe/Moscow</code>, <code>America/New_York</code>.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -672,7 +663,7 @@ async def handle_public_subscription_currency_other(
             "Send a 3-letter currency code.\n"
             "\n"
             "Example: <code>CHF</code>",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -825,7 +816,7 @@ async def handle_public_subscription_reminder_time_other(
             "Send time in <code>HH:MM</code>\n"
             "\n"
             "Example: <code>16:00</code>",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -1099,12 +1090,6 @@ async def handle_dialog_cancel_callback(
 
 
 
-@admin_router.message(F.text.func(_is_cancel_text))
-async def handle_cancel(message: Message, state: FSMContext, db: Database) -> None:
-    await _cancel_dialog_message(message, state, db)
-
-
-
 @admin_router.message(F.text == "📊 Payments report")
 async def handle_payments_report(message: Message, db: Database) -> None:
     subscriptions = await db.list_subscriptions()
@@ -1195,7 +1180,7 @@ async def handle_settings_time_other(callback: CallbackQuery, state: FSMContext)
             "⏰ Base time:\n"
             "\n"
             "Send time in <code>HH:MM</code>.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -1226,7 +1211,7 @@ async def handle_settings_timezone_other(callback: CallbackQuery, state: FSMCont
             "\n"
             "Send an IANA timezone.\n"
             "Examples: <code>Europe/Moscow</code>, <code>America/New_York</code>.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 

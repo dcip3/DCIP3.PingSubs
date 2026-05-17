@@ -64,15 +64,12 @@ def public_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def dialog_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        resize_keyboard=True,
-        keyboard=[[KeyboardButton(text="Cancel")]],
-    )
-
-
 def dialog_cancel_inline_button() -> InlineKeyboardButton:
     return InlineKeyboardButton(text="Cancel", callback_data="dialog:cancel", style="danger")
+
+
+def dialog_cancel_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[dialog_cancel_inline_button()]])
 
 
 def build_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:

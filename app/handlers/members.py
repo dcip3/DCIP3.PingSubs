@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from app.ui.helpers import send_member_detail, send_member_list, send_member_report
 from app.ui.keyboards import (
     admin_reply_keyboard,
-    dialog_keyboard,
+    dialog_cancel_inline_keyboard,
     member_balance_currency_keyboard,
     member_balance_keyboard,
     member_delete_confirm_keyboard,
@@ -80,7 +80,7 @@ async def handle_member_add(callback: CallbackQuery, state: FSMContext) -> None:
             "👥 New User:\n"
             "Send the user's full name.\n"
             "I'll create the profile and generate an authorization link.\n",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -217,7 +217,7 @@ async def _start_member_balance_edit(callback: CallbackQuery, state: FSMContext,
             "💰 Set balance:\n"
             "Send the new balance value.\n"
             "Example: <code>1200</code>.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -308,7 +308,7 @@ async def handle_member_balance_currency_other(
             "💱 Balance currency:\n"
             "Send a 3-letter currency code.\n"
             "Example: <code>USD</code>.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -324,7 +324,7 @@ async def handle_member_rename(
     if callback.message:
         await callback.message.answer(
             "Rename User:\n🏷️ Send new name:",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 

@@ -40,7 +40,7 @@ from app.ui.helpers import (
 from app.ui.keyboards import (
     admin_reply_keyboard,
     comment_edit_keyboard,
-    dialog_keyboard,
+    dialog_cancel_inline_keyboard,
     subscription_payment_destination_keyboard,
     subscription_payment_mode_keyboard,
     subscription_currency_keyboard,
@@ -265,7 +265,7 @@ async def start_subscription_creation(responder: Responder, state: FSMContext) -
         "New Subscription:\n"
         "Name: send subscription name.\n"
         "Example: <code>Netflix</code>.",
-        reply_markup=dialog_keyboard(),
+        reply_markup=dialog_cancel_inline_keyboard(),
     )
 
 
@@ -784,7 +784,7 @@ async def handle_subscription_currency_other(
             "Send a 3-letter currency code.\n"
             "\n"
             "Example: <code>CHF</code>",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -951,7 +951,7 @@ async def handle_subscription_user_amount_edit_callback(
             reply_markup=(
                 user_amount_clear_keyboard(subscription_id, friend_id)
                 if has_current_value
-                else dialog_keyboard()
+                else dialog_cancel_inline_keyboard()
             ),
         )
     await callback.answer()
@@ -1020,7 +1020,7 @@ async def handle_subscription_user_amount_set_all_callback(
             "👥 Amount per user:\n\n"
             "Send amount to apply it to all users.\n"
             "Example: <code>300</code>.",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 
@@ -1421,7 +1421,7 @@ async def handle_subscription_reminder_time_other(
             "Send time in <code>HH:MM</code>\n"
             "\n"
             "Example: <code>16:00</code>",
-            reply_markup=dialog_keyboard(),
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
     await callback.answer()
 

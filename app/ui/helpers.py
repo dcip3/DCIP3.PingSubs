@@ -34,7 +34,7 @@ from app.ui.keyboards import (
     public_account_keyboard,
     build_share_limit_keyboard,
     build_subscription_list_keyboard,
-    dialog_keyboard,
+    dialog_cancel_inline_keyboard,
     member_detail_keyboard,
     member_report_keyboard,
     participants_settings_keyboard,
@@ -1593,7 +1593,7 @@ async def start_subscription_edit_flow(
     await state.set_state(next_state)
     await state.update_data(edit_subscription_id=int(subscription_id))
     await callback.answer()
-    markup = reply_markup or dialog_keyboard()
+    markup = reply_markup or dialog_cancel_inline_keyboard()
     await callback.message.answer(prompt, reply_markup=markup)
 
 

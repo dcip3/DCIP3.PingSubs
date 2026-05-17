@@ -16,6 +16,6 @@ jobs:
           username: ${{ secrets.VDS_USER }}
           key: ${{ secrets.VDS_SSH_KEY }}
           script: |
-            cd /opt/docker/DCIP3.PingSubs
+            cd /opt/DCIP3.PingSubs
             git pull origin main
             docker compose up -d --build --remove-orphans
