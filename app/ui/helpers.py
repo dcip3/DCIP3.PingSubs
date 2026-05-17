@@ -1559,7 +1559,6 @@ async def send_participants_editor(callback: CallbackQuery, db: Database, subscr
         builder.button(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
-            style="primary",
         )
         await callback.message.edit_text(
             "👥 Users:\nNo users in the database yet. Add someone first with <code>👥 Manage users</code>.",

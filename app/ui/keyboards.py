@@ -122,14 +122,12 @@ def build_members_list_keyboard(
                 InlineKeyboardButton(
                     text="⬅️ Back",
                     callback_data=MemberAction(action="page", friend_id=page - 1).pack(),
-                    style="primary",
                 )
             )
         nav_row.append(
             InlineKeyboardButton(
                 text=f"{page}/{total_pages}",
                 callback_data=MemberAction(action="page", friend_id=page).pack(),
-                style="primary",
             )
         )
         if page < total_pages:
@@ -137,12 +135,11 @@ def build_members_list_keyboard(
                 InlineKeyboardButton(
                     text="Next ▶️",
                     callback_data=MemberAction(action="page", friend_id=page + 1).pack(),
-                    style="primary",
                 )
             )
         rows.append(nav_row)
 
-    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger")])
+    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -178,9 +175,8 @@ def member_detail_keyboard(friend_id: int, *, is_pending: bool = False) -> Inlin
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=MemberAction(action="back", friend_id=friend_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -200,9 +196,8 @@ def member_balance_keyboard(friend_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -246,9 +241,8 @@ def member_balance_currency_keyboard(
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=MemberAction(action="balance", friend_id=friend_id).pack(),
-                style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -265,9 +259,8 @@ def member_delete_confirm_keyboard(friend_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -278,9 +271,8 @@ def member_report_keyboard(friend_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -328,9 +320,8 @@ def member_payment_destination_keyboard(
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
-                style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -368,7 +359,7 @@ def payment_destinations_keyboard(
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger")])
+    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -408,9 +399,8 @@ def payment_destination_detail_keyboard(
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=PaymentDestinationAction(action="menu", destination_id=0).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -427,9 +417,8 @@ def payment_destination_delete_keyboard(destination_id: int) -> InlineKeyboardMa
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=PaymentDestinationAction(action="open", destination_id=destination_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -442,7 +431,7 @@ def topup_request_submit_keyboard(request_id: int) -> InlineKeyboardMarkup:
         style="success",
     )
     builder.adjust(1)
-    builder.row(InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"))
+    builder.row(InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"))
     return builder.as_markup()
 
 
@@ -466,9 +455,8 @@ def topup_pending_requests_keyboard(requests: Sequence[Dict[str, object]]) -> In
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=PaymentDestinationAction(action="menu", destination_id=0).pack(),
-                style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -491,9 +479,8 @@ def topup_request_review_keyboard(request_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=TopUpAction(action="admin_list", request_id=0).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -514,7 +501,7 @@ def topup_destination_keyboard(
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger")])
+    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -529,7 +516,7 @@ def public_account_keyboard() -> InlineKeyboardMarkup:
         callback_data=TopUpAction(action="start", request_id=0).pack(),
     )
     builder.adjust(1)
-    builder.row(InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"))
+    builder.row(InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"))
     return builder.as_markup()
 
 
@@ -576,9 +563,8 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="back", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -602,9 +588,8 @@ def public_subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardM
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="public_back", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -615,9 +600,8 @@ def build_back_keyboard(subscription_id: int, back_action: str) -> InlineKeyboar
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action=back_action, subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -646,9 +630,8 @@ def subscription_open_cycles_keyboard(
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="more", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -676,9 +659,8 @@ def subscription_cycle_actions_keyboard(subscription_id: int, due_value: str) ->
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="cycles", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -710,9 +692,8 @@ def reminder_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -770,9 +751,8 @@ def participants_settings_keyboard(
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -796,9 +776,8 @@ def subscription_more_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -818,9 +797,8 @@ def subscription_payment_info_keyboard(subscription_id: int) -> InlineKeyboardMa
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -865,9 +843,8 @@ def subscription_payment_destination_keyboard(
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=SubscriptionAction(action="paymentinfo", subscription_id=subscription_id).pack(),
-                style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -933,9 +910,8 @@ def subscription_reminder_time_keyboard(
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-                style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -997,9 +973,8 @@ def public_subscription_reminder_time_keyboard(
             InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="open_public", subscription_id=subscription_id).pack(),
-            style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1027,9 +1002,8 @@ def reminder_send_targets_keyboard(
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -1061,14 +1035,12 @@ def settings_tests_keyboard(
                 InlineKeyboardButton(
                     text="⬅️ Back",
                     callback_data=TestListAction(action="page", page=page - 1).pack(),
-                    style="primary",
                 )
             )
         nav_row.append(
             InlineKeyboardButton(
                 text=f"{page}/{total_pages}",
                 callback_data=TestListAction(action="page", page=page).pack(),
-                style="primary",
             )
         )
         if page < total_pages:
@@ -1076,15 +1048,14 @@ def settings_tests_keyboard(
                 InlineKeyboardButton(
                     text="Next ▶️",
                     callback_data=TestListAction(action="page", page=page + 1).pack(),
-                    style="primary",
                 )
             )
         rows.append(nav_row)
 
     rows.append(
         [
-            InlineKeyboardButton(text="⬅️ Back", callback_data="settings:tests", style="primary"),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="⬅️ Back", callback_data="settings:tests"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1095,8 +1066,8 @@ def tests_menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="📬 Send test reminders", callback_data="tests:send")
     builder.adjust(1)
     builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -1127,9 +1098,8 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -1187,9 +1157,8 @@ def subscription_payment_mode_keyboard(
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
-                style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1235,9 +1204,8 @@ def subscription_user_amounts_keyboard(
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
-                style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1284,9 +1252,8 @@ def subscription_base_currency_keyboard(
         InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
-            style="primary",
         ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -1332,9 +1299,8 @@ def build_participants_keyboard(friends: Sequence[Dict[str, object]], subscripti
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
-                style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1358,7 +1324,7 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🧪 Tests", callback_data="settings:tests")
     builder.adjust(1)
     builder.row(
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -1376,8 +1342,8 @@ def settings_time_keyboard(current_time: str) -> InlineKeyboardMarkup:
     builder.button(text="Other", callback_data="settings:time_other")
     builder.adjust(2, 2, 1)
     builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -1408,8 +1374,8 @@ def settings_timezone_keyboard(current_timezone: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="Other", callback_data="settings:timezone_other")])
     rows.append(
         [
-            InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1424,7 +1390,7 @@ def public_settings_keyboard(
     builder.button(text="🌍 Timezone", callback_data="public_settings:timezone")
     builder.adjust(1)
     builder.row(
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -1482,9 +1448,8 @@ def public_subscription_currency_keyboard(
             InlineKeyboardButton(
             text="⬅️ Back",
             callback_data=SubscriptionAction(action="open_public", subscription_id=subscription_id).pack(),
-            style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1522,9 +1487,8 @@ def subscription_currency_keyboard(
             InlineKeyboardButton(
                 text="⬅️ Back",
                 callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
-                style="primary",
             ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1569,8 +1533,8 @@ def public_settings_time_keyboard(current_time: str, default_time: str) -> Inlin
     rows.append([default_button])
     rows.append(
         [
-            InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu", style="primary"),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1614,8 +1578,8 @@ def public_settings_timezone_keyboard(current_timezone: str, default_timezone: s
     rows.append([default_button])
     rows.append(
         [
-            InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu", style="primary"),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+            InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
+            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1638,8 +1602,8 @@ def settings_rounding_keyboard(current_mode: str) -> InlineKeyboardMarkup:
             builder.button(text=text, callback_data=f"settings_rounding:{mode}")
     builder.adjust(1)
     builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -1663,8 +1627,8 @@ def settings_notifications_keyboard(
             builder.button(text=text, callback_data=callback_data)
     builder.adjust(1)
     builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu", style="primary"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
 
@@ -1752,6 +1716,6 @@ def comment_edit_keyboard(
         dialog_cancel_inline_button(),
     )
     builder.row(
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close", style="danger"),
+        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
