@@ -1088,7 +1088,7 @@ async def handle_payments_report(message: Message, db: Database) -> None:
 
     await send_chunked_responder_text(
         message,
-        "\n\n".join(blocks),
+        "📊 Payments report:\n\n" + "\n\n".join(blocks),
         reply_markup=admin_reply_keyboard(),
     )
 

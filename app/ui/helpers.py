@@ -691,7 +691,7 @@ async def send_subscription_payment_report(
     )
     await send_chunked_responder_text(
         target,
-        text,
+        f"📊 Payments report:\n\n{text}",
         reply_markup=subscription_report_keyboard(subscription_id),
     )
 
@@ -863,7 +863,7 @@ async def send_public_subscription_payment_report(
     )
     await send_chunked_responder_text(
         target,
-        text,
+        f"📊 Payments report:\n\n{text}",
         reply_markup=public_subscription_report_keyboard(subscription_id),
     )
 
@@ -877,7 +877,7 @@ async def send_public_user_payment_report(
     if not blocks:
         await message.answer("No payments to report yet.")
         return
-    await send_chunked_responder_text(message, "\n\n".join(blocks))
+    await send_chunked_responder_text(message, "📊 Payments report:\n\n" + "\n\n".join(blocks))
 
 
 async def _build_user_payment_blocks(db: Database, telegram_id: int) -> list[str]:
@@ -903,10 +903,33 @@ async def _build_user_payment_blocks(db: Database, telegram_id: int) -> list[str
 
 def _format_due_distance(due_date: date, today: date) -> str:
     if due_date > today:
-        return f"in {(due_date - today).days} day(s)"
+        return f"in {(due_date - today).days} d"
     if due_date == today:
-        return "due today"
-    return f"overdue by {(today - due_date).days} day(s)"
+        return "today"
+    return f"{(today - due_date).days} d overdue"
+
+
+def _build_report_schedule_line(
+    last_paid_value: Optional[str],
+    next_charge: Optional[date],
+    today: date,
+    *,
+    extra: str = "",
+) -> str:
+    if last_paid_value and next_charge:
+        return (
+            f"Paid <code>{format_due_date(last_paid_value)}</code> → "
+            f"next <code>{format_due_date(next_charge.isoformat())}</code> "
+            f"({_format_due_distance(next_charge, today)}){extra}"
+        )
+    if next_charge:
+        return (
+            f"Next charge: <code>{format_due_date(next_charge.isoformat())}</code> "
+            f"({_format_due_distance(next_charge, today)}){extra}"
+        )
+    if last_paid_value:
+        return f"Paid <code>{format_due_date(last_paid_value)}</code>{extra}"
+    return ""
 
 
 def _resolve_report_cycle_participants(
@@ -946,18 +969,13 @@ async def _build_subscription_payment_report_text(
     except (KeyError, TypeError, ValueError):
         next_charge = None
 
-    lines = [
-        "📊 Payments report:",
-        f"Name: <code>{escape_html(subscription['name'])}</code>",
-    ]
+    safe_name = escape_html(str(subscription["name"]))
 
     if scope == "user":
         if user_id is None:
             raise ValueError("user_id is required when scope is 'user'")
 
         last_paid_value = await db.get_latest_paid_due_for_user(subscription_id, user_id)
-        if last_paid_value:
-            lines.append(f"✅ Last paid: <code>{format_due_date(last_paid_value)}</code>")
 
         unpaid: list[str] = []
         upcoming_paid = False
@@ -982,32 +1000,26 @@ async def _build_subscription_payment_report_text(
                     f"<code>{format_due_date(due_value)}</code> ({_format_due_distance(due, today)})"
                 )
 
-        if next_charge:
-            suffix = " — already paid ✅" if upcoming_paid else ""
-            lines.append(
-                f"⏭️ Next charge: <code>{format_due_date(next_charge.isoformat())}</code>"
-                f" ({_format_due_distance(next_charge, today)}){suffix}"
-            )
+        if next_charge and last_paid_value == next_charge.isoformat():
+            last_paid_value = None
+        lines = [f"{'🔴' if unpaid else '🟢'} <b>{safe_name}</b>"]
+        schedule_line = _build_report_schedule_line(
+            last_paid_value,
+            next_charge,
+            today,
+            extra=" ✅" if upcoming_paid else "",
+        )
+        if schedule_line:
+            lines.append(schedule_line)
         if unpaid:
-            lines.append("")
             lines.append("⚠️ Unpaid: " + ", ".join(unpaid))
-        elif last_paid_value or upcoming_paid:
-            lines.append("✅ You're all paid up.")
-        else:
-            lines.append("✅ Nothing due yet.")
         return "\n".join(lines)
 
     latest_closed = await db.get_latest_closed_cycle(subscription_id)
-    if latest_closed:
-        lines.append(
-            f"✅ Last paid cycle: <code>{format_due_date(str(latest_closed['due_date']))}</code>"
-        )
+    last_paid_value = str(latest_closed["due_date"]) if latest_closed else None
 
+    paid_progress = ""
     if next_charge:
-        next_line = (
-            f"⏭️ Next charge: <code>{format_due_date(next_charge.isoformat())}</code>"
-            f" ({_format_due_distance(next_charge, today)})"
-        )
         next_value = next_charge.isoformat()
         if next_value in open_cycles:
             cycle_participants = _resolve_report_cycle_participants(
@@ -1021,8 +1033,8 @@ async def _build_subscription_payment_report_text(
             }
             if participant_ids:
                 paid_count = len(participant_ids & paid_by_due.get(next_value, set()))
-                next_line += f" — paid {paid_count}/{len(participant_ids)}"
-        lines.append(next_line)
+                if paid_count:
+                    paid_progress = f" · {paid_count}/{len(participant_ids)} paid"
 
     unpaid_lines: list[str] = []
     for due_value in open_cycles:
@@ -1049,16 +1061,19 @@ async def _build_subscription_payment_report_text(
             for telegram_id in sorted(unpaid_ids, key=lambda tid: names_by_id[tid].lower())
         )
         unpaid_lines.append(
-            f"• <code>{format_due_date(due_value)}</code> — "
-            f"{_format_due_distance(due, today)}, waiting for: {names}"
+            f"⚠️ <code>{format_due_date(due_value)}</code> ({_format_due_distance(due, today)}): {names}"
         )
 
-    lines.append("")
-    if unpaid_lines:
-        lines.append("⚠️ Unpaid cycles:")
-        lines.extend(unpaid_lines)
-    else:
-        lines.append("✅ No unpaid cycles.")
+    lines = [f"{'🔴' if unpaid_lines else '🟢'} <b>{safe_name}</b>"]
+    schedule_line = _build_report_schedule_line(
+        last_paid_value,
+        next_charge,
+        today,
+        extra=paid_progress,
+    )
+    if schedule_line:
+        lines.append(schedule_line)
+    lines.extend(unpaid_lines)
     return "\n".join(lines)
 
 
