@@ -1951,29 +1951,22 @@ class Database:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
-    async def list_payment_activity_by_due_month(
+    async def get_latest_paid_due_for_user(
         self,
         subscription_id: int,
-        year: int,
-    ) -> List[Dict[str, Any]]:
+        telegram_id: int,
+    ) -> Optional[str]:
         assert self._conn is not None, "Database is not connected"
-        start_date = f"{year:04d}-01-01"
-        end_date = f"{year:04d}-12-31"
         cursor = await self._conn.execute(
             """
-            SELECT paid_by_telegram_id,
-                   substr(due_date, 1, 7) AS month
+            SELECT MAX(due_date)
             FROM payment_logs
-            WHERE subscription_id = ?
-              AND due_date >= ?
-              AND due_date <= ?
-              AND paid_by_telegram_id IS NOT NULL
-            GROUP BY paid_by_telegram_id, month
+            WHERE subscription_id = ? AND paid_by_telegram_id = ?
             """,
-            (subscription_id, start_date, end_date),
+            (subscription_id, telegram_id),
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        row = await cursor.fetchone()
+        return row[0] if row and row[0] else None
 
     async def ensure_cycle(self, subscription_id: int, due_date: date | str) -> None:
         assert self._conn is not None, "Database is not connected"

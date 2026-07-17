@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import unicodedata
 from datetime import date, datetime
 from typing import Dict, Optional, Sequence, Tuple, Union
 
@@ -59,6 +58,7 @@ from app.ui.states import Responder, SubscriptionAction
 from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
+    format_due_date,
     format_offsets_for_display,
     normalize_monthly_anchor_day,
     normalize_time_string,
@@ -70,32 +70,6 @@ from app.core.reminders import (
 from app.ui.text import escape_html, format_display_name
 
 MAX_TELEGRAM_MESSAGE_LEN = 3900
-
-
-def _display_width(value: str) -> int:
-    width = 0
-    for char in value:
-        if char == "\u200d":
-            continue
-        if "\U0001F3FB" <= char <= "\U0001F3FF":
-            continue
-        if unicodedata.combining(char):
-            continue
-        if unicodedata.category(char) in {"Cf", "Mn", "Me"}:
-            continue
-        width += 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
-    return width
-
-
-def _pad_preformatted_cell(value: str, width: int, *, align: str = "left") -> str:
-    padding = max(0, width - _display_width(value))
-    if align == "right":
-        left_padding = padding
-        right_padding = 0
-    else:
-        left_padding = 0
-        right_padding = padding
-    return f"{' ' * left_padding}{escape_html(value)}{' ' * right_padding}"
 
 
 def _build_user_info_text(
@@ -927,6 +901,25 @@ async def _build_user_payment_blocks(db: Database, telegram_id: int) -> list[str
     return blocks
 
 
+def _format_due_distance(due_date: date, today: date) -> str:
+    if due_date > today:
+        return f"in {(due_date - today).days} day(s)"
+    if due_date == today:
+        return "due today"
+    return f"overdue by {(today - due_date).days} day(s)"
+
+
+def _resolve_report_cycle_participants(
+    cycle_state: Dict[str, object],
+    live_participants: Sequence[Dict[str, object]],
+) -> list[Dict[str, object]]:
+    cycle_participants = list(cycle_state.get("participants") or [])
+    snapshot_ready = bool(cycle_state.get("snapshot_ready"))
+    if not cycle_participants and not snapshot_ready:
+        cycle_participants = list(live_participants)
+    return cycle_participants
+
+
 async def _build_subscription_payment_report_text(
     db: Database,
     subscription: Dict[str, object],
@@ -936,80 +929,137 @@ async def _build_subscription_payment_report_text(
     user_id: Optional[int] = None,
 ) -> str:
     today = datetime.today().date()
-    months = [f"{today.year:04d}-{month:02d}" for month in range(1, 13)]
-    month_labels = [
-        datetime.strptime(month_value, "%Y-%m").strftime("%b")[0] for month_value in months
-    ]
-
     subscription_id = int(subscription["id"])
-    due_date = datetime.strptime(subscription["next_charge_at"], "%Y-%m-%d").date()
-    await db.ensure_cycle(subscription_id, due_date)
-    period_days = int(subscription.get("period_days") or 30)
-    monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
-    while due_date < today:
-        due_date = calculate_next_charge_date(due_date, period_days, monthly_anchor_day)
-        await db.ensure_cycle(subscription_id, due_date)
 
     open_cycles = await db.list_open_cycles(subscription_id)
-    open_cycle_dates = [
-        datetime.strptime(value, "%Y-%m-%d").date() for value in open_cycles
-    ]
     payments_for_open = await db.list_payments_for_cycles(subscription_id, open_cycles)
-    paid_due_map = {
-        (row["due_date"], row["paid_by_telegram_id"])
-        for row in payments_for_open
-        if row.get("paid_by_telegram_id") is not None
-    }
+    paid_by_due: Dict[str, set[int]] = {}
+    for row in payments_for_open:
+        payer_id = row.get("paid_by_telegram_id")
+        if payer_id is None:
+            continue
+        paid_by_due.setdefault(str(row.get("due_date") or ""), set()).add(int(payer_id))
+    cycle_state_map = await db.list_cycle_participants_for_due_dates(subscription_id, open_cycles)
 
-    paid_rows = await db.list_payment_activity_by_due_month(subscription_id, today.year)
-    paid_month_map = {
-        (row["paid_by_telegram_id"], row["month"])
-        for row in paid_rows
-        if row.get("paid_by_telegram_id") is not None
-    }
+    try:
+        next_charge = datetime.strptime(str(subscription["next_charge_at"]), "%Y-%m-%d").date()
+    except (KeyError, TypeError, ValueError):
+        next_charge = None
+
+    lines = [
+        "📊 Payments report:",
+        f"Name: <code>{escape_html(subscription['name'])}</code>",
+    ]
 
     if scope == "user":
         if user_id is None:
             raise ValueError("user_id is required when scope is 'user'")
-        filtered = [p for p in participants if p["telegram_id"] == user_id]
+
+        last_paid_value = await db.get_latest_paid_due_for_user(subscription_id, user_id)
+        if last_paid_value:
+            lines.append(f"✅ Last paid: <code>{format_due_date(last_paid_value)}</code>")
+
+        unpaid: list[str] = []
+        upcoming_paid = False
+        for due_value in open_cycles:
+            try:
+                due = datetime.strptime(due_value, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            cycle_participants = _resolve_report_cycle_participants(
+                cycle_state_map.get(due_value) or {},
+                participants,
+            )
+            participant_ids = {int(p.get("telegram_id") or 0) for p in cycle_participants}
+            if user_id not in participant_ids:
+                continue
+            if user_id in paid_by_due.get(due_value, set()):
+                if due >= today:
+                    upcoming_paid = True
+                continue
+            if due <= today:
+                unpaid.append(
+                    f"<code>{format_due_date(due_value)}</code> ({_format_due_distance(due, today)})"
+                )
+
+        if next_charge:
+            suffix = " — already paid ✅" if upcoming_paid else ""
+            lines.append(
+                f"⏭️ Next charge: <code>{format_due_date(next_charge.isoformat())}</code>"
+                f" ({_format_due_distance(next_charge, today)}){suffix}"
+            )
+        if unpaid:
+            lines.append("")
+            lines.append("⚠️ Unpaid: " + ", ".join(unpaid))
+        elif last_paid_value or upcoming_paid:
+            lines.append("✅ You're all paid up.")
+        else:
+            lines.append("✅ Nothing due yet.")
+        return "\n".join(lines)
+
+    latest_closed = await db.get_latest_closed_cycle(subscription_id)
+    if latest_closed:
+        lines.append(
+            f"✅ Last paid cycle: <code>{format_due_date(str(latest_closed['due_date']))}</code>"
+        )
+
+    if next_charge:
+        next_line = (
+            f"⏭️ Next charge: <code>{format_due_date(next_charge.isoformat())}</code>"
+            f" ({_format_due_distance(next_charge, today)})"
+        )
+        next_value = next_charge.isoformat()
+        if next_value in open_cycles:
+            cycle_participants = _resolve_report_cycle_participants(
+                cycle_state_map.get(next_value) or {},
+                participants,
+            )
+            participant_ids = {
+                int(p.get("telegram_id") or 0)
+                for p in cycle_participants
+                if int(p.get("telegram_id") or 0) > 0
+            }
+            if participant_ids:
+                paid_count = len(participant_ids & paid_by_due.get(next_value, set()))
+                next_line += f" — paid {paid_count}/{len(participant_ids)}"
+        lines.append(next_line)
+
+    unpaid_lines: list[str] = []
+    for due_value in open_cycles:
+        try:
+            due = datetime.strptime(due_value, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if due > today:
+            continue
+        cycle_participants = _resolve_report_cycle_participants(
+            cycle_state_map.get(due_value) or {},
+            participants,
+        )
+        names_by_id: Dict[int, str] = {}
+        for person in cycle_participants:
+            telegram_id = int(person.get("telegram_id") or 0)
+            if telegram_id > 0:
+                names_by_id[telegram_id] = str(person.get("full_name") or f"User {telegram_id}")
+        unpaid_ids = set(names_by_id) - paid_by_due.get(due_value, set())
+        if not unpaid_ids:
+            continue
+        names = ", ".join(
+            escape_html(format_display_name(names_by_id[telegram_id]))
+            for telegram_id in sorted(unpaid_ids, key=lambda tid: names_by_id[tid].lower())
+        )
+        unpaid_lines.append(
+            f"• <code>{format_due_date(due_value)}</code> — "
+            f"{_format_due_distance(due, today)}, waiting for: {names}"
+        )
+
+    lines.append("")
+    if unpaid_lines:
+        lines.append("⚠️ Unpaid cycles:")
+        lines.extend(unpaid_lines)
     else:
-        filtered = list(participants)
-
-    names = [format_display_name(person.get("full_name")) for person in filtered]
-
-    name_width = max(_display_width("Name"), max(_display_width(name) for name in names))
-    month_cell_width = max(_display_width(symbol) for symbol in ("⬜", "🟩", "🟥"))
-    month_header = "".join(
-        _pad_preformatted_cell(label, month_cell_width, align="right")
-        for label in month_labels
-    )
-    header = f"{_pad_preformatted_cell('Name', name_width)} | {month_header}"
-    lines = [header]
-
-    for person, display_name in zip(filtered, names):
-        payer_id = person["telegram_id"]
-        squares = ""
-        for month in months:
-            month_overdue = False
-            for open_due in open_cycle_dates:
-                if open_due.strftime("%Y-%m") != month:
-                    continue
-                if open_due < today and (open_due.isoformat(), payer_id) not in paid_due_map:
-                    month_overdue = True
-                    break
-            if month_overdue:
-                squares += "🟥"
-            elif (payer_id, month) in paid_month_map:
-                squares += "🟩"
-            else:
-                squares += "⬜"
-        lines.append(f"{_pad_preformatted_cell(display_name, name_width)} | {squares}")
-
-    return (
-        "📊 Payments report:\n"
-        f"Name: <code>{escape_html(subscription['name'])}</code>\n"
-        + "<pre>" + "\n".join(lines) + "</pre>"
-    )
+        lines.append("✅ No unpaid cycles.")
+    return "\n".join(lines)
 
 
 def _share_details(
