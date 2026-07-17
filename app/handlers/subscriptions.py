@@ -39,6 +39,7 @@ from app.ui.helpers import (
 )
 from app.ui.keyboards import (
     admin_reply_keyboard,
+    build_due_date_change_keyboard,
     comment_edit_keyboard,
     dialog_cancel_inline_keyboard,
     subscription_payment_destination_keyboard,
@@ -50,6 +51,7 @@ from app.ui.keyboards import (
 )
 from app.ui.states import (
     CycleAction,
+    DueDateChangeAction,
     ReminderSendAction,
     Responder,
     SubscriptionAction,
@@ -58,6 +60,8 @@ from app.ui.states import (
 )
 from app.core.reminders import (
     DEFAULT_REMINDER_OFFSETS,
+    calculate_next_charge_date,
+    format_due_date,
     format_offsets_for_display,
     normalize_monthly_anchor_day,
     normalize_time_string,
@@ -1743,6 +1747,66 @@ async def edit_subscription_user_amount_all(message: Message, state: FSMContext,
     await send_subscription_user_amounts(message, db, int(subscription_id))
 
 
+async def _apply_due_date_change(db: Database, subscription: Dict[str, object], due_date) -> None:
+    sub_id = int(subscription["id"])
+    await db.discard_unpaid_open_cycles(sub_id, keep_due=due_date.isoformat())
+    update_fields: Dict[str, object] = {"next_charge_at": due_date}
+    if int(subscription.get("period_days") or 30) == MONTHLY_PERIOD_SENTINEL:
+        update_fields["monthly_anchor_day"] = due_date.day
+    await db.update_subscription_fields(sub_id, **update_fields)
+
+
+async def _find_due_date_conflict_cycle(
+    db: Database,
+    subscription: Dict[str, object],
+    due_date,
+) -> Optional[Dict[str, object]]:
+    """Return the cycle whose payments would be affected by moving the charge date.
+
+    Two cases matter:
+    - an open cycle that already has recorded payments (a reschedule must keep them);
+    - the latest closed (fully paid) cycle whose billing period still covers the
+      new date — asking everyone to pay again within the same period would be a
+      double charge.
+    """
+    sub_id = int(subscription["id"])
+    new_value = due_date.isoformat()
+
+    open_cycles = await db.list_open_cycles(sub_id)
+    paid_open: List[str] = []
+    for due_value in open_cycles:
+        if due_value == new_value:
+            continue
+        if await db.count_cycle_payments(sub_id, due_value) > 0:
+            paid_open.append(due_value)
+    if paid_open:
+        old_next = str(subscription.get("next_charge_at") or "")
+        candidate = old_next if old_next in paid_open else paid_open[0]
+        return {
+            "due_date": candidate,
+            "closed": False,
+            "payments": await db.count_cycle_payments(sub_id, candidate),
+        }
+
+    latest_closed = await db.get_latest_closed_cycle(sub_id)
+    if latest_closed:
+        closed_due_value = str(latest_closed["due_date"])
+        try:
+            closed_due = datetime.strptime(closed_due_value, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        period_days = int(subscription.get("period_days") or 30)
+        monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
+        period_end = calculate_next_charge_date(closed_due, period_days, monthly_anchor_day)
+        if closed_due < due_date < period_end:
+            return {
+                "due_date": closed_due_value,
+                "closed": True,
+                "payments": await db.count_cycle_payments(sub_id, closed_due_value),
+            }
+    return None
+
+
 @admin_router.message(SubscriptionEditForm.due_date)
 async def edit_subscription_due_date(message: Message, state: FSMContext, db: Database) -> None:
     sub_id = await require_edit_subscription_id(message, state)
@@ -1758,13 +1822,112 @@ async def edit_subscription_due_date(message: Message, state: FSMContext, db: Da
         return
 
     subscription = await db.get_subscription(sub_id)
-    update_fields: Dict[str, object] = {"next_charge_at": due_date}
-    if subscription and int(subscription.get("period_days") or 30) == MONTHLY_PERIOD_SENTINEL:
-        update_fields["monthly_anchor_day"] = due_date.day
-    await db.update_subscription_fields(sub_id, **update_fields)
+    if not subscription:
+        await state.clear()
+        await message.answer("Subscription not found.", reply_markup=admin_reply_keyboard())
+        return
+
+    conflict = await _find_due_date_conflict_cycle(db, subscription, due_date)
+    if conflict:
+        await state.clear()
+        conflict_due = str(conflict["due_date"])
+        if conflict["closed"]:
+            status_line = f"closed, all payments recorded ({conflict['payments']})"
+        else:
+            status_line = f"open, {conflict['payments']} payment(s) recorded"
+        await message.answer(
+            "📅 Change next charge date?\n"
+            f"Current cycle: <code>{format_due_date(conflict_due)}</code> — {status_line}.\n"
+            f"New date: <code>{format_due_date(due_date.isoformat())}</code>\n"
+            "\n"
+            "🔀 Move cycle — same billing period, payments carry over;\n"
+            "nobody is asked to pay again for this period.\n"
+            "🆕 New cycle — keep history at the old date and request\n"
+            "payments for the new date.",
+            reply_markup=build_due_date_change_keyboard(
+                sub_id,
+                conflict_due,
+                due_date.isoformat(),
+            ),
+        )
+        return
+
+    await _apply_due_date_change(db, subscription, due_date)
     await state.clear()
     await message.answer("Next charge date updated.", reply_markup=admin_reply_keyboard())
     await send_subscription_detail(message, db, sub_id)
+
+
+@admin_router.callback_query(DueDateChangeAction.filter(F.action == "move"))
+async def handle_due_date_move(
+    callback: CallbackQuery,
+    callback_data: DueDateChangeAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
+    if not subscription:
+        return
+    sub_id = int(subscription["id"])
+
+    cycle = await db.get_cycle(sub_id, callback_data.old_due)
+    if not cycle:
+        await callback.answer("The original cycle no longer exists.", show_alert=True)
+        return
+    try:
+        new_date = datetime.strptime(callback_data.new_due, "%Y-%m-%d").date()
+    except ValueError:
+        await callback.answer("Invalid date.", show_alert=True)
+        return
+
+    if not await db.move_cycle(sub_id, callback_data.old_due, callback_data.new_due):
+        await callback.answer(
+            "Cannot move: the target date already has recorded payments.",
+            show_alert=True,
+        )
+        return
+    await db.discard_unpaid_open_cycles(sub_id, keep_due=callback_data.new_due)
+
+    period_days = int(subscription.get("period_days") or 30)
+    update_fields: Dict[str, object] = {}
+    if period_days == MONTHLY_PERIOD_SENTINEL:
+        update_fields["monthly_anchor_day"] = new_date.day
+    if cycle.get("closed_at"):
+        monthly_anchor_day = new_date.day if period_days == MONTHLY_PERIOD_SENTINEL else None
+        update_fields["next_charge_at"] = calculate_next_charge_date(
+            new_date,
+            period_days,
+            monthly_anchor_day,
+        )
+    else:
+        update_fields["next_charge_at"] = new_date
+    await db.update_subscription_fields(sub_id, **update_fields)
+
+    await callback.answer("Cycle moved to the new date. Payments kept.")
+    await send_subscription_detail(callback, db, sub_id)
+
+
+@admin_router.callback_query(DueDateChangeAction.filter(F.action == "new"))
+async def handle_due_date_new_cycle(
+    callback: CallbackQuery,
+    callback_data: DueDateChangeAction,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
+    if not subscription:
+        return
+    try:
+        new_date = datetime.strptime(callback_data.new_due, "%Y-%m-%d").date()
+    except ValueError:
+        await callback.answer("Invalid date.", show_alert=True)
+        return
+
+    await _apply_due_date_change(db, subscription, new_date)
+    await callback.answer("New cycle scheduled for the new date.")
+    await send_subscription_detail(callback, db, int(subscription["id"]))
 
 
 @admin_router.message(SubscriptionEditForm.period)

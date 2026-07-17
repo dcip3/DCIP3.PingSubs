@@ -24,7 +24,8 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         return
 
     due_value = callback_data.due_date
-    await db.ensure_cycle(subscription["id"], due_value)
+    # Do not recreate the cycle here: a stale "Paid" button (after the cycle was
+    # moved, reset, or closed) must not resurrect a ghost cycle at the old date.
     open_cycles = await db.list_open_cycles(subscription["id"])
     if due_value not in open_cycles:
         await callback.answer("This payment cycle is already closed.", show_alert=True)

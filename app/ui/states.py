@@ -93,6 +93,13 @@ class CycleAction(CallbackData, prefix="cycle"):
     due_date: str
 
 
+class DueDateChangeAction(CallbackData, prefix="duedate"):
+    action: str
+    subscription_id: int
+    old_due: str
+    new_due: str
+
+
 class ParticipantAction(CallbackData, prefix="spart"):
     action: str
     subscription_id: int

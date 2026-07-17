@@ -2014,23 +2014,131 @@ class Database:
         )
         await self._conn.commit()
 
+    CYCLE_TABLES = (
+        "reminder_messages",
+        "reminder_suppressions",
+        "reminder_user_logs",
+        "reminder_logs",
+        "payment_logs",
+        "subscription_cycle_participants",
+        "subscription_cycles",
+    )
+
     async def reset_cycle(self, subscription_id: int, due_date: date | str) -> None:
         assert self._conn is not None, "Database is not connected"
         due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
-        for table_name in (
-            "reminder_messages",
-            "reminder_suppressions",
-            "reminder_user_logs",
-            "reminder_logs",
-            "payment_logs",
-            "subscription_cycle_participants",
-            "subscription_cycles",
-        ):
+        for table_name in self.CYCLE_TABLES:
             await self._conn.execute(
                 f"DELETE FROM {table_name} WHERE subscription_id = ? AND due_date = ?",
                 (subscription_id, due_value),
             )
         await self._conn.commit()
+
+    async def get_cycle(self, subscription_id: int, due_date: date | str) -> Optional[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
+        cursor = await self._conn.execute(
+            """
+            SELECT due_date, closed_at
+            FROM subscription_cycles
+            WHERE subscription_id = ? AND due_date = ?
+            """,
+            (subscription_id, due_value),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_latest_closed_cycle(self, subscription_id: int) -> Optional[Dict[str, Any]]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT due_date, closed_at
+            FROM subscription_cycles
+            WHERE subscription_id = ? AND closed_at IS NOT NULL
+            ORDER BY due_date DESC
+            LIMIT 1
+            """,
+            (subscription_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def count_cycle_payments(self, subscription_id: int, due_date: date | str) -> int:
+        assert self._conn is not None, "Database is not connected"
+        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
+        cursor = await self._conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM payment_logs
+            WHERE subscription_id = ? AND due_date = ? AND paid_by_telegram_id IS NOT NULL
+            """,
+            (subscription_id, due_value),
+        )
+        row = await cursor.fetchone()
+        return int(row[0] or 0)
+
+    async def discard_unpaid_open_cycles(
+        self,
+        subscription_id: int,
+        keep_due: Optional[str] = None,
+    ) -> List[str]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            """
+            SELECT c.due_date
+            FROM subscription_cycles c
+            WHERE c.subscription_id = ?
+              AND c.closed_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM payment_logs p
+                  WHERE p.subscription_id = c.subscription_id
+                    AND p.due_date = c.due_date
+                    AND p.paid_by_telegram_id IS NOT NULL
+              )
+            """,
+            (subscription_id,),
+        )
+        rows = await cursor.fetchall()
+        removed: List[str] = []
+        for row in rows:
+            due_value = row[0]
+            if keep_due is not None and due_value == keep_due:
+                continue
+            for table_name in self.CYCLE_TABLES:
+                await self._conn.execute(
+                    f"DELETE FROM {table_name} WHERE subscription_id = ? AND due_date = ?",
+                    (subscription_id, due_value),
+                )
+            removed.append(due_value)
+        await self._conn.commit()
+        return removed
+
+    async def move_cycle(
+        self,
+        subscription_id: int,
+        old_due: date | str,
+        new_due: date | str,
+    ) -> bool:
+        assert self._conn is not None, "Database is not connected"
+        old_value = old_due.isoformat() if isinstance(old_due, date) else str(old_due)
+        new_value = new_due.isoformat() if isinstance(new_due, date) else str(new_due)
+        if old_value == new_value:
+            return True
+        if await self.count_cycle_payments(subscription_id, new_value) > 0:
+            return False
+        for table_name in self.CYCLE_TABLES:
+            await self._conn.execute(
+                f"DELETE FROM {table_name} WHERE subscription_id = ? AND due_date = ?",
+                (subscription_id, new_value),
+            )
+        for table_name in self.CYCLE_TABLES:
+            await self._conn.execute(
+                f"UPDATE {table_name} SET due_date = ? WHERE subscription_id = ? AND due_date = ?",
+                (new_value, subscription_id, old_value),
+            )
+        await self._conn.commit()
+        return True
 
     async def list_open_cycles(self, subscription_id: int) -> List[str]:
         assert self._conn is not None, "Database is not connected"

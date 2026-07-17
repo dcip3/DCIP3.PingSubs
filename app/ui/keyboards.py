@@ -9,6 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.core.constants import PAYMENT_MODE_FIXED, PAYMENT_MODE_SPLIT
 from app.ui.states import (
     CycleAction,
+    DueDateChangeAction,
     MemberAction,
     ParticipantAction,
     PaymentDestinationAction,
@@ -1656,6 +1657,35 @@ def build_creation_payment_mode_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="Split by shares", callback_data=f"create_payment_mode:{PAYMENT_MODE_SPLIT}")
     builder.button(text="Fixed per user", callback_data=f"create_payment_mode:{PAYMENT_MODE_FIXED}")
     builder.adjust(2)
+    builder.row(dialog_cancel_inline_button())
+    return builder.as_markup()
+
+
+def build_due_date_change_keyboard(
+    subscription_id: int,
+    old_due: str,
+    new_due: str,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🔀 Move cycle (keep payments)",
+        callback_data=DueDateChangeAction(
+            action="move",
+            subscription_id=subscription_id,
+            old_due=old_due,
+            new_due=new_due,
+        ).pack(),
+    )
+    builder.button(
+        text="🆕 New cycle (request payments)",
+        callback_data=DueDateChangeAction(
+            action="new",
+            subscription_id=subscription_id,
+            old_due=old_due,
+            new_due=new_due,
+        ).pack(),
+    )
+    builder.adjust(1)
     builder.row(dialog_cancel_inline_button())
     return builder.as_markup()
 
