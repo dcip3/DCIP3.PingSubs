@@ -22,7 +22,7 @@ cd DCIP3.PingSubs
 cp .env.example .env
 ```
 
-In `.env`, set `BOT_TOKEN` and replace `ADMIN_IDS` with your numeric Telegram user ID.
+In `.env`, set `BOT_TOKEN` and put your numeric Telegram user ID into `ADMIN_IDS`.
 **Set the admin ID before the first launch:** with a fresh database and no configured
 admins, the first person to send `/start` becomes the administrator.
 
@@ -96,8 +96,15 @@ variables take precedence. The data directory is created automatically.
 | `TARGET_CURRENCY` | `RUB` | Default currency for conversions |
 | `CURRENCY_ROUNDING` | `precise` | `precise`, `floor`, `round`, or `ceil` |
 
-Currency, rounding, base reminder time, and timezone seed a new database. Saved
-settings take precedence on later starts; change them through the bot's **Settings**.
+Rounding, base reminder time, and timezone seed a new database and can be changed
+later in the admin **Settings**; saved values take precedence over the environment on
+later starts. `TARGET_CURRENCY` is stored on the first launch only; to change it later,
+update the `target_currency` row in the `settings` table of the database.
+
+Cross-currency amounts use exchange rates from [open.er-api.com](https://www.exchangerate-api.com)
+(the ExchangeRate-API open endpoint), fetched over outbound HTTPS and cached for six
+hours. It is the only external service besides Telegram. When it is unreachable,
+converted amounts are left out and only the original currency is shown.
 
 ## Using the bot
 
@@ -105,7 +112,8 @@ Send `/start` from an admin account, add members, and share their personal invit
 links. Create a subscription, assign members, and set its amount, billing period,
 and reminder schedule. Members can then view their account and confirm payments.
 
-In **Settings**, users can choose their currency, reminder time, and timezone.
+In **Settings**, users can choose their reminder time and timezone; a display
+currency can be picked per subscription from the subscription card.
 Reminders follow each recipient's timezone; subscription-specific times override
 base settings. Balance top-ups are credited after an admin confirms the transfer.
 
