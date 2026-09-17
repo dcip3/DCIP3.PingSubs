@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import html
 import json
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Iterable, List, Sequence
 from zoneinfo import ZoneInfo
 
@@ -10,6 +11,9 @@ from app.core.constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
 DEFAULT_REMINDER_TIME = "16:00"
 DEFAULT_REMINDER_TIMEZONE = "Europe/Moscow"
 DEFAULT_REMINDER_OFFSETS = [-1, 0]
+# Calendar dates are anchored at noon so that the day never flips for a
+# reader whose clock is within eleven hours of the subscription timezone.
+DUE_DATE_ANCHOR = time(12, 0)
 
 
 def normalize_monthly_anchor_day(value: object | None) -> int | None:
@@ -126,3 +130,49 @@ def format_due_date(value: str) -> str:
     except ValueError:
         return value
     return parsed.strftime(DATE_INPUT_FORMAT)
+
+
+def tg_time(moment: datetime, fmt: str, fallback: str) -> str:
+    """Render a Telegram date_time entity for the HTML parse mode.
+
+    Clients show the moment in the reader's own timezone and language; ``fmt``
+    follows the Bot API (``r`` relative, ``w`` weekday, ``d``/``D`` date,
+    ``t``/``T`` time). ``fallback`` is what older clients and notifications
+    display, so it must read well on its own. Naive datetimes are UTC.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (
+        f'<tg-time unix="{int(moment.timestamp())}" format="{fmt}">'
+        f"{html.escape(fallback, quote=False)}</tg-time>"
+    )
+
+
+def tg_due(due_value: str, tz_name: str | None, fmt: str = "wD", fallback: str | None = None) -> str:
+    """Render a ``YYYY-MM-DD`` due date as a localized date entity."""
+    try:
+        due = datetime.strptime(due_value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return html.escape(str(due_value), quote=False)
+    moment = datetime.combine(due, DUE_DATE_ANCHOR, tzinfo=parse_timezone(tz_name))
+    return tg_time(moment, fmt, fallback if fallback is not None else format_due_date(due_value))
+
+
+def due_status_html(due_value: str, tz_name: str | None, today: date) -> str:
+    """Render ``Due in N day(s)`` / ``Due today`` / ``Overdue by N day(s)``.
+
+    The relative part is a live entity on new clients (``in 3 days``,
+    ``2 days ago``) while the status word stays outside it so the meaning is
+    never lost; the due day itself is static text because a relative entity
+    would read as ``in 5 hours``.
+    """
+    try:
+        due = datetime.strptime(due_value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return "Unknown date"
+    if due == today:
+        return "Due today"
+    days = abs((due - today).days)
+    if due > today:
+        return "Due " + tg_due(due_value, tz_name, "r", f"in {days} day(s)")
+    return "Overdue " + tg_due(due_value, tz_name, "r", f"by {days} day(s)")
