@@ -57,7 +57,6 @@ from app.ui.states import Responder, SubscriptionAction
 from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
-    format_due_date,
     format_offsets_for_display,
     normalize_monthly_anchor_day,
     normalize_time_string,
@@ -65,10 +64,13 @@ from app.core.reminders import (
     parse_offsets,
     parse_time_string,
     parse_timezone,
+    tg_due,
 )
 from app.ui.text import escape_html, format_display_name
 
 MAX_TELEGRAM_MESSAGE_LEN = 3900
+BLOCKQUOTE_OPEN = "<blockquote expandable>"
+BLOCKQUOTE_CLOSE = "</blockquote>"
 
 
 def _build_user_info_text(
@@ -317,11 +319,28 @@ def _split_pre_block(block: str, limit: int) -> list[str]:
     return chunks
 
 
+def _merge_blockquote_blocks(blocks: Sequence[str]) -> list[str]:
+    """Re-join blank-line separated pieces that belong to one <blockquote>.
+
+    A quote must never be cut in the middle, or the HTML of both halves breaks;
+    report builders keep each quote under the message limit for this reason.
+    """
+    merged: list[str] = []
+    depth = 0
+    for block in blocks:
+        if depth > 0 and merged:
+            merged[-1] = f"{merged[-1]}\n\n{block}"
+        else:
+            merged.append(block)
+        depth = max(0, depth + block.count("<blockquote") - block.count(BLOCKQUOTE_CLOSE))
+    return merged
+
+
 def split_text_chunks(text: str, limit: int = MAX_TELEGRAM_MESSAGE_LEN) -> list[str]:
     if len(text) <= limit:
         return [text]
 
-    blocks = text.split("\n\n")
+    blocks = _merge_blockquote_blocks(text.split("\n\n"))
     chunks: list[str] = []
     current = ""
     for block in blocks:
@@ -668,10 +687,11 @@ async def send_subscription_payment_report(
         subscription,
         participants,
         scope="all",
+        tz_name=await resolve_report_timezone(db),
     )
     await send_chunked_responder_text(
         target,
-        f"📊 Payments report:\n\n{text}",
+        assemble_payments_report([text]),
         reply_markup=subscription_report_keyboard(subscription_id),
     )
 
@@ -840,12 +860,19 @@ async def send_public_subscription_payment_report(
         participants,
         scope="user",
         user_id=telegram_id,
+        tz_name=await resolve_report_timezone(db),
     )
     await send_chunked_responder_text(
         target,
-        f"📊 Payments report:\n\n{text}",
+        assemble_payments_report([text]),
         reply_markup=public_subscription_report_keyboard(subscription_id),
     )
+
+
+# A member overview collapses its on-track tail once it lists more than four subscriptions.
+MEMBER_REPORT_COLLAPSE_MIN_TOTAL = 5
+# An admin overview collapses its on-track tail once three or more subscriptions are green.
+ADMIN_REPORT_COLLAPSE_MIN_GREEN = 3
 
 
 async def send_public_user_payment_report(
@@ -853,14 +880,21 @@ async def send_public_user_payment_report(
     db: Database,
     telegram_id: int,
 ) -> None:
-    blocks = await _build_user_payment_blocks(db, telegram_id)
+    blocks = await _build_user_payment_blocks(db, telegram_id, await resolve_report_timezone(db))
     if not blocks:
         await message.answer("No payments to report yet.")
         return
-    await send_chunked_responder_text(message, "📊 Payments report:\n\n" + "\n\n".join(blocks))
+    await send_chunked_responder_text(
+        message,
+        assemble_payments_report(blocks, collapse_min_total=MEMBER_REPORT_COLLAPSE_MIN_TOTAL),
+    )
 
 
-async def _build_user_payment_blocks(db: Database, telegram_id: int) -> list[str]:
+async def _build_user_payment_blocks(
+    db: Database,
+    telegram_id: int,
+    tz_name: Optional[str] = DEFAULT_REMINDER_TIMEZONE,
+) -> list[str]:
     subs = await db.list_subscriptions_for_user(telegram_id)
     if not subs:
         return []
@@ -876,9 +910,71 @@ async def _build_user_payment_blocks(db: Database, telegram_id: int) -> list[str
             participants,
             scope="user",
             user_id=telegram_id,
+            tz_name=tz_name,
         )
         blocks.append(block)
     return blocks
+
+
+async def resolve_report_timezone(db: Database) -> str:
+    """The base timezone that decides which calendar day counts as "today" in reports."""
+    return normalize_timezone_name(
+        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
+        DEFAULT_REMINDER_TIMEZONE,
+    ) or DEFAULT_REMINDER_TIMEZONE
+
+
+def payments_report_header(attention_count: int) -> str:
+    if attention_count <= 0:
+        return "📊 Payments report"
+    verb = "needs" if attention_count == 1 else "need"
+    return f"📊 Payments report · <b>{attention_count} {verb} attention</b>"
+
+
+def _is_attention_block(block: str) -> bool:
+    return block.startswith("🔴")
+
+
+def _collapse_report_blocks(blocks: Sequence[str], limit: int = MAX_TELEGRAM_MESSAGE_LEN) -> list[str]:
+    """Wrap on-track blocks in expandable quotes, each small enough to stay whole."""
+
+    def wrap(items: Sequence[str]) -> str:
+        return BLOCKQUOTE_OPEN + "\n\n".join(items) + BLOCKQUOTE_CLOSE
+
+    quotes: list[str] = []
+    current: list[str] = []
+    for block in blocks:
+        if len(wrap([block])) > limit:
+            if current:
+                quotes.append(wrap(current))
+                current = []
+            quotes.append(block)
+            continue
+        if current and len(wrap(current + [block])) > limit:
+            quotes.append(wrap(current))
+            current = []
+        current.append(block)
+    if current:
+        quotes.append(wrap(current))
+    return quotes
+
+
+def assemble_payments_report(
+    blocks: Sequence[str],
+    *,
+    collapse_min_green: Optional[int] = None,
+    collapse_min_total: Optional[int] = None,
+) -> str:
+    """Header plus blocks, red ones first; the green tail collapses only next to a red block."""
+    attention = [block for block in blocks if _is_attention_block(block)]
+    on_track = [block for block in blocks if not _is_attention_block(block)]
+    collapse = bool(attention) and (
+        (collapse_min_green is not None and len(on_track) >= collapse_min_green)
+        or (collapse_min_total is not None and len(blocks) >= collapse_min_total)
+    )
+    sections = [payments_report_header(len(attention)), *attention]
+    sections.extend(_collapse_report_blocks(on_track) if collapse else on_track)
+    return "\n\n".join(sections)
 
 
 def _format_due_distance(due_date: date, today: date) -> str:
@@ -889,26 +985,44 @@ def _format_due_distance(due_date: date, today: date) -> str:
     return f"{(today - due_date).days} d overdue"
 
 
+def _format_report_distance(due_value: str, due_date: date, today: date, tz_name: Optional[str]) -> str:
+    """Live "in N d" for future dates; overdue text stays server-side so the word is never lost."""
+    distance = _format_due_distance(due_date, today)
+    if due_date > today:
+        return tg_due(due_value, tz_name, "r", distance)
+    return distance
+
+
+def _format_report_due(due_value: str, due_date: date, today: date, tz_name: Optional[str]) -> str:
+    date_html = tg_due(due_value, tz_name, "wd")
+    if due_date < today:
+        date_html = f"<b>{date_html}</b>"
+    return f"{date_html} ({_format_report_distance(due_value, due_date, today, tz_name)})"
+
+
 def _build_report_schedule_line(
     last_paid_value: Optional[str],
     next_charge: Optional[date],
     today: date,
+    tz_name: Optional[str] = DEFAULT_REMINDER_TIMEZONE,
     *,
     extra: str = "",
 ) -> str:
     if last_paid_value and next_charge:
+        next_value = next_charge.isoformat()
         return (
-            f"Paid <code>{format_due_date(last_paid_value)}</code> → "
-            f"next <code>{format_due_date(next_charge.isoformat())}</code> "
-            f"({_format_due_distance(next_charge, today)}){extra}"
+            f"Paid {tg_due(last_paid_value, tz_name, 'wd')} → "
+            f"next {tg_due(next_value, tz_name, 'wd')} "
+            f"({_format_report_distance(next_value, next_charge, today, tz_name)}){extra}"
         )
     if next_charge:
+        next_value = next_charge.isoformat()
         return (
-            f"Next charge: <code>{format_due_date(next_charge.isoformat())}</code> "
-            f"({_format_due_distance(next_charge, today)}){extra}"
+            f"Next charge: {tg_due(next_value, tz_name, 'wd')} "
+            f"({_format_report_distance(next_value, next_charge, today, tz_name)}){extra}"
         )
     if last_paid_value:
-        return f"Paid <code>{format_due_date(last_paid_value)}</code>{extra}"
+        return f"Paid {tg_due(last_paid_value, tz_name, 'wd')}{extra}"
     return ""
 
 
@@ -930,8 +1044,9 @@ async def _build_subscription_payment_report_text(
     *,
     scope: str,
     user_id: Optional[int] = None,
+    tz_name: Optional[str] = DEFAULT_REMINDER_TIMEZONE,
 ) -> str:
-    today = datetime.today().date()
+    today = datetime.now(parse_timezone(tz_name)).date()
     subscription_id = int(subscription["id"])
 
     open_cycles = await db.list_open_cycles(subscription_id)
@@ -976,9 +1091,7 @@ async def _build_subscription_payment_report_text(
                     upcoming_paid = True
                 continue
             if due <= today:
-                unpaid.append(
-                    f"<code>{format_due_date(due_value)}</code> ({_format_due_distance(due, today)})"
-                )
+                unpaid.append(_format_report_due(due_value, due, today, tz_name))
 
         if next_charge and last_paid_value == next_charge.isoformat():
             last_paid_value = None
@@ -987,6 +1100,7 @@ async def _build_subscription_payment_report_text(
             last_paid_value,
             next_charge,
             today,
+            tz_name,
             extra=" ✅" if upcoming_paid else "",
         )
         if schedule_line:
@@ -1040,15 +1154,14 @@ async def _build_subscription_payment_report_text(
             escape_html(format_display_name(names_by_id[telegram_id]))
             for telegram_id in sorted(unpaid_ids, key=lambda tid: names_by_id[tid].lower())
         )
-        unpaid_lines.append(
-            f"⚠️ <code>{format_due_date(due_value)}</code> ({_format_due_distance(due, today)}): {names}"
-        )
+        unpaid_lines.append(f"⚠️ {_format_report_due(due_value, due, today, tz_name)}: {names}")
 
     lines = [f"{'🔴' if unpaid_lines else '🟢'} <b>{safe_name}</b>"]
     schedule_line = _build_report_schedule_line(
         last_paid_value,
         next_charge,
         today,
+        tz_name,
         extra=paid_progress,
     )
     if schedule_line:
@@ -1345,7 +1458,7 @@ async def send_member_report(target: Responder, db: Database, friend_id: int) ->
             reply_markup=member_report_keyboard(friend_id),
         )
         return
-    blocks = await _build_user_payment_blocks(db, friend["telegram_id"])
+    blocks = await _build_user_payment_blocks(db, friend["telegram_id"], await resolve_report_timezone(db))
     if not blocks:
         await respond_with_markup(
             target,
@@ -1355,7 +1468,7 @@ async def send_member_report(target: Responder, db: Database, friend_id: int) ->
         return
     await send_chunked_responder_text(
         target,
-        "\n\n".join(blocks),
+        assemble_payments_report(blocks, collapse_min_total=MEMBER_REPORT_COLLAPSE_MIN_TOTAL),
         reply_markup=member_report_keyboard(friend_id),
     )
 

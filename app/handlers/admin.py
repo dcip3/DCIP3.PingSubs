@@ -27,7 +27,10 @@ from app.ui.keyboards import (
     settings_timezone_keyboard,
 )
 from app.ui.helpers import (
+    ADMIN_REPORT_COLLAPSE_MIN_GREEN,
     _build_subscription_payment_report_text,
+    assemble_payments_report,
+    resolve_report_timezone,
     send_chunked_responder_text,
     send_public_account_detail,
     send_public_subscription_detail,
@@ -1075,6 +1078,7 @@ async def handle_payments_report(message: Message, db: Database) -> None:
         await message.answer("No subscriptions yet.", reply_markup=admin_reply_keyboard())
         return
 
+    tz_name = await resolve_report_timezone(db)
     blocks: list[str] = []
     for sub in subscriptions:
         participants = await db.list_subscription_participants(sub["id"])
@@ -1085,6 +1089,7 @@ async def handle_payments_report(message: Message, db: Database) -> None:
             sub,
             participants,
             scope="all",
+            tz_name=tz_name,
         )
         blocks.append(block)
 
@@ -1094,7 +1099,7 @@ async def handle_payments_report(message: Message, db: Database) -> None:
 
     await send_chunked_responder_text(
         message,
-        "📊 Payments report:\n\n" + "\n\n".join(blocks),
+        assemble_payments_report(blocks, collapse_min_green=ADMIN_REPORT_COLLAPSE_MIN_GREEN),
         reply_markup=admin_reply_keyboard(),
     )
 
