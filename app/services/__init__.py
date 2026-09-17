@@ -1183,7 +1183,7 @@ async def reminder_worker(
     bot: Bot,
     db: Database,
     converter: CurrencyConverter,
-    interval_seconds: int = 3600,
+    interval_seconds: int = 60,
     rounding_mode: str = "precise",
 ) -> None:
     logger = logging.getLogger("reminder_worker")

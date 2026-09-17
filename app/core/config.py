@@ -35,7 +35,7 @@ class Settings:
 
         db_path = Path(os.getenv("DATABASE_PATH", "data/app.db"))
 
-        interval_raw = os.getenv("REMINDER_CHECK_INTERVAL", "3600")
+        interval_raw = os.getenv("REMINDER_CHECK_INTERVAL", "60")
         try:
             reminder_interval = int(interval_raw)
             if reminder_interval <= 0:

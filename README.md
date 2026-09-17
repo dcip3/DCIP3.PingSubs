@@ -88,7 +88,7 @@ variables take precedence. The data directory is created automatically.
 | `BOT_TOKEN` | Required | Telegram bot token from @BotFather |
 | `ADMIN_IDS` | Empty | Admin Telegram user IDs, separated by commas; set before first launch |
 | `DATABASE_PATH` | `data/app.db` | SQLite database path |
-| `REMINDER_CHECK_INTERVAL` | `3600` | Seconds between reminder checks |
+| `REMINDER_CHECK_INTERVAL` | `60` | Seconds between reminder checks, clamped to 5-60 |
 | `BASE_REMINDER_TIME` | `16:00` | Default reminder time, `HH:MM` |
 | `BASE_TIMEZONE` | `Europe/Moscow` | Default IANA timezone, e.g. `Europe/Belgrade` |
 | `TARGET_CURRENCY` | `RUB` | Default currency for conversions |
