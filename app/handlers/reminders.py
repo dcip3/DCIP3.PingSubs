@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, DisabledButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.core.constants import PAYMENT_MODE_FIXED
 from app.core.reminders import format_due_date, normalize_monthly_anchor_day
@@ -17,6 +17,44 @@ from app.core.reminders import calculate_next_charge_date
 from . import public_router
 
 logger = logging.getLogger(__name__)
+
+PAID_BUTTON_PREFIX = "✅ "
+
+
+def mark_paid_button(
+    markup: InlineKeyboardMarkup | None,
+    tapped_callback_data: str | None,
+) -> tuple[InlineKeyboardMarkup | None, int]:
+    """Grey out the tapped "Paid" button and keep every other row as it is.
+
+    Returns the rebuilt markup (``None`` when the tapped button is not in the
+    keyboard) and the number of callback buttons still waiting for a tap. Only
+    callback buttons count: copy-text and URL rows never make a reminder look
+    like it still has an unpaid item.
+    """
+    if markup is None or not markup.inline_keyboard or not tapped_callback_data:
+        return None, 0
+    rows: list[list[InlineKeyboardButton]] = []
+    found = False
+    remaining = 0
+    for row in markup.inline_keyboard:
+        new_row: list[InlineKeyboardButton] = []
+        for button in row:
+            if not found and button.callback_data == tapped_callback_data:
+                label = button.text
+                if label.startswith(PAID_BUTTON_PREFIX):
+                    label = label[len(PAID_BUTTON_PREFIX):]
+                paid_text = "☑️ Paid" if label == "Paid" else f"☑️ Paid · {label}"
+                new_row.append(InlineKeyboardButton(text=paid_text, disabled=DisabledButton()))
+                found = True
+                continue
+            if button.callback_data:
+                remaining += 1
+            new_row.append(button)
+        rows.append(new_row)
+    if not found:
+        return None, remaining
+    return InlineKeyboardMarkup(inline_keyboard=rows), remaining
 
 
 @public_router.callback_query(ReminderAction.filter())
@@ -89,14 +127,26 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
                 await db.update_subscription_fields(subscription["id"], next_charge_at=next_due)
     await callback.answer("Payment recorded. Thank you!")
     if callback.message:
-        button_count = 0
-        if callback.message.reply_markup and callback.message.reply_markup.inline_keyboard:
-            button_count = sum(len(row) for row in callback.message.reply_markup.inline_keyboard)
-        if button_count <= 1:
-            await callback.message.edit_text(
-                "Payment recorded."
-                f" Payment for {format_due_date(due_value)} confirmed."
-            )
+        updated_markup, remaining_buttons = mark_paid_button(
+            getattr(callback.message, "reply_markup", None),
+            callback.data,
+        )
+        if updated_markup is not None:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=updated_markup)
+            except TelegramAPIError as exc:
+                logger.warning(
+                    "Cannot grey out the Paid button for user %s (message %s): %s",
+                    user_id,
+                    callback.message.message_id,
+                    exc,
+                )
+            else:
+                logger.debug(
+                    "Paid button greyed out for user %s; %s callback button(s) left",
+                    user_id,
+                    remaining_buttons,
+                )
 
     notify_paid = await db.get_setting_bool("notify_admin_paid", True)
     notify_closed = await db.get_setting_bool("notify_admin_closed", True)

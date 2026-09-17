@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Dict, Iterable, Sequence
+from urllib.parse import urlsplit
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    CopyTextButton,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.core.constants import PAYMENT_MODE_FIXED, PAYMENT_MODE_SPLIT
@@ -21,6 +29,76 @@ from app.ui.states import (
     TestSendAction,
     TopUpAction,
 )
+
+# A maximal run of digits with single spaces or dashes between them. The run is
+# taken whole (no backtracking into a shorter tail) and then filtered by digit
+# count, so a grouped 20-digit bank account never yields a 16-digit "card".
+DIGIT_RUN_RE = re.compile(r"(?<!\w)\d(?:[ \-]?\d)*(?![ \-]?\d)(?!\w)")
+CARD_NUMBER_MIN_DIGITS = 13
+CARD_NUMBER_MAX_DIGITS = 19
+# An IBAN-like token (compact "DE89370400440532013000" or grouped "DE89 3704 0044 ...").
+IBAN_RE = re.compile(r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}(?![A-Z0-9])", re.IGNORECASE)
+COPY_TEXT_MAX_LEN = 256
+PAYMENT_LINK_WEB_SCHEMES = {"http", "https"}
+PAYMENT_LINK_TG_SCHEME = "tg"
+
+
+def extract_copyable_requisite(details: str) -> tuple[str, str] | None:
+    """Pick the one thing worth a copy button out of free-form payment details.
+
+    Returns ``(button_label, text_to_copy)``: the first card-like number (digits
+    only) wins; otherwise, when an IBAN-like token is present, the whole
+    details text trimmed to Telegram's copy limit. ``None`` means no button.
+    """
+    text = (details or "").strip()
+    if not text:
+        return None
+    iban_spans = [match.span() for match in IBAN_RE.finditer(text)]
+    # Blank out IBANs before the card search so a grouped IBAN's digit tail is
+    # not mistaken for a card number.
+    masked = list(text)
+    for start, end in iban_spans:
+        masked[start:end] = " " * (end - start)
+    masked_text = "".join(masked)
+    for match in DIGIT_RUN_RE.finditer(masked_text):
+        digits = re.sub(r"\D", "", match.group(0))
+        if CARD_NUMBER_MIN_DIGITS <= len(digits) <= CARD_NUMBER_MAX_DIGITS:
+            return f"📋 Copy card number ···{digits[-4:]}", digits
+    if iban_spans:
+        return "📋 Copy details", text[:COPY_TEXT_MAX_LEN]
+    return None
+
+
+def is_openable_payment_link(link: str) -> bool:
+    """True when the link is safe to put into an inline ``url=`` button.
+
+    Telegram rejects the whole message (BUTTON_URL_INVALID) for a malformed
+    button URL, so anything doubtful stays a plain text line instead.
+    """
+    link = (link or "").strip()
+    if not link or any(ch.isspace() or ord(ch) < 32 for ch in link):
+        return False
+    parts = urlsplit(link)
+    scheme = parts.scheme.lower()
+    if scheme in PAYMENT_LINK_WEB_SCHEMES:
+        return bool(parts.netloc)
+    if scheme == PAYMENT_LINK_TG_SCHEME:
+        return bool(parts.netloc or parts.path)
+    return False
+
+
+def payment_requisite_rows(payment_details: str = "", payment_link: str = "") -> list[list[InlineKeyboardButton]]:
+    """Rows that go above the "Paid" buttons: copy-requisite and open-link, when available."""
+    rows: list[list[InlineKeyboardButton]] = []
+    requisite = extract_copyable_requisite(payment_details)
+    if requisite is not None:
+        label, copy_value = requisite
+        rows.append([InlineKeyboardButton(text=label, copy_text=CopyTextButton(text=copy_value))])
+    link = (payment_link or "").strip()
+    if is_openable_payment_link(link):
+        rows.append([InlineKeyboardButton(text="🔗 Open payment link", url=link)])
+    return rows
+
 
 COMMON_TIMEZONES = (
     "Europe/Moscow",
@@ -424,14 +502,21 @@ def payment_destination_delete_keyboard(destination_id: int) -> InlineKeyboardMa
     return builder.as_markup()
 
 
-def topup_request_submit_keyboard(request_id: int) -> InlineKeyboardMarkup:
+def topup_request_submit_keyboard(
+    request_id: int,
+    payment_details: str = "",
+    payment_link: str = "",
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✅ I paid",
-        callback_data=TopUpAction(action="submit", request_id=request_id).pack(),
-        style="success",
+    for row in payment_requisite_rows(payment_details, payment_link):
+        builder.row(*row)
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ I paid",
+            callback_data=TopUpAction(action="submit", request_id=request_id).pack(),
+            style="success",
+        )
     )
-    builder.adjust(1)
     builder.row(InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"))
     return builder.as_markup()
 
@@ -1620,43 +1705,66 @@ def build_due_date_change_keyboard(
     return builder.as_markup()
 
 
-def build_payment_confirmation_keyboard(subscription_id: int, due_date: date | str) -> InlineKeyboardMarkup:
+def build_payment_confirmation_keyboard(
+    subscription_id: int,
+    due_date: date | str,
+    payment_details: str = "",
+    payment_link: str = "",
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    for row in payment_requisite_rows(payment_details, payment_link):
+        builder.row(*row)
     due_str = due_date if isinstance(due_date, str) else due_date.isoformat()
-    builder.button(
-        text="✅ Paid",
-        callback_data=ReminderAction(subscription_id=subscription_id, due_date=due_str).pack(),
-        style="success",
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Paid",
+            callback_data=ReminderAction(subscription_id=subscription_id, due_date=due_str).pack(),
+            style="success",
+        )
     )
-    builder.adjust(1)
     return builder.as_markup()
 
 
-def build_batch_payment_confirmation_keyboard(items: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
+def build_batch_payment_confirmation_keyboard(
+    items: Sequence[Dict[str, object]],
+    payment_details: str = "",
+    payment_link: str = "",
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    for row in payment_requisite_rows(payment_details, payment_link):
+        builder.row(*row)
     for item in items:
         due_date = item.get("due_date")
         due_str = due_date if isinstance(due_date, str) else due_date.isoformat()
         label = str(item.get("subscription_label") or item.get("subscription_name") or "Subscription")
         due_hint = str(item.get("due_date_text") or due_str)
-        builder.button(
-            text=f"✅ {label} · {due_hint}",
-            callback_data=ReminderAction(subscription_id=int(item["subscription_id"]), due_date=due_str).pack(),
-            style="success",
+        builder.row(
+            InlineKeyboardButton(
+                text=f"✅ {label} · {due_hint}",
+                callback_data=ReminderAction(subscription_id=int(item["subscription_id"]), due_date=due_str).pack(),
+                style="success",
+            )
         )
-    builder.adjust(1)
     return builder.as_markup()
 
 
-def build_test_payment_confirmation_keyboard(subscription_id: int, due_date: date | str) -> InlineKeyboardMarkup:
+def build_test_payment_confirmation_keyboard(
+    subscription_id: int,
+    due_date: date | str,
+    payment_details: str = "",
+    payment_link: str = "",
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    for row in payment_requisite_rows(payment_details, payment_link):
+        builder.row(*row)
     due_str = due_date if isinstance(due_date, str) else due_date.isoformat()
-    builder.button(
-        text="✅ Paid",
-        callback_data=TestPaidAction(subscription_id=subscription_id, due_date=due_str).pack(),
-        style="success",
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Paid",
+            callback_data=TestPaidAction(subscription_id=subscription_id, due_date=due_str).pack(),
+            style="success",
+        )
     )
-    builder.adjust(1)
     return builder.as_markup()
 
 

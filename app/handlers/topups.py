@@ -830,7 +830,11 @@ async def handle_public_topup_amount(
         return
     await message.answer(
         _format_topup_user_text(request, submitted=False),
-        reply_markup=topup_request_submit_keyboard(request_id),
+        reply_markup=topup_request_submit_keyboard(
+            request_id,
+            payment_details=str(request.get("destination_details") or ""),
+            payment_link=str(request.get("destination_link") or ""),
+        ),
     )
 
 
