@@ -1,9 +1,10 @@
 name: Deploy to VDS
 
 on:
-  push:
-    branches:
-      - main
+  workflow_run:
+    workflows: ["Repository checks"]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -14,15 +15,21 @@ concurrency:
 
 jobs:
   deploy:
+    if: >-
+      github.repository == 'dcip3/DCIP3.PingSubs'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.VDS_HOST }}
           username: ${{ secrets.VDS_USER }}
           key: ${{ secrets.VDS_SSH_KEY }}
           script: |
+            set -euo pipefail
             cd /opt/DCIP3.PingSubs
-            git pull origin main
+            git fetch --prune origin main
+            git reset --hard origin/main
             docker compose up -d --build --remove-orphans

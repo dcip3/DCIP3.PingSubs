@@ -48,11 +48,13 @@ Stop with `docker compose down`. Back up `data/` while the bot is stopped, and k
 <details>
 <summary>Optional: GitHub Actions deployment</summary>
 
-[deploy.yml](.github/workflows/deploy.yml) deploys pushes to `main` over SSH.
-Prepare a working installation at `/opt/DCIP3.PingSubs` on the server and configure
-the repository secrets `VDS_HOST`, `VDS_USER`, and `VDS_SSH_KEY`. The SSH user needs
-access to that directory, Git, and Docker; `.env` and `data/` remain on the server.
-For a private repository, the server also needs GitHub read access.
+[deploy.yml](.github/workflows/deploy.yml) deploys `main` over SSH after the
+repository checks pass. Prepare a working installation at `/opt/DCIP3.PingSubs` on
+the server and configure the repository secrets `VDS_HOST`, `VDS_USER`, and
+`VDS_SSH_KEY`. The SSH user needs access to that directory, Git, and Docker; `.env`
+and `data/` remain on the server. The deployment resets the server checkout to
+`origin/main`, so keep local changes out of that directory. For a private
+repository, the server also needs GitHub read access.
 
 </details>
 
