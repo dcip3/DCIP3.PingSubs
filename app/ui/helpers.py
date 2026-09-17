@@ -184,6 +184,76 @@ def _next_charge_html(next_value: str, tz_name: str, today: date) -> str:
     return f"{text} ({tg_due(next_value, tz_name, 'r', f'in {days} d')})"
 
 
+def _approx_money(amount: float, currency: object) -> str:
+    return f"<b>≈ {amount:.2f} {escape_html(str(currency))}</b>"
+
+
+def _quote(lines: Sequence[str]) -> str:
+    """Wrap card lines into one plain (non-expandable) blockquote."""
+    body = "\n".join(lines)
+    return f"<blockquote>{body}</blockquote>"
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _cadence_text(subscription: Dict[str, object]) -> str:
+    if subscription["period_days"] == MONTHLY_PERIOD_SENTINEL:
+        return "Every month on the same day"
+    return f"Every {escape_html(str(subscription['period_days']))} days"
+
+
+def _next_charge_line(next_value: str, tz_name: str, today: date) -> str:
+    """Bold localized next-charge date with its distance from today.
+
+    Future dates get a live relative entity ("in 14 d" fallback); a charge due
+    today or already overdue is labelled with static text, so no client
+    renders it as "in 3 hours" / "2 hours ago".
+    """
+    text = f"<b>{tg_due(next_value, tz_name, 'wD')}</b>"
+    try:
+        due_date = datetime.strptime(next_value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return text
+    if due_date == today:
+        return f"{text} (today)"
+    days = abs((due_date - today).days)
+    if due_date < today:
+        return f"{text} ({days} d overdue)"
+    return f"{text} ({tg_due(next_value, tz_name, 'r', f'in {days} d')})"
+
+
+def _amount_line(subscription: Dict[str, object]) -> str:
+    """Bold amount line, plus "· shown in X" when the conversion currency differs."""
+    currency = str(subscription["currency"]).upper()
+    base_currency = str(subscription.get("base_currency") or currency).strip().upper() or currency
+    line = f"💰 {_money(float(subscription['amount']), currency)}"
+    if base_currency != currency:
+        line += f" · shown in {escape_html(base_currency)}"
+    return line
+
+
+def _users_summary_line(
+    subscription: Dict[str, object],
+    participants: Sequence[Dict[str, object]],
+    payment_mode: str,
+) -> str:
+    """Users count and payment mode, with the users total (fixed) or share count and value (split)."""
+    users_text = f"👥 <b>{_plural(len(participants), 'user')}</b>"
+    if payment_mode == PAYMENT_MODE_FIXED:
+        users_total = _sum_users_total(subscription, participants)
+        return f"{users_text} · fixed per user, total {_money(users_total, subscription['currency'])}"
+    if not participants and not int(subscription.get("share_limit") or 0):
+        return f"{users_text} · split by shares"
+    split_share_base = _split_share_base(subscription, participants)
+    per_person = float(subscription["amount"]) / split_share_base
+    return (
+        f"{users_text} · split by shares, {_plural(split_share_base, 'share')} × "
+        f"{_approx_money(per_person, subscription['currency'])}"
+    )
+
+
 def _participants_block(
     subscription: Dict[str, object],
     participants: Sequence[Dict[str, object]],
@@ -192,16 +262,37 @@ def _participants_block(
     if not participants:
         return "No users yet."
     subscription_amount = float(subscription.get("amount") or 0.0)
+    per_person = subscription_amount / _split_share_base(subscription, participants)
     lines = []
     for person in participants:
         weight = int(person.get("share_weight") or 1)
-        weight_text = f" (x{weight})" if weight > 1 else ""
-        amount_text = ""
+        weight_text = f" ×{weight}" if weight > 1 else ""
         if payment_mode == PAYMENT_MODE_FIXED:
             fixed_amount = _effective_fixed_amount(subscription_amount, person.get("fixed_amount"))
-            amount_text = f" — {_money(fixed_amount * weight, subscription['currency'])}"
-        lines.append(f"• {escape_html(person['full_name'])}{weight_text}{amount_text}")
+            amount_text = _money(fixed_amount * weight, subscription["currency"])
+        else:
+            amount_text = _approx_money(per_person * weight, subscription["currency"])
+        lines.append(f"• {escape_html(person['full_name'])}{weight_text} — {amount_text}")
     return "\n".join(lines)
+
+
+def _users_quote(subscription: Dict[str, object], participants: Sequence[Dict[str, object]]) -> str:
+    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
+    return _quote(
+        [
+            _users_summary_line(subscription, participants, payment_mode),
+            _participants_block(subscription, participants, payment_mode),
+        ]
+    )
+
+
+def _reminder_summary(reminder_time: str, tz_name: str, subscription: Dict[str, object]) -> str:
+    """Time, timezone, reminder days and the post-due flag on one line (no emoji: each card adds its own)."""
+    offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
+    return (
+        f"{escape_html(reminder_time)} {escape_html(tz_name)} · {escape_html(offsets_text)}"
+        f" · after due: {_on_off(subscription.get('remind_after_due'))}"
+    )
 
 
 def _subscription_payment_label(
@@ -226,16 +317,27 @@ def _payment_info_lines(
     payment_details: str,
     payment_link: str,
     comment_value: str,
+    *,
+    compact: bool = False,
 ) -> list[str]:
-    lines = [f"💳 Payment: {escape_html(payment_label)}"]
+    """Payment block: label, one <code> per requisite line, link and comment.
+
+    ``compact`` is the card variant: the "Payment:"/"Comment:" words are
+    dropped and a comment that merely repeats the requisites is skipped.
+    """
+    label_prefix = "💳 " if compact else "💳 Payment: "
+    lines = [f"{label_prefix}{escape_html(payment_label)}"]
     for detail_line in payment_details.splitlines():
         detail_line = detail_line.strip()
         if detail_line:
             lines.append(f"<code>{escape_html(detail_line)}</code>")
     if payment_link:
         lines.append(f"🔗 Link: {escape_html(payment_link)}")
+    if compact and " ".join(comment_value.split()) == " ".join(payment_details.split()):
+        comment_value = ""
     if comment_value:
-        lines.append(f"📝 Comment: {escape_html(comment_value)}")
+        comment_prefix = "📝 " if compact else "📝 Comment: "
+        lines.append(f"{comment_prefix}{escape_html(comment_value)}")
     return lines
 
 
@@ -535,23 +637,14 @@ async def send_public_subscription_detail(
             ).isoformat()
         except ValueError:
             pass
-    next_charge = tg_due(next_charge_value, reminder_timezone, "wD")
     payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
-    _, share_text = _share_details(subscription, participants)
     split_share_base = _split_share_base(subscription, participants)
     per_person = subscription["amount"] / split_share_base
-    users_total = _sum_users_total(subscription, participants)
     person_by_telegram: dict[int, Dict[str, object]] = {
         int(person["telegram_id"]): person
         for person in participants
         if person.get("telegram_id") is not None
     }
-    participants_text = _participants_block(subscription, participants, payment_mode)
-
-    if subscription["period_days"] == MONTHLY_PERIOD_SENTINEL:
-        cadence = "every month on the same calendar day"
-    else:
-        cadence = f"every {subscription['period_days']} days"
 
     admin_base_time = parse_time_string(
         await db.get_effective_base_reminder_time(),
@@ -568,10 +661,11 @@ async def send_public_subscription_detail(
             admin_base_time,
         ).strftime("%H:%M")
     default_reminder_time = subscription_override or user_base_time
-    if user_sub_override:
-        reminder_time_display = f"<code>{escape_html(user_sub_override)}</code>"
-    else:
-        reminder_time_display = f"Default (<code>{escape_html(default_reminder_time)}</code>)"
+    reminder_time_display = (
+        f"<code>{escape_html(user_sub_override or default_reminder_time)}</code> ({escape_html(reminder_timezone)})"
+    )
+    if not user_sub_override:
+        reminder_time_display += " · default"
 
     default_target_currency = str(
         subscription.get("base_currency") or subscription.get("currency") or "RUB"
@@ -588,7 +682,7 @@ async def send_public_subscription_detail(
     if user_target_currency:
         my_currency_display = user_target_currency
     else:
-        my_currency_display = f"Default ({default_target_currency})"
+        my_currency_display = f"{default_target_currency} (default)"
 
     my_amount_display = "n/a"
     if user_id is not None:
@@ -603,65 +697,44 @@ async def send_public_subscription_detail(
                 my_amount_display = _money(fixed_amount * weight, subscription["currency"])
             else:
                 my_amount_display = _money(per_person * weight, subscription["currency"])
-    offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
     comment_value = (subscription.get("comment") or "").strip()
     payment_destination = await db.get_effective_subscription_payment_destination(subscription_id)
     payment_label = _subscription_payment_label(subscription, payment_destination)
     payment_details = str(payment_destination.get("details") or "").strip() if payment_destination else ""
     payment_link = str(payment_destination.get("payment_link") or "").strip() if payment_destination else ""
 
+    # Member card: title, then one blockquote per section; admin viewers also
+    # get the subscription amount, the users block and the reminder days.
+    summary_lines = []
+    if is_admin_view:
+        summary_lines.append(_amount_line(subscription))
+    summary_lines.extend(
+        [
+            f"💵 My amount: {my_amount_display} · reminders in {escape_html(my_currency_display)}",
+            f"📅 Next charge: {_next_charge_line(next_charge_value, reminder_timezone, today)}",
+            f"🔁 {_cadence_text(subscription)}",
+        ]
+    )
+    quotes = [_quote(summary_lines)]
+    if is_admin_view:
+        quotes.append(_users_quote(subscription, participants))
     if unpaid_overdue:
-        overdue_lines = "\n".join(
-            f"• <b>{tg_due(value, reminder_timezone, 'wD')}</b>" for value in unpaid_overdue
+        quotes.append(
+            _quote(
+                ["⚠️ Overdue", *(f"• <b>{tg_due(value, reminder_timezone, 'wD')}</b>" for value in unpaid_overdue)]
+            )
         )
-        overdue_block = f"⚠️ Overdue Cycles:\n{overdue_lines}"
-    else:
-        overdue_block = ""
-
-    sections = [
-        "Subscription Info:",
-        f"🏷️ Name: <b>{escape_html(subscription['name'])}</b>",
-    ]
+    reminder_line = f"⏰ {reminder_time_display}"
     if is_admin_view:
-        sections.append(f"💰 Amount: {_money(float(subscription['amount']), subscription['currency'])}")
-    sections.extend(
-        [
-            f"💱 My currency: {escape_html(my_currency_display)}",
-            f"💵 My amount: {my_amount_display}",
-            "",
-            "Cycle Info:",
-            f"📅 Next charge: {next_charge}",
-            f"🔁 Cadence: {escape_html(cadence)}",
-        ]
-    )
-    if is_admin_view:
-        sections.insert(5, f"💳 Payment mode: {'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}")
-        if payment_mode == PAYMENT_MODE_FIXED:
-            sections.insert(6, f"💰 Users total: {_money(users_total, subscription['currency'])}")
-        else:
-            sections.insert(6, f"💵 Per share: ≈ {_money(per_person, subscription['currency'])}")
-            sections.insert(7, f"➗ Split mode: {escape_html(share_text)}")
-    if overdue_block:
-        sections.extend(["", overdue_block])
-    sections.extend(
-        [
-            "",
-            "Reminder Info:",
-            f"⏰ Time: {reminder_time_display} ({escape_html(reminder_timezone)})",
-        ]
-    )
-    sections.extend(["", *_payment_info_lines(payment_label, payment_details, payment_link, comment_value)])
-    if is_admin_view:
-        sections.extend(
-            [
-                f"🔔 Days: {escape_html(offsets_text)}",
-                f"📣 Post-due: {_on_off(subscription.get('remind_after_due'))}",
-                "",
-                f"Users ({len(participants)}):",
-                participants_text,
-            ]
+        offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
+        reminder_line += (
+            f" · {escape_html(offsets_text)} · after due: {_on_off(subscription.get('remind_after_due'))}"
         )
-    text = "\n".join(sections)
+    quotes.append(_quote([reminder_line]))
+    quotes.append(
+        _quote(_payment_info_lines(payment_label, payment_details, payment_link, comment_value, compact=True))
+    )
+    text = "\n".join([f"<b>🏷️ {escape_html(subscription['name'])}</b>", "", *quotes])
     await respond_with_markup(
         target,
         text,
@@ -1208,60 +1281,32 @@ def _build_subscription_detail_text(
     payment_details: str,
     payment_link: str,
 ) -> str:
-    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
-    split_share_base = _split_share_base(subscription, participants)
-    _, share_text = _share_details(subscription, participants)
-    per_person = subscription["amount"] / split_share_base
-    users_total = _sum_users_total(subscription, participants)
+    """Admin card: title, then one blockquote per section and the open-cycle count."""
     comment_value = (subscription.get("comment") or "").strip()
-    participants_text = _participants_block(subscription, participants, payment_mode)
-
-    if subscription["period_days"] == MONTHLY_PERIOD_SENTINEL:
-        cadence = "every month on the same calendar day"
-    else:
-        cadence = f"every {subscription['period_days']} days"
-
+    today = datetime.now(parse_timezone(base_timezone)).date()
     override_time = normalize_time_string(subscription.get("reminder_time"))
-    reminder_time = f"{override_time or base_time} ({base_timezone})"
-    offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
+    reminder_time = override_time or base_time
 
-    lines = [
-        f"🏷️ Name: <b>{escape_html(subscription['name'])}</b>",
-        "",
-        "💰 Pricing & schedule:",
-        f"💰 Amount: {_money(float(subscription['amount']), subscription['currency'])}",
-        f"💱 Currency: {escape_html(str(subscription['currency']).upper())}",
-        f"🌐 Convert currency: {escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}",
-        f"📅 Next charge: {tg_due(str(subscription['next_charge_at']), base_timezone, 'wD')}",
-        f"🔁 Period: {escape_html(cadence)}",
-        "",
-        "👥 Participants:",
-        f"💳 Payment mode: {'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}",
-        f"👥 Users: {len(participants)}",
+    quotes = [
+        _quote(
+            [
+                _amount_line(subscription),
+                f"📅 Next charge: {_next_charge_line(str(subscription['next_charge_at']), base_timezone, today)}",
+                f"🔁 {_cadence_text(subscription)}",
+            ]
+        ),
+        _users_quote(subscription, participants),
+        _quote([f"🔔 {_reminder_summary(reminder_time, base_timezone, subscription)}"]),
+        _quote(_payment_info_lines(payment_label, payment_details, payment_link, comment_value, compact=True)),
     ]
-    if payment_mode == PAYMENT_MODE_FIXED:
-        lines.append(f"💰 Users total: {_money(users_total, subscription['currency'])}")
-    else:
-        lines.append(f"💵 Per share: ≈ {_money(per_person, subscription['currency'])}")
-        lines.append(f"➗ Split mode: {escape_html(share_text)}")
-
-    lines.extend(
+    return "\n".join(
         [
+            f"<b>🏷️ {escape_html(subscription['name'])}</b>",
             "",
-            f"Users ({len(participants)}):",
-            participants_text,
-            "",
-            "🔔 Reminders:",
-            f"⏰ Time: {escape_html(reminder_time)}",
-            f"🔔 Days: {escape_html(offsets_text)}",
-            f"📣 Post-due: {_on_off(subscription.get('remind_after_due'))}",
-            "",
-            "📊 Reports & more:",
-            f"🗂 Open cycles: {open_cycles_count}",
+            *quotes,
+            f"🗂 Open cycles: <b>{open_cycles_count}</b>",
         ]
     )
-    lines.extend(["", *_payment_info_lines(payment_label, payment_details, payment_link, comment_value)])
-    return "\n".join(lines)
 
 
 async def send_subscription_detail(target: Responder, db: Database, subscription_id: int) -> None:
