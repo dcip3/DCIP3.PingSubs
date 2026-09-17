@@ -13,3 +13,4 @@ Dockerfile text eol=lf
 requirements.txt text eol=lf
 .python-version text eol=lf
 *.jpg binary
+requirements-dev.txt text eol=lf
