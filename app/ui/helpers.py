@@ -1346,9 +1346,7 @@ async def send_member_list(
     lines = ["👥 Users:", "Choose a user to manage:"]
     for idx, friend in enumerate(page_friends, start + 1):
         status_suffix = " (pending)" if friend.get("telegram_id") is None else ""
-        lines.append(f"{idx}. <code>{escape_html(friend['full_name'])}{status_suffix}</code>")
-    if total_pages > 1:
-        lines.append(f"Page: <code>{page}/{total_pages}</code>")
+        lines.append(f"{idx}. <b>{escape_html(friend['full_name'])}</b>{status_suffix}")
 
     await respond_with_markup(
         target,
@@ -1599,9 +1597,7 @@ async def send_test_user_list(
 
     lines = ["🧪 Tests:", "Choose a user to send the test message:"]
     for idx, friend in enumerate(page_friends, start + 1):
-        lines.append(f"{idx}. <code>{escape_html(str(friend['full_name']))}</code>")
-    if total_pages > 1:
-        lines.append(f"Page: <code>{page}/{total_pages}</code>")
+        lines.append(f"{idx}. <b>{escape_html(str(friend['full_name']))}</b>")
     await respond_with_markup(
         target,
         "\n".join(lines),

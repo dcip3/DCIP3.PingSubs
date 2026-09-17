@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from aiogram.types import (
     CopyTextButton,
+    DisabledButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -147,8 +148,52 @@ def dialog_cancel_inline_button() -> InlineKeyboardButton:
     return InlineKeyboardButton(text="Cancel", callback_data="dialog:cancel", style="danger")
 
 
-def dialog_cancel_inline_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[dialog_cancel_inline_button()]])
+def dialog_cancel_inline_keyboard(force_reply: bool = True) -> InlineKeyboardMarkup:
+    """Cancel-only keyboard for text prompts.
+
+    ``force_reply=True`` opens the reply box on the client, so it is only valid
+    on a freshly sent prompt (``message.answer``); pass ``False`` when the
+    keyboard is attached through ``edit_text``/``edit_reply_markup``.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[dialog_cancel_inline_button()]],
+        force_reply=True if force_reply else None,
+    )
+
+
+def _prompt_markup(builder: InlineKeyboardBuilder, force_reply: bool) -> InlineKeyboardMarkup:
+    """Export a builder as markup; ``as_markup(force_reply=...)`` silently drops the flag."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=builder.export(),
+        force_reply=True if force_reply else None,
+    )
+
+
+def pagination_row(
+    page: int,
+    total_pages: int,
+    *,
+    previous_callback: str,
+    next_callback: str,
+) -> list[InlineKeyboardButton]:
+    """A stable three-button row: ◀️, "n / N" counter, ▶️.
+
+    Arrows that cannot move further are rendered disabled instead of being
+    dropped, so the row keeps its shape and the counter never jumps.
+    """
+    if page > 1:
+        previous_button = InlineKeyboardButton(text="◀️", callback_data=previous_callback)
+    else:
+        previous_button = InlineKeyboardButton(text="◀️", disabled=DisabledButton())
+    if page < total_pages:
+        next_button = InlineKeyboardButton(text="▶️", callback_data=next_callback)
+    else:
+        next_button = InlineKeyboardButton(text="▶️", disabled=DisabledButton())
+    return [
+        previous_button,
+        InlineKeyboardButton(text=f"{page} / {total_pages}", disabled=DisabledButton()),
+        next_button,
+    ]
 
 
 def build_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
@@ -197,28 +242,14 @@ def build_members_list_keyboard(
         rows.append(friend_buttons[index : index + columns])
 
     if total_pages > 1:
-        nav_row: list[InlineKeyboardButton] = []
-        if page > 1:
-            nav_row.append(
-                InlineKeyboardButton(
-                    text="⬅️ Back",
-                    callback_data=MemberAction(action="page", friend_id=page - 1).pack(),
-                )
-            )
-        nav_row.append(
-            InlineKeyboardButton(
-                text=f"{page}/{total_pages}",
-                callback_data=MemberAction(action="page", friend_id=page).pack(),
+        rows.append(
+            pagination_row(
+                page,
+                total_pages,
+                previous_callback=MemberAction(action="page", friend_id=page - 1).pack(),
+                next_callback=MemberAction(action="page", friend_id=page + 1).pack(),
             )
         )
-        if page < total_pages:
-            nav_row.append(
-                InlineKeyboardButton(
-                    text="Next ▶️",
-                    callback_data=MemberAction(action="page", friend_id=page + 1).pack(),
-                )
-            )
-        rows.append(nav_row)
 
     rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1113,28 +1144,14 @@ def settings_tests_keyboard(
         rows.append(friend_buttons[index : index + columns])
 
     if total_pages > 1:
-        nav_row: list[InlineKeyboardButton] = []
-        if page > 1:
-            nav_row.append(
-                InlineKeyboardButton(
-                    text="⬅️ Back",
-                    callback_data=TestListAction(action="page", page=page - 1).pack(),
-                )
-            )
-        nav_row.append(
-            InlineKeyboardButton(
-                text=f"{page}/{total_pages}",
-                callback_data=TestListAction(action="page", page=page).pack(),
+        rows.append(
+            pagination_row(
+                page,
+                total_pages,
+                previous_callback=TestListAction(action="page", page=page - 1).pack(),
+                next_callback=TestListAction(action="page", page=page + 1).pack(),
             )
         )
-        if page < total_pages:
-            nav_row.append(
-                InlineKeyboardButton(
-                    text="Next ▶️",
-                    callback_data=TestListAction(action="page", page=page + 1).pack(),
-                )
-            )
-        rows.append(nav_row)
 
     rows.append(
         [
@@ -1236,7 +1253,12 @@ def subscription_user_amounts_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def user_amount_clear_keyboard(subscription_id: int, friend_id: int) -> InlineKeyboardMarkup:
+def user_amount_clear_keyboard(
+    subscription_id: int,
+    friend_id: int,
+    *,
+    force_reply: bool = True,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
         text="Clear",
@@ -1245,7 +1267,7 @@ def user_amount_clear_keyboard(subscription_id: int, friend_id: int) -> InlineKe
     )
     builder.adjust(1)
     builder.row(dialog_cancel_inline_button())
-    return builder.as_markup()
+    return _prompt_markup(builder, force_reply)
 
 
 def subscription_base_currency_keyboard(
@@ -1331,13 +1353,13 @@ def build_participants_keyboard(friends: Sequence[Dict[str, object]], subscripti
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_currency_keyboard(options: Iterable[str]) -> InlineKeyboardMarkup:
+def build_currency_keyboard(options: Iterable[str], *, force_reply: bool = True) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for code in options:
         builder.button(text=code.upper(), callback_data=f"currency:{code.upper()}")
     builder.adjust(3)
     builder.row(dialog_cancel_inline_button())
-    return builder.as_markup()
+    return _prompt_markup(builder, force_reply)
 
 
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
@@ -1658,22 +1680,22 @@ def settings_notifications_keyboard(
     return builder.as_markup()
 
 
-def build_period_keyboard() -> InlineKeyboardMarkup:
+def build_period_keyboard(*, force_reply: bool = True) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for days in (7, 14, 30, 90):
         builder.button(text=f"{days} d", callback_data=f"period:{days}")
     builder.button(text="Monthly", callback_data="period:month")
     builder.adjust(2)
     builder.row(dialog_cancel_inline_button())
-    return builder.as_markup()
+    return _prompt_markup(builder, force_reply)
 
 
-def build_share_limit_keyboard() -> InlineKeyboardMarkup:
+def build_share_limit_keyboard(*, force_reply: bool = True) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Split across all", callback_data="sharelimit:all")
     builder.adjust(1)
     builder.row(dialog_cancel_inline_button())
-    return builder.as_markup()
+    return _prompt_markup(builder, force_reply)
 
 
 def build_creation_payment_mode_keyboard() -> InlineKeyboardMarkup:
@@ -1780,7 +1802,10 @@ def build_test_payment_confirmation_keyboard(
 def comment_edit_keyboard(
     subscription_id: int,
     has_comment: bool,
+    *,
+    force_reply: bool = False,
 ) -> InlineKeyboardMarkup:
+    """Comment prompt keyboard; ``force_reply`` only when sent as a fresh message (never on edit paths)."""
     builder = InlineKeyboardBuilder()
     if has_comment:
         builder.row(
@@ -1795,4 +1820,4 @@ def comment_edit_keyboard(
     builder.row(
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
-    return builder.as_markup()
+    return _prompt_markup(builder, force_reply)

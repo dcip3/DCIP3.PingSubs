@@ -312,7 +312,8 @@ async def subscription_form_title(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Amount:\n"
         "Send charge amount.\n"
-        "Example: <code>149.99</code>."
+        "Example: <code>149.99</code>.",
+        reply_markup=dialog_cancel_inline_keyboard(),
     )
 
 
@@ -344,7 +345,8 @@ async def subscription_form_currency(message: Message, state: FSMContext) -> Non
     await state.set_state(SubscriptionForm.due_date)
     await message.answer(
         "Next Charge Date:\n"
-        "Send date in <code>DD.MM.YYYY</code>."
+        "Send date in <code>DD.MM.YYYY</code>.",
+        reply_markup=dialog_cancel_inline_keyboard(),
     )
 
 
@@ -361,7 +363,8 @@ async def handle_currency_quick_select(
         await state.set_state(SubscriptionForm.due_date)
         await callback.message.answer(
             "Next Charge Date:\n"
-            "Send date in <code>DD.MM.YYYY</code>."
+            "Send date in <code>DD.MM.YYYY</code>.",
+            reply_markup=dialog_cancel_inline_keyboard(),
         )
         await callback.answer(f"Currency set to {raw_value}")
         return
@@ -1463,7 +1466,8 @@ async def _open_comment_editor(
     await state.set_state(SubscriptionEditForm.comment)
     await state.update_data(edit_subscription_id=int(subscription_id))
     prompt = _comment_prompt_text(current_value)
-    markup = comment_edit_keyboard(subscription_id, bool(current_value))
+    # force_reply is only valid on a freshly sent prompt, never on edit_text.
+    markup = comment_edit_keyboard(subscription_id, bool(current_value), force_reply=not edit_existing)
     if callback.message:
         if edit_existing:
             await callback.message.edit_text(prompt, reply_markup=markup)
