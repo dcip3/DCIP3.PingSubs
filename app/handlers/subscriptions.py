@@ -1538,11 +1538,12 @@ async def handle_subscription_delete_prompt(
 ) -> None:
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="✅ Yes, delete",
+        text="🗑 Yes, delete",
         callback_data=SubscriptionAction(
             action="confirm_delete",
             subscription_id=callback_data.subscription_id,
         ).pack(),
+        style="danger",
     )
     builder.button(
         text="⬅️ Back",

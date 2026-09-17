@@ -156,6 +156,7 @@ def build_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> Inlin
     builder.button(
         text="➕ New subscription",
         callback_data=SubscriptionAction(action="create", subscription_id=0).pack(),
+        style="primary",
     )
     for sub in subs:
         label = f"{sub['name']} ({sub['amount']:.2f} {sub['currency']})"
@@ -179,6 +180,7 @@ def build_members_list_keyboard(
             InlineKeyboardButton(
                 text="➕ Add user",
                 callback_data=MemberAction(action="add", friend_id=0).pack(),
+                style="primary",
             )
         ]
     ]
@@ -265,6 +267,7 @@ def member_balance_keyboard(friend_id: int) -> InlineKeyboardMarkup:
     builder.button(
         text="✏️ Set",
         callback_data=MemberAction(action="balance_set", friend_id=friend_id).pack(),
+        style="primary",
     )
     builder.button(
         text="💱 Currency",
@@ -330,8 +333,9 @@ def member_balance_currency_keyboard(
 def member_delete_confirm_keyboard(friend_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="✅ Yes, delete",
+        text="🗑 Yes, delete",
         callback_data=MemberAction(action="confirm_delete", friend_id=friend_id).pack(),
+        style="danger",
     )
     builder.adjust(1)
     builder.row(
@@ -416,6 +420,7 @@ def payment_destinations_keyboard(
             InlineKeyboardButton(
                 text="➕ Add payment method",
                 callback_data=PaymentDestinationAction(action="create", destination_id=0).pack(),
+                style="primary",
             )
         ],
         [
@@ -487,7 +492,7 @@ def payment_destination_detail_keyboard(
 def payment_destination_delete_keyboard(destination_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="✅ Delete",
+        text="🗑 Yes, delete",
         callback_data=PaymentDestinationAction(action="confirm_delete", destination_id=destination_id).pack(),
         style="danger",
     )
@@ -600,6 +605,7 @@ def public_account_keyboard() -> InlineKeyboardMarkup:
     builder.button(
         text="➕ Top up",
         callback_data=TopUpAction(action="start", request_id=0).pack(),
+        style="primary",
     )
     builder.adjust(1)
     builder.row(InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"))
@@ -772,6 +778,7 @@ def reminder_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder.button(
         text="📬 Send reminders now",
         callback_data=SubscriptionAction(action="reminders_send", subscription_id=subscription_id).pack(),
+        style="primary",
     )
     builder.adjust(1)
     builder.row(
@@ -1064,6 +1071,7 @@ def reminder_send_targets_keyboard(
     builder.button(
         text="📬 All",
         callback_data=ReminderSendAction(subscription_id=subscription_id, telegram_id=0).pack(),
+        style="primary",
     )
     for person in participants:
         builder.button(
@@ -1139,7 +1147,7 @@ def settings_tests_keyboard(
 
 def tests_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📬 Send test reminders", callback_data="tests:send")
+    builder.button(text="📬 Send test reminders", callback_data="tests:send", style="primary")
     builder.adjust(1)
     builder.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
@@ -1212,6 +1220,7 @@ def subscription_user_amounts_keyboard(
             InlineKeyboardButton(
                 text="✏️ Set all",
                 callback_data=f"sub_user_amount_all:{subscription_id}",
+                style="primary",
             )
         ]
     )
