@@ -1,117 +1,110 @@
-# PingSubs
+<p align="center">
+  <img src="docs/assets/pingsubs.jpg" alt="PingSubs icon" width="128" height="128">
+</p>
+<h1 align="center">PingSubs</h1>
 
-Telegram bot for managing shared subscriptions: members, payment reminders, and per-person payment tracking.
+A self-hosted Telegram bot for shared subscriptions, payment reminders, and member balances.
+Built with Python 3.13, aiogram, and SQLite.
 
-## Features
+- Split subscription costs across members, with individual shares and currencies.
+- Send scheduled reminders, track payment confirmations, and view payment reports.
+- Invite members through personal links and manage balance top-ups with admin approval.
 
-- Manage subscriptions with amounts, currencies, periods, and reminder schedules
-- Split costs across members (including weighted shares)
-- Personal reminders with "Paid" confirmation
-- Admin and member views with payment reports
+Payments happen outside the bot; PingSubs records them.
 
-## Requirements
+## Deploy with Docker
 
-- Python 3.11+
-- Telegram bot token
-
-## Setup
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Create `.env` (see `.env.example`).
-
-Set `BOT_TOKEN` and replace `ADMIN_IDS` with your own Telegram ID **before the
-first launch**. With an empty admin list and a fresh database, the first user to
-send `/start` becomes the administrator.
-
-Create the local data directory for SQLite:
+Requires Git, Docker with Compose, and a Telegram bot token from **@BotFather**.
 
 ```bash
-mkdir -p data
+git clone https://github.com/dcip3/DCIP3.PingSubs.git
+cd DCIP3.PingSubs
+cp .env.example .env
 ```
 
-### Git commit message policy
-
-Use English Conventional Commits, for example `fix: correct reminder dates`.
-Install [Gitleaks](https://github.com/gitleaks/gitleaks#installing) to enable the
-staged-secret check alongside commit message validation.
-
-Enable repository hooks once:
-
-```bash
-git config --local core.hooksPath .githooks
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks and commit conventions,
-and [SECURITY.md](SECURITY.md) for deployment and vulnerability reporting.
-
-### Environment variables
-
-Required:
-- `BOT_TOKEN` - Telegram bot token
-
-Optional:
-- `DATABASE_PATH` - path to SQLite database (default: `data/app.db`)
-- `REMINDER_CHECK_INTERVAL` - reminder check interval in seconds (default: `3600`)
-- `BASE_REMINDER_TIME` - default reminder time in `HH:MM` (default: `16:00`)
-- `BASE_TIMEZONE` - default timezone in IANA format (default: `Europe/Moscow`)
-- `TARGET_CURRENCY` - base currency for conversions (default: `RUB`)
-- `CURRENCY_ROUNDING` - rounding mode for conversions: `precise`, `floor`, `round`, `ceil` (default: `precise`)
-- `ADMIN_IDS` - comma-separated Telegram IDs that should be admins on startup
-
-## Run
-
-```bash
-python main.py
-```
-
-## Docker
-
-Build and run with Docker:
-
-```bash
-docker build -t pingsubs .
-docker run --env-file .env -v $(pwd)/data:/app/data pingsubs
-```
-
-Or with Docker Compose:
+In `.env`, set `BOT_TOKEN` and replace `ADMIN_IDS` with your numeric Telegram user ID.
+**Set the admin ID before the first launch:** with a fresh database and no configured
+admins, the first person to send `/start` becomes the administrator.
 
 ```bash
 docker compose up -d --build
+docker compose logs -f --tail=100
 ```
 
-## Usage
+The bot uses long polling: no domain, HTTPS certificate, or inbound port is needed.
+SQLite data is stored in `./data/` and survives container recreation. Keep the default
+`DATABASE_PATH` when using the included Compose file so it stays inside the mounted directory.
 
-- Admins manage subscriptions and members via the admin menu
-- Admins add users by name and share a generated Telegram authorization link
-- Members can view their subscriptions and mark payments as completed
-- Reminders are sent automatically based on the configured schedule
-- On first launch without `ADMIN_IDS`, the first user who sends `/start` becomes admin automatically
-- Members can set a personal base currency in `⚙️ Settings`; if not set, the admin base currency is used
-- Both admin and members can set base reminder time in `⚙️ Settings`
-- Both admin and members can set timezone in `⚙️ Settings`
-- Reminder time precedence is: personal subscription override -> subscription override (admin) -> personal base time -> admin base time
-- Reminder timezone precedence is: personal timezone -> admin timezone
-- Reminder times are interpreted in the recipient's effective timezone
+To update an existing installation:
 
+```bash
+git pull --ff-only
+docker compose up -d --build
+```
 
-## Project structure
+Stop with `docker compose down`. Back up `data/` while the bot is stopped, and keep
+`.env` separately. Run only one bot instance per token.
 
-- `main.py` - entry point
-- `app/handlers/` - Telegram handlers and routing
-- `app/services/` - reminder workflow and integrations
-- `app/storage/` - database access layer (SQLite)
-- `app/core/` - config, constants, and scheduling utilities
-- `app/ui/` - shared UI/report helpers, keyboards, and UI text
-- `app/infrastructure/` - middleware and integration glue
-- `tests/` - offline startup and repository policy checks
-- `scripts/` - repository maintenance utilities
+<details>
+<summary>Optional: GitHub Actions deployment</summary>
 
-## License
+[deploy.yml](.github/workflows/deploy.yml) deploys pushes to `main` over SSH.
+Prepare a working installation at `/opt/DCIP3.PingSubs` on the server and configure
+the repository secrets `VDS_HOST`, `VDS_USER`, and `VDS_SSH_KEY`. The SSH user needs
+access to that directory, Git, and Docker; `.env` and `data/` remain on the server.
+For a private repository, the server also needs GitHub read access.
 
-A license has not been selected yet. Public availability alone does not grant
-permission to reuse, modify, or redistribute this project.
+</details>
+
+## Run locally
+
+Requires **Python 3.13**. Clone the repository and configure `.env` as above, then:
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python main.py
+```
+
+<details>
+<summary>Windows (PowerShell)</summary>
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+```
+
+</details>
+
+## Configuration
+
+Settings are read from environment variables or `.env`. Existing environment
+variables take precedence. The data directory is created automatically.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BOT_TOKEN` | Required | Telegram bot token from @BotFather |
+| `ADMIN_IDS` | Empty | Admin Telegram user IDs, separated by commas; set before first launch |
+| `DATABASE_PATH` | `data/app.db` | SQLite database path |
+| `REMINDER_CHECK_INTERVAL` | `3600` | Seconds between reminder checks |
+| `BASE_REMINDER_TIME` | `16:00` | Default reminder time, `HH:MM` |
+| `BASE_TIMEZONE` | `Europe/Moscow` | Default IANA timezone, e.g. `Europe/Belgrade` |
+| `TARGET_CURRENCY` | `RUB` | Default currency for conversions |
+| `CURRENCY_ROUNDING` | `precise` | `precise`, `floor`, `round`, or `ceil` |
+
+Currency, rounding, base reminder time, and timezone seed a new database. Saved
+settings take precedence on later starts; change them through the bot's **Settings**.
+
+## Using the bot
+
+Send `/start` from an admin account, add members, and share their personal invite
+links. Create a subscription, assign members, and set its amount, billing period,
+and reminder schedule. Members can then view their account and confirm payments.
+
+In **Settings**, users can choose their currency, reminder time, and timezone.
+Reminders follow each recipient's timezone; subscription-specific times override
+base settings. Balance top-ups are credited after an admin confirms the transfer.
+
+[Contributing & checks](CONTRIBUTING.md) · [Security](SECURITY.md)
