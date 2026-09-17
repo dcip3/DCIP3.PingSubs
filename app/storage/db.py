@@ -16,8 +16,10 @@ class Database:
 
     async def connect(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(self.path)
+        self._conn = await aiosqlite.connect(self.path, timeout=30)
         self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA journal_mode = WAL;")
+        await self._conn.execute("PRAGMA synchronous = NORMAL;")
         await self._conn.execute("PRAGMA foreign_keys = ON;")
         await self._conn.executescript(
             """
