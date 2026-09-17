@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F
 from aiogram.fsm.context import FSMContext
@@ -30,7 +30,11 @@ def _generate_invite_payload() -> str:
 
 
 def _invite_expires_at() -> str:
-    return (datetime.utcnow() + timedelta(days=INVITE_TTL_DAYS)).replace(microsecond=0).isoformat()
+    return (
+        (datetime.now(timezone.utc) + timedelta(days=INVITE_TTL_DAYS))
+        .replace(tzinfo=None, microsecond=0)
+        .isoformat()
+    )
 
 
 async def _build_invite_link(bot: Bot, payload: str) -> str:

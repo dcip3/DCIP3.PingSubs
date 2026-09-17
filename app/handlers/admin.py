@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import html
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from aiogram import Bot, F
 
@@ -193,7 +193,7 @@ async def handle_start(message: Message, db: Database) -> None:
                 expires_at = datetime.fromisoformat(invite_expires_at)
             except ValueError:
                 expires_at = None
-            if expires_at is not None and expires_at < datetime.utcnow():
+            if expires_at is not None and expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
                 await message.answer(
                     "This authorization link has expired. Ask an admin for a new one.",
                     reply_markup=public_reply_keyboard(),
@@ -218,7 +218,7 @@ async def handle_start(message: Message, db: Database) -> None:
         claimed = await db.claim_friend_invite(
             int(invited_friend["id"]),
             user_id,
-            datetime.utcnow().replace(microsecond=0).isoformat(),
+            datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat(),
         )
         if not claimed:
             await message.answer(
