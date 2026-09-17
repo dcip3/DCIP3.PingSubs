@@ -158,6 +158,32 @@ def tg_due(due_value: str, tz_name: str | None, fmt: str = "wD", fallback: str |
     return tg_time(moment, fmt, fallback if fallback is not None else format_due_date(due_value))
 
 
+def tg_clock(
+    time_value: str | None,
+    tz_name: str | None,
+    fallback: str | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Render a ``HH:MM`` wall-clock time as a localized time entity.
+
+    The entity is anchored at the next occurrence of that time in
+    ``tz_name`` (today if still ahead, otherwise tomorrow), so a reader in
+    another timezone sees the same instant on their own clock. ``now`` is
+    only meant for tests; naive values are UTC.
+    """
+    zone = parse_timezone(tz_name)
+    wall = parse_time_string(time_value)
+    current = now if now is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(zone)
+    moment = datetime.combine(current.date(), wall, tzinfo=zone)
+    if moment <= current:
+        moment = datetime.combine(current.date() + timedelta(days=1), wall, tzinfo=zone)
+    label = fallback if fallback is not None else f"{wall.strftime('%H:%M')} ({zone.key})"
+    return tg_time(moment, "t", label)
+
+
 def due_status_html(due_value: str, tz_name: str | None, today: date) -> str:
     """Render ``Due in N day(s)`` / ``Due today`` / ``Overdue by N day(s)``.
 

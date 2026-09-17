@@ -58,6 +58,7 @@ from app.core.reminders import (
     normalize_timezone_name,
     parse_time_string,
     parse_timezone,
+    tg_clock,
 )
 from app.storage.db import Database
 from app.services import (
@@ -122,7 +123,8 @@ def _public_settings_text(
     return (
         "⚙️ Settings:\n\n"
         "⏰ Time:\n"
-        f"Base time: <code>{html.escape(time_value)}</code>\n\n"
+        f"Base time: <code>{html.escape(time_value)}</code>\n"
+        f"Your local time: {tg_clock(current_time, current_timezone)}\n\n"
         "🌍 Timezone:\n"
         f"Timezone: <code>{html.escape(timezone_value)}</code>"
     )
@@ -395,6 +397,7 @@ async def handle_public_settings_time(
             "⏰ Base time:\n"
             f"Current: <code>{current_time} ({current_timezone})</code>\n"
             f"Default: <code>{admin_time} ({admin_timezone})</code>\n"
+            f"Your local time: {tg_clock(current_time, current_timezone)}\n"
             "\n"
             "Choose a value:",
             reply_markup=public_settings_time_keyboard(current_time, admin_time),
@@ -763,6 +766,7 @@ async def handle_public_subscription_reminder_time(
             f"Current: <code>{effective_time}</code>\n"
             f"Default: <code>{default_time}</code>\n"
             f"Timezone: <code>{user_timezone}</code>\n"
+            f"Your local time: {tg_clock(effective_time, user_timezone)}\n"
             "\n"
             "Choose a value:",
             reply_markup=public_subscription_reminder_time_keyboard(
@@ -1138,6 +1142,7 @@ async def handle_settings_time(callback: CallbackQuery, settings: Settings) -> N
         "⏰ Base time:\n"
         "\n"
         f"Current: <code>{html.escape(settings.base_reminder_time)} ({html.escape(settings.base_timezone)})</code>\n"
+        f"Your local time: {tg_clock(settings.base_reminder_time, settings.base_timezone)}\n"
         "\n"
         "Choose a value:"
     )
