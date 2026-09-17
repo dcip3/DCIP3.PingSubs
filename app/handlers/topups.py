@@ -200,7 +200,7 @@ async def _send_payment_destinations_menu(
     destinations = await db.list_payment_destinations()
     default_destination_id = await db.get_default_payment_destination_id()
     pending_requests = await db.list_pending_topup_requests()
-    lines = ["💳 Payment methods:"]
+    lines = ["💳 Payment:"]
     if notice:
         lines = [escape_html(notice), "", *lines]
     if destinations:
@@ -369,7 +369,7 @@ async def _start_public_topup_flow(
     await _send_topup_destination_menu(target, db)
 
 
-@admin_router.message(F.text == "💳 Payment methods")
+@admin_router.message(F.text.in_({"💳 Payment", "💳 Payment methods"}))
 async def handle_payment_methods_menu(message: Message, db: Database) -> None:
     await _send_payment_destinations_menu(message, db)
 

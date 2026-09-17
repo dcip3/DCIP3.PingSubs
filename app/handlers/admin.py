@@ -273,7 +273,7 @@ async def handle_public_help(message: Message, db: Database) -> None:
         "👤 Account — your balance and subscriptions.\n"
         "➕ Top up — create a balance top-up request.\n"
         "📋 Subscriptions — your plans.\n"
-        "📊 Payments report — your payment history.\n"
+        "📊 Reports — your payment history.\n"
         "⚙️ Settings — your timezone and reminder time.\n\n"
         "Ask an admin to invite you if you need access."
     )
@@ -329,7 +329,7 @@ async def handle_public_account_rename_start(
     await callback.answer()
 
 
-@public_router.message(F.text == "📊 Payments report")
+@public_router.message(F.text.in_({"📊 Reports", "📊 Payments report"}))
 async def handle_public_payments_report(message: Message, db: Database) -> None:
     if not message.from_user:
         await message.answer("Unable to identify your account.")
@@ -1044,8 +1044,8 @@ async def send_admin_help(message: Message) -> None:
         "Buttons:\n"
         "👥 Users — add, edit, and remove users.\n"
         "📋 Subscriptions — manage plans and reminders.\n"
-        "📊 Payments report — payment summaries.\n"
-        "💳 Payment methods — top-up routes and manual approvals.\n"
+        "📊 Reports — payment summaries.\n"
+        "💳 Payment — top-up routes and manual approvals.\n"
         "⚙️ Settings — bot configuration.\n\n"
         "Commands:\n"
         "/start — start the bot.\n"
@@ -1080,7 +1080,7 @@ async def handle_dialog_cancel_callback(
 
 
 
-@admin_router.message(F.text == "📊 Payments report")
+@admin_router.message(F.text.in_({"📊 Reports", "📊 Payments report"}))
 async def handle_payments_report(message: Message, db: Database) -> None:
     subscriptions = await db.list_subscriptions()
     if not subscriptions:

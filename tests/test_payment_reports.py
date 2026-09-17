@@ -48,22 +48,22 @@ class ScheduleLineTests(unittest.TestCase):
 
 class AssembleReportTests(unittest.TestCase):
     def test_header_wording(self):
-        self.assertEqual(payments_report_header(0), "📊 Payments report")
-        self.assertEqual(payments_report_header(1), "📊 Payments report · <b>1 needs attention</b>")
-        self.assertEqual(payments_report_header(2), "📊 Payments report · <b>2 need attention</b>")
+        self.assertEqual(payments_report_header(0), "📊 Reports")
+        self.assertEqual(payments_report_header(1), "📊 Reports · <b>1 needs attention</b>")
+        self.assertEqual(payments_report_header(2), "📊 Reports · <b>2 need attention</b>")
 
     def test_red_blocks_come_first_and_all_green_never_collapses(self):
         text = assemble_payments_report(["🟢 <b>A</b>", "🔴 <b>B</b>", "🟢 <b>C</b>"])
-        self.assertEqual(text, "📊 Payments report · <b>1 needs attention</b>\n\n🔴 <b>B</b>\n\n🟢 <b>A</b>\n\n🟢 <b>C</b>")
+        self.assertEqual(text, "📊 Reports · <b>1 needs attention</b>\n\n🔴 <b>B</b>\n\n🟢 <b>A</b>\n\n🟢 <b>C</b>")
         all_green = assemble_payments_report(["🟢 <b>A</b>", "🟢 <b>B</b>", "🟢 <b>C</b>"], collapse_min_green=1)
-        self.assertEqual(all_green, "📊 Payments report\n\n🟢 <b>A</b>\n\n🟢 <b>B</b>\n\n🟢 <b>C</b>")
+        self.assertEqual(all_green, "📊 Reports\n\n🟢 <b>A</b>\n\n🟢 <b>B</b>\n\n🟢 <b>C</b>")
 
     def test_admin_threshold_collapses_three_green_blocks_next_to_a_red_one(self):
         blocks = ["🔴 <b>B</b>", "🟢 <b>A</b>", "🟢 <b>C</b>", "🟢 <b>D</b>"]
         text = assemble_payments_report(blocks, collapse_min_green=ADMIN_REPORT_COLLAPSE_MIN_GREEN)
         self.assertEqual(
             text,
-            "📊 Payments report · <b>1 needs attention</b>\n\n🔴 <b>B</b>\n\n"
+            "📊 Reports · <b>1 needs attention</b>\n\n🔴 <b>B</b>\n\n"
             f"{BLOCKQUOTE_OPEN}🟢 <b>A</b>\n\n🟢 <b>C</b>\n\n🟢 <b>D</b>{BLOCKQUOTE_CLOSE}",
         )
         short = assemble_payments_report(blocks[:3], collapse_min_green=ADMIN_REPORT_COLLAPSE_MIN_GREEN)
@@ -147,7 +147,7 @@ class ReportBuilderTests(unittest.IsolatedAsyncioTestCase):
         overdue_value = overdue.isoformat()
         upcoming_value = upcoming.isoformat()
         expected = (
-            "📊 Payments report · <b>1 needs attention</b>\n\n"
+            "📊 Reports · <b>1 needs attention</b>\n\n"
             "🔴 <b>Netflix Premium</b>\n"
             f"Paid {tg_due((overdue - timedelta(days=30)).isoformat(), TZ, 'wd')} → "
             f"next {tg_due(overdue_value, TZ, 'wd')} (2 d overdue) · 1/3 paid\n"

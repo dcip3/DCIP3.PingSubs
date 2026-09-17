@@ -1006,9 +1006,9 @@ async def resolve_report_timezone(db: Database) -> str:
 
 def payments_report_header(attention_count: int) -> str:
     if attention_count <= 0:
-        return "📊 Payments report"
+        return "📊 Reports"
     verb = "needs" if attention_count == 1 else "need"
-    return f"📊 Payments report · <b>{attention_count} {verb} attention</b>"
+    return f"📊 Reports · <b>{attention_count} {verb} attention</b>"
 
 
 def _is_attention_block(block: str) -> bool:
@@ -1676,7 +1676,7 @@ async def send_subscription_more(target: Responder, db: Database, subscription_i
 
     open_cycles = await db.list_open_cycles(subscription_id)
     text = (
-        "📊 Reports & more:\n\n"
+        "📊 Reports:\n\n"
         f"🗂 Open cycles: {len(open_cycles)}"
     )
 

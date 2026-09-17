@@ -353,7 +353,7 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Subscription: <b>1200.00 RUB</b>\nAssigned total: <b>1200.00 RUB</b>", amounts)
 
         more = await self._render(send_subscription_more, self.db, self.netflix)
-        self.assertEqual(more, "📊 Reports & more:\n\n🗂 Open cycles: 2")
+        self.assertEqual(more, "📊 Reports:\n\n🗂 Open cycles: 2")
 
         payment_info = await self._render(send_subscription_payment_info, self.db, self.netflix)
         self.assertEqual(

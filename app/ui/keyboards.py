@@ -128,7 +128,7 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         keyboard=[
             [KeyboardButton(text="👥 Users"), KeyboardButton(text="📋 Subscriptions")],
-            [KeyboardButton(text="💳 Payment methods"), KeyboardButton(text="📊 Payments report")],
+            [KeyboardButton(text="💳 Payment"), KeyboardButton(text="📊 Reports")],
             [KeyboardButton(text="⚙️ Settings")],
         ],
     )
@@ -139,7 +139,7 @@ def public_reply_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         keyboard=[
             [KeyboardButton(text="👤 Account"), KeyboardButton(text="📋 Subscriptions")],
-            [KeyboardButton(text="📊 Payments report"), KeyboardButton(text="⚙️ Settings")],
+            [KeyboardButton(text="📊 Reports"), KeyboardButton(text="⚙️ Settings")],
         ],
     )
 
@@ -267,7 +267,7 @@ def member_detail_keyboard(friend_id: int, *, is_pending: bool = False) -> Inlin
             callback_data=MemberAction(action="invite", friend_id=friend_id).pack(),
         )
     builder.button(
-        text="📊 Payments report",
+        text="📊 Reports",
         callback_data=MemberAction(action="report", friend_id=friend_id).pack(),
     )
     builder.button(
@@ -678,7 +678,7 @@ def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         callback_data=SubscriptionAction(action="paymentinfo", subscription_id=subscription_id).pack(),
     )
     builder.button(
-        text="📊 Reports & more",
+        text="📊 Reports",
         callback_data=SubscriptionAction(action="more", subscription_id=subscription_id).pack(),
     )
     builder.adjust(1)
@@ -703,7 +703,7 @@ def public_subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardM
         callback_data=SubscriptionAction(action="public_remindertime", subscription_id=subscription_id).pack(),
     )
     builder.button(
-        text="📊 Payments report",
+        text="📊 Reports",
         callback_data=SubscriptionAction(action="public_report", subscription_id=subscription_id).pack(),
     )
     builder.adjust(1)
@@ -884,7 +884,7 @@ def participants_settings_keyboard(
 def subscription_more_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="📊 Payments report",
+        text="📊 Subscription report",
         callback_data=SubscriptionAction(action="report", subscription_id=subscription_id).pack(),
     )
     builder.button(
