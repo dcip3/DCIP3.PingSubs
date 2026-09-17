@@ -1,6 +1,6 @@
 # Contributing
 
-Use Python 3.11 and install `requirements.txt` in a virtual environment.
+Use Python 3.13 (see `.python-version`) and install `requirements.txt` in a virtual environment.
 Install [Gitleaks](https://github.com/gitleaks/gitleaks#installing) and enable hooks:
 
 ```bash

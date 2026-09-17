@@ -11,3 +11,5 @@ Dockerfile text eol=lf
 .gitignore text eol=lf
 .env.example text eol=lf
 requirements.txt text eol=lf
+.python-version text eol=lf
+*.jpg binary
