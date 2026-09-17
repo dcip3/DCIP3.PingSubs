@@ -3,7 +3,7 @@ from __future__ import annotations
 from aiogram import F
 from aiogram.types import CallbackQuery
 
-from app.ui.helpers import send_participants_editor, send_participants_settings, send_subscription_detail
+from app.ui.helpers import send_participants_editor, send_participants_settings
 from app.ui.states import ParticipantAction, SubscriptionAction
 from app.storage.db import Database
 
@@ -73,12 +73,3 @@ async def handle_participant_weight(
         share_weight=new_weight,
     )
     await send_participants_editor(callback, db, callback_data.subscription_id)
-
-
-@admin_router.callback_query(ParticipantAction.filter(F.action == "done"))
-async def handle_participant_done(
-    callback: CallbackQuery,
-    callback_data: ParticipantAction,
-    db: Database,
-) -> None:
-    await send_subscription_detail(callback, db, callback_data.subscription_id)

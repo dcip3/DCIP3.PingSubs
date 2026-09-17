@@ -820,21 +820,6 @@ async def handle_subscription_base_currency_other(
     )
 
 
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "paymentmode"))
-async def handle_subscription_payment_mode_callback(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
-    if not subscription:
-        return
-    await state.clear()
-    await send_participants_settings(callback, db, callback_data.subscription_id)
-    await callback.answer()
-
-
 @admin_router.callback_query(F.data.startswith("sub_payment_mode:"))
 async def handle_subscription_payment_mode_select(
     callback: CallbackQuery,

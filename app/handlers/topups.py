@@ -619,22 +619,6 @@ async def handle_payment_destination_set_default(
     )
 
 
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "assignees"))
-async def handle_payment_destination_assignees(
-    callback: CallbackQuery,
-    callback_data: PaymentDestinationAction,
-    db: Database,
-) -> None:
-    assignees = await db.list_payment_destination_assignees(callback_data.destination_id)
-    if not assignees:
-        await callback.answer("No users with an explicit assignment.", show_alert=True)
-        return
-    preview = "\n".join(str(item["full_name"]) for item in assignees[:10])
-    if len(assignees) > 10:
-        preview += "\n..."
-    await callback.answer(preview, show_alert=True)
-
-
 @admin_router.callback_query(PaymentDestinationAction.filter(F.action == "delete"))
 async def handle_payment_destination_delete_prompt(
     callback: CallbackQuery,

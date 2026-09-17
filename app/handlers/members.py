@@ -46,14 +46,6 @@ async def handle_members_menu(message: Message, db: Database) -> None:
     await send_member_list(message, db)
 
 
-@admin_router.callback_query(MemberAction.filter(F.action == "menu"))
-async def handle_members_menu_back(callback: CallbackQuery) -> None:
-    if callback.message:
-        await callback.message.edit_text("Admin menu closed.")
-        await callback.message.answer("Admin menu:", reply_markup=admin_reply_keyboard())
-    await callback.answer()
-
-
 @admin_router.callback_query(MemberAction.filter(F.action == "back"))
 async def handle_members_back(
     callback: CallbackQuery,

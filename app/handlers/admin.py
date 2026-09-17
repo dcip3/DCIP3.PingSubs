@@ -1126,13 +1126,6 @@ async def handle_settings_menu_callback(callback: CallbackQuery, settings: Setti
     await callback.answer()
 
 
-@admin_router.callback_query(F.data == "settings:close")
-async def handle_settings_close(callback: CallbackQuery) -> None:
-    if callback.message:
-        await callback.message.edit_text("Settings closed.")
-    await callback.answer()
-
-
 @admin_router.callback_query(F.data == "settings:time")
 async def handle_settings_time(callback: CallbackQuery, settings: Settings) -> None:
     text = (
