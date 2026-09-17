@@ -533,6 +533,15 @@ async def handle_public_subscription_open(
     callback_data: SubscriptionAction,
     db: Database,
 ) -> None:
+    if not callback.from_user:
+        await callback.answer("Unable to identify your account.")
+        return
+    subs = await db.list_subscriptions_for_user(callback.from_user.id)
+    if not any(sub["id"] == callback_data.subscription_id for sub in subs) and not await db.is_admin(
+        callback.from_user.id
+    ):
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
+        return
     await send_public_subscription_detail(callback, db, callback_data.subscription_id)
 
 
