@@ -24,6 +24,10 @@ pip install -r requirements.txt
 
 Create `.env` (see `.env.example`).
 
+Set `BOT_TOKEN` and replace `ADMIN_IDS` with your own Telegram ID **before the
+first launch**. With an empty admin list and a fresh database, the first user to
+send `/start` becomes the administrator.
+
 Create the local data directory for SQLite:
 
 ```bash
@@ -32,13 +36,18 @@ mkdir -p data
 
 ### Git commit message policy
 
-The repository includes a `commit-msg` hook that allows commit messages only in English.
+Use English Conventional Commits, for example `fix: correct reminder dates`.
+Install [Gitleaks](https://github.com/gitleaks/gitleaks#installing) to enable the
+staged-secret check alongside commit message validation.
 
 Enable repository hooks once:
 
 ```bash
-git config core.hooksPath .githooks
+git config --local core.hooksPath .githooks
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks and commit conventions,
+and [SECURITY.md](SECURITY.md) for deployment and vulnerability reporting.
 
 ### Environment variables
 
@@ -99,3 +108,10 @@ docker compose up -d --build
 - `app/core/` - config, constants, and scheduling utilities
 - `app/ui/` - shared UI/report helpers, keyboards, and UI text
 - `app/infrastructure/` - middleware and integration glue
+- `tests/` - offline startup and repository policy checks
+- `scripts/` - repository maintenance utilities
+
+## License
+
+A license has not been selected yet. Public availability alone does not grant
+permission to reuse, modify, or redistribute this project.

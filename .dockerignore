@@ -1,6 +1,25 @@
-.venv
-__pycache__
-*.pyc
-.git
-.gitignore
-.env
+# Keep the build context limited to runtime sources.
+**
+!requirements.txt
+!main.py
+!app/
+!app/**
+
+# Never bake local state or credentials into an image.
+**/__pycache__/
+**/*.py[cod]
+**/.env
+**/.env.*
+**/*.env
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/credentials.json
+**/service-account*.json
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*

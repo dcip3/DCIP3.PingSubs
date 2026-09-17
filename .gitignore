@@ -10,12 +10,28 @@ ENV/
 
 # Environment and secrets
 .env
+.env.*
+!.env.example
+*.env
+!*.env.example
 *.env.local
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
 
 # SQLite databases and local data
 *.db
+*.db-*
+*.sqlite
+*.sqlite-*
 *.sqlite3
+*.sqlite3-*
 data/
+backups/
+*.bundle
 
 # IDE files
 .vscode/
@@ -27,3 +43,9 @@ data/
 *.tmp
 .mypy_cache/
 .pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
