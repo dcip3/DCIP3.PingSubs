@@ -8,7 +8,12 @@ from typing import Dict, Optional
 
 import aiohttp
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+)
 
 from app.ui.keyboards import (
     build_batch_payment_confirmation_keyboard,
@@ -273,10 +278,19 @@ async def _send_message_with_retry(
     base_delay: float = 1.0,
 ) -> Optional[int]:
     attempt = 0
+    flood_waits = 0
     while True:
         try:
             sent = await bot.send_message(chat_id, text, reply_markup=reply_markup)
             return sent.message_id
+        except TelegramRetryAfter as exc:
+            if flood_waits >= 3:
+                logger.warning("Giving up on reminder to user %s after repeated flood waits", chat_id)
+                return None
+            flood_waits += 1
+            delay = float(exc.retry_after) + 1.0
+            logger.warning("Telegram asked to wait %.0fs before sending to user %s", delay, chat_id)
+            await asyncio.sleep(delay)
         except TelegramForbiddenError as exc:
             logger.warning(
                 "Cannot send reminder to user %s: forbidden (%s)",
@@ -1177,16 +1191,19 @@ async def reminder_worker(
     try:
         while True:
             started = asyncio.get_running_loop().time()
-            await _run_reminder_pass(
-                bot,
-                db,
-                converter,
-                subscription_id=None,
-                now=datetime.now(timezone.utc),
-                rounding_mode=rounding_mode,
-                enforce_time=True,
-                register_reminders=True,
-            )
+            try:
+                await _run_reminder_pass(
+                    bot,
+                    db,
+                    converter,
+                    subscription_id=None,
+                    now=datetime.now(timezone.utc),
+                    rounding_mode=rounding_mode,
+                    enforce_time=True,
+                    register_reminders=True,
+                )
+            except Exception:  # noqa: BLE001 - keep the worker alive
+                logger.exception("Reminder pass failed; retrying after the next interval")
             elapsed = asyncio.get_running_loop().time() - started
             await asyncio.sleep(max(1.0, poll_interval - elapsed))
     except asyncio.CancelledError:  # pragma: no cover - service shutdown

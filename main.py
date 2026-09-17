@@ -18,6 +18,14 @@ from app.storage.db import Database
 from app.services import CurrencyConverter, reminder_worker
 
 
+def _log_worker_exit(task: "asyncio.Task[None]") -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logging.getLogger("reminder_worker").error("Reminder worker terminated unexpectedly", exc_info=exc)
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -98,6 +106,7 @@ async def main() -> None:
             rounding_mode=settings.currency_rounding,
         )
     )
+    worker_task.add_done_callback(_log_worker_exit)
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
