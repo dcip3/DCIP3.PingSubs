@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import contextlib
 from typing import Optional
 
@@ -812,7 +813,7 @@ async def handle_public_topup_amount(
     except ValueError:
         await message.answer("Amount must be a positive number. Example: <code>1000</code>.")
         return
-    if amount <= 0:
+    if not math.isfinite(amount) or amount <= 0:
         await message.answer("Amount must be greater than zero.")
         return
     data = await state.get_data()

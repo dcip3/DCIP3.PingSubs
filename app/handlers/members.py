@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import secrets
 from datetime import datetime, timedelta
 
@@ -370,8 +371,8 @@ async def handle_member_balance_input(
         await message.answer("Amount must be a number. Example: 300")
         return
 
-    if amount < 0:
-        await message.answer("Balance cannot be negative.")
+    if not math.isfinite(amount) or amount < 0:
+        await message.answer("Balance must be zero or a positive number.")
         return
     updated_balance = await db.set_friend_balance(int(friend_id), amount)
 

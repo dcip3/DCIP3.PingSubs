@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -320,7 +321,7 @@ async def subscription_form_amount(message: Message, state: FSMContext) -> None:
     try:
         raw = (message.text or "").strip().replace(",", ".")
         amount = float(raw)
-        if amount <= 0:
+        if not math.isfinite(amount) or amount <= 0:
             raise ValueError
     except ValueError:
         await message.answer("Amount must be a positive number. Try again.")
@@ -1606,7 +1607,7 @@ async def edit_subscription_amount(message: Message, state: FSMContext, db: Data
     try:
         raw = (message.text or "").strip().replace(",", ".")
         amount = float(raw)
-        if amount <= 0:
+        if not math.isfinite(amount) or amount <= 0:
             raise ValueError
     except ValueError:
         await message.answer("Amount must be a positive number. Try again.")
@@ -1683,7 +1684,7 @@ async def edit_subscription_user_amount(message: Message, state: FSMContext, db:
 
     try:
         amount = float(raw_value.replace(",", "."))
-        if amount < 0:
+        if not math.isfinite(amount) or amount < 0:
             raise ValueError
     except ValueError:
         await message.answer("Amount must be zero or a positive number. Example: 300 or 0")
@@ -1717,7 +1718,7 @@ async def edit_subscription_user_amount_all(message: Message, state: FSMContext,
     raw_value = (message.text or "").strip()
     try:
         amount = float(raw_value.replace(",", "."))
-        if amount < 0:
+        if not math.isfinite(amount) or amount < 0:
             raise ValueError
     except ValueError:
         await message.answer("Amount must be zero or a positive number. Example: 300 or 0")
