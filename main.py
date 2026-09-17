@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, LinkPreviewOptions
 
 from app.handlers import admin_router, public_router
 from app.infrastructure import AdminFilter, SettingsMiddleware
@@ -67,7 +67,10 @@ async def main() -> None:
 
     bot = Bot(
         token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML,
+            link_preview=LinkPreviewOptions(is_disabled=True),
+        ),
     )
     dp = Dispatcher(storage=MemoryStorage())
 
