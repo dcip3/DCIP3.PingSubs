@@ -4,9 +4,9 @@ import asyncio
 import contextlib
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatType, ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
@@ -68,6 +68,12 @@ async def main() -> None:
     public_router.callback_query.middleware(shared_middleware)
     admin_router.message.middleware(shared_middleware)
     admin_router.callback_query.middleware(shared_middleware)
+
+    # The bot is a private assistant: ignore groups and channels so that
+    # payment details, balances, and the first-admin bootstrap never leak there.
+    for router in (public_router, admin_router):
+        router.message.filter(F.chat.type == ChatType.PRIVATE)
+        router.callback_query.filter(F.message.chat.type == ChatType.PRIVATE)
 
     admin_filter = AdminFilter(db)
     admin_router.message.filter(admin_filter)
