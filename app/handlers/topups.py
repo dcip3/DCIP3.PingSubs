@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import math
 import contextlib
+from datetime import datetime, timezone
 from typing import Optional
 
 from aiogram import F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from app.core.constants import DATE_INPUT_FORMAT
+from app.core.reminders import tg_time
 from app.storage.db import Database
 from app.ui.helpers import respond_with_markup, send_member_detail
 from app.ui.keyboards import (
@@ -45,6 +48,37 @@ def _normalize_link(raw_value: str) -> str:
 
 def _request_code(request_id: int) -> str:
     return f"TOPUP-{request_id}"
+
+
+def _parse_db_utc(value: object) -> datetime | None:
+    """Parse a SQLite timestamp (``CURRENT_TIMESTAMP`` or ISO) as aware UTC."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _topup_moment(request: dict[str, object]) -> datetime | None:
+    return _parse_db_utc(request.get("submitted_at")) or _parse_db_utc(request.get("created_at"))
+
+
+def _age_fallback(moment: datetime, now: datetime | None = None) -> str:
+    """Static ``2h ago`` / ``on 17.09.2026`` text for clients without date entities."""
+    current = now if now is not None else datetime.now(timezone.utc)
+    seconds = int((current - moment).total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return "on " + moment.strftime(DATE_INPUT_FORMAT)
 
 
 def _format_destination_text(
@@ -104,18 +138,30 @@ def _format_topup_admin_text(request: dict[str, object]) -> str:
     balance_currency = str(request.get("balance_currency") or "").strip().upper() or str(request["currency"])
     lines = [
         f"💳 Top-up request <code>{escape_html(_request_code(int(request['id'])))}</code>",
-        f"User: <code>{escape_html(str(request['full_name']))}</code>",
+        f"User: <b>{escape_html(str(request['full_name']))}</b>",
         f"Telegram ID: <code>{int(request['telegram_id'])}</code>",
-        f"Amount: <code>{float(request['amount']):.2f} {escape_html(str(request['currency']))}</code>",
-        f"Current balance: <code>{balance_value:.2f} {escape_html(balance_currency)}</code>",
-        f"Method: <code>{escape_html(str(request['destination_title']))}</code>",
+        f"Amount: <b>{float(request['amount']):.2f} {escape_html(str(request['currency']))}</b>",
+        f"Current balance: <b>{balance_value:.2f} {escape_html(balance_currency)}</b>",
+        f"Method: {escape_html(str(request['destination_title']))}",
         "",
         "Details shown to user:",
-        f"<pre>{escape_html(str(request.get('destination_details') or ''))}</pre>",
     ]
+    for detail_line in str(request.get("destination_details") or "").splitlines():
+        detail_line = detail_line.strip()
+        if detail_line:
+            lines.append(f"<code>{escape_html(detail_line)}</code>")
     destination_link = str(request.get("destination_link") or "").strip()
     if destination_link:
         lines.append(f"Link: {escape_html(destination_link)}")
+    moment = _topup_moment(request)
+    if moment is not None:
+        lines.append(
+            "Submitted: <b>"
+            + tg_time(moment, "wdt", moment.strftime(f"{DATE_INPUT_FORMAT} %H:%M UTC"))
+            + "</b> ("
+            + tg_time(moment, "r", _age_fallback(moment))
+            + ")"
+        )
     return "\n".join(lines)
 
 
@@ -268,10 +314,14 @@ async def _send_pending_topups(
         lines = [escape_html(notice), "", *lines]
     if requests:
         for index, item in enumerate(requests, 1):
-            lines.append(
-                f"{index}. <code>{escape_html(str(item['full_name']))}</code> "
-                f"— <code>{float(item['amount']):.2f} {escape_html(str(item['currency']))}</code>"
+            line = (
+                f"{index}. <b>{escape_html(str(item['full_name']))}</b> "
+                f"— <b>{float(item['amount']):.2f} {escape_html(str(item['currency']))}</b>"
             )
+            moment = _topup_moment(item)
+            if moment is not None:
+                line += " · " + tg_time(moment, "r", _age_fallback(moment))
+            lines.append(line)
     else:
         lines.append("No pending top-up requests.")
     await respond_with_markup(
