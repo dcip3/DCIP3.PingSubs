@@ -6,10 +6,11 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.ui.helpers import send_member_detail, send_member_list, send_member_report
 from app.ui.keyboards import (
+    COPY_TEXT_MAX_LEN,
     admin_reply_keyboard,
     dialog_cancel_inline_keyboard,
     member_balance_currency_keyboard,
@@ -43,6 +44,25 @@ async def _build_invite_link(bot: Bot, payload: str) -> str:
     if not username:
         raise RuntimeError("Bot username is not configured.")
     return f"https://t.me/{username}?start={payload}"
+
+
+def invite_link_keyboard(invite_link: str) -> InlineKeyboardMarkup:
+    """One-tap copy button for the personal authorization link.
+
+    The persistent admin reply keyboard is never removed (no ReplyKeyboardRemove
+    in the bot), so this inline markup can replace it on the invite message.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📋 Copy link",
+                    copy_text=CopyTextButton(text=invite_link[:COPY_TEXT_MAX_LEN]),
+                    style="primary",
+                )
+            ]
+        ]
+    )
 
 
 @admin_router.message(F.text == "👥 Users")
@@ -114,7 +134,7 @@ async def handle_member_create(
         "Share this authorization link with the user:\n"
         f"{invite_link}\n\n"
         f"Expires at (UTC): <code>{invite_expires_at}</code>",
-        reply_markup=admin_reply_keyboard(),
+        reply_markup=invite_link_keyboard(invite_link),
     )
     await send_member_detail(message, db, friend_id)
 
@@ -167,7 +187,7 @@ async def handle_member_invite_refresh(
             "Authorization link refreshed:\n"
             f"{invite_link}\n\n"
             f"Expires at (UTC): <code>{invite_expires_at}</code>",
-            reply_markup=admin_reply_keyboard(),
+            reply_markup=invite_link_keyboard(invite_link),
         )
     await callback.answer("Authorization link refreshed.")
     await send_member_detail(callback, db, callback_data.friend_id)
