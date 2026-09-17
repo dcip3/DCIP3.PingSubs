@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import html
+import logging
 from datetime import datetime, timezone
 
 from aiogram import Bot, F
@@ -65,11 +66,14 @@ from app.services import (
     CurrencyConverter,
     _build_reminder_message,
     _format_status_and_date,
+    _send_message_with_retry,
     format_converted_amount,
 )
 from app.ui.text import validate_person_name
 
 from . import admin_router, public_router
+
+logger = logging.getLogger(__name__)
 
 TEST_REMINDER_CURRENCY_FALLBACKS = ("RUB", "USD", "EUR", "GBP")
 
@@ -1426,7 +1430,8 @@ async def handle_test_reminder_send(
         tz_name=recipient_timezone,
         today=today,
     )
-    await bot.send_message(
+    sent_message_id = await _send_message_with_retry(
+        bot,
         int(person["telegram_id"]),
         text,
         reply_markup=build_test_payment_confirmation_keyboard(
@@ -1435,7 +1440,11 @@ async def handle_test_reminder_send(
             payment_details=payment_details,
             payment_link=payment_link,
         ),
+        logger=logger,
     )
+    if sent_message_id is None:
+        await callback.answer("Could not deliver the test message. Try again.", show_alert=True)
+        return
     await callback.answer("Test message sent.")
     await send_test_user_list(callback, db)
 
