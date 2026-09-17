@@ -1,6 +1,7 @@
 # Contributing
 
-Use Python 3.13 (see `.python-version`) and install `requirements.txt` in a virtual environment.
+Use Python 3.13 (see `.python-version`) and install `requirements.txt` and
+`requirements-dev.txt` in a virtual environment.
 Install [Gitleaks](https://github.com/gitleaks/gitleaks#installing) and enable hooks:
 
 ```bash
@@ -32,13 +33,14 @@ required.
 ## Local checks
 
 ```bash
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip check
 python -m unittest discover -s tests -v
 python -m compileall -q app main.py scripts tests
-python -m pip install ruff==0.16.8
 python -m ruff check --select F401,F811,F821,F822,F823,F841 app main.py scripts tests
 python scripts/check_commit_messages.py --rev-range HEAD
+git diff --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD
 gitleaks git --log-opts="--all --full-history" --redact
-python -m pip install pip-audit
 python -m pip_audit -r requirements.txt
 ```
 
