@@ -18,6 +18,7 @@ from aiogram.exceptions import (
 from app.ui.keyboards import (
     build_batch_payment_confirmation_keyboard,
     build_payment_confirmation_keyboard,
+    extract_copyable_requisite,
 )
 from app.core.constants import (
     MONTHLY_PERIOD_SENTINEL,
@@ -27,6 +28,7 @@ from app.core.constants import (
 from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
+    due_status_html,
     format_due_date,
     normalize_monthly_anchor_day,
     normalize_time_string,
@@ -34,6 +36,7 @@ from app.core.reminders import (
     parse_offsets,
     parse_time_string,
     parse_timezone,
+    tg_due,
 )
 from app.ui.text import escape_html
 from app.storage.db import Database
@@ -129,15 +132,10 @@ def _parse_due_date(raw_value: str) -> date:
     return datetime.strptime(raw_value, "%Y-%m-%d").date()
 
 
-def _format_context_text(due_date: date, today: date) -> str:
-    due_display = format_due_date(due_date.isoformat())
-    if due_date > today:
-        days_left = (due_date - today).days
-        return f"Due in {days_left} day(s) ({due_display})."
-    if due_date == today:
-        return f"Due today ({due_display})."
-    days_overdue = (today - due_date).days
-    return f"Overdue by {days_overdue} day(s) (due {due_display})."
+def _format_context_text(due_date: date, today: date, tz_name: Optional[str] = None) -> str:
+    """HTML status line for admin notes: live relative status plus the due date."""
+    due_value = due_date.isoformat()
+    return f"{due_status_html(due_value, tz_name, today)} ({tg_due(due_value, tz_name)})."
 
 
 def _format_status_and_date(due_date: date, today: date) -> tuple[str, str]:
@@ -164,6 +162,10 @@ def _build_reminder_message(
     payment_link: str,
     comment: str,
     footer: str,
+    due_value: Optional[str] = None,
+    tz_name: Optional[str] = None,
+    today: Optional[date] = None,
+    copyable: bool = False,
 ) -> str:
     blocks: list[list[str]] = [[f"{escape_html(person_name)},"]]
     blocks += _build_subscription_blocks(
@@ -177,10 +179,32 @@ def _build_reminder_message(
         payment_details=payment_details,
         payment_link=payment_link,
         comment=comment,
+        due_value=due_value,
+        tz_name=tz_name,
+        today=today,
+        copyable=copyable,
     )
     if footer:
         blocks.append([footer])
     return "\n\n".join("\n".join(block) for block in blocks)
+
+
+def _render_payment_details_lines(payment_details: str, *, copyable: bool = False) -> list[str]:
+    """Single place that renders the payment details block of a reminder.
+
+    ``copyable`` says that the keyboard of this very message carries a copy
+    button for these details (card number or IBAN); then the details are
+    folded into an expandable quote and the button is the primary way to grab
+    them. Otherwise the monospace block stays, so the text is still easy to
+    select and copy by hand. The caller decides, because only it knows which
+    keyboard (if any) goes with the text.
+    """
+    if not payment_details:
+        return []
+    safe_details = escape_html(payment_details)
+    if copyable:
+        return [f"<blockquote expandable>{safe_details}</blockquote>"]
+    return [f"<pre>{safe_details}</pre>"]
 
 
 def _build_subscription_blocks(
@@ -195,41 +219,64 @@ def _build_subscription_blocks(
     payment_details: str,
     payment_link: str,
     comment: str,
+    due_value: Optional[str] = None,
+    tz_name: Optional[str] = None,
+    today: Optional[date] = None,
+    details_shown_above: bool = False,
+    copyable: bool = False,
 ) -> list[list[str]]:
-    if index is None:
-        title = "🔔 Subscription Info:"
-    else:
-        title = f"🔔 Subscription {index} Info:"
+    """Render one subscription of a reminder as blank-line separated blocks.
+
+    ``status_text``/``due_date_text`` are the plain fallbacks (also used for
+    button labels). When ``due_value`` (ISO ``YYYY-MM-DD``) is given, the status
+    and date lines become live Telegram date-time entities localized to the
+    reader, with ``today`` taken in ``tz_name`` unless passed explicitly.
+    ``details_shown_above`` skips the payment details because an earlier item
+    of the same message already rendered the identical text. ``copyable``
+    marks details that the message keyboard offers via a copy button.
+    """
     safe_name = escape_html(subscription_name)
-    safe_status = escape_html(status_text)
-    safe_due_date = escape_html(due_date_text)
+    if index is None:
+        title = f"<b>🔔 {safe_name}</b>"
+    else:
+        title = f"<b>{index}. {safe_name}</b>"
+    if due_value:
+        if today is None:
+            today = datetime.now(parse_timezone(tz_name)).date()
+        status_html = due_status_html(due_value, tz_name, today)
+        date_html = tg_due(due_value, tz_name, "wD")
+    else:
+        status_html = escape_html(status_text)
+        date_html = escape_html(due_date_text)
     safe_amount = escape_html(amount_text)
     safe_converted = escape_html(converted_text) if converted_text else None
     safe_payment_label = escape_html(payment_label) if payment_label else "not set"
-    safe_payment_details = escape_html(payment_details) if payment_details else ""
     safe_payment_link = escape_html(payment_link) if payment_link else ""
     safe_comment = escape_html(comment) if comment else ""
+    amount_line = f"💵 My amount: <b>{safe_amount}</b>"
+    if safe_converted:
+        amount_line += f" ≈ <b>{safe_converted}</b>"
+    method_line = f"🏦 Method: {safe_payment_label}"
+    if details_shown_above and payment_details:
+        method_line += " <i>(details above)</i>"
     blocks: list[list[str]] = [
         [
             title,
-            f"🏷️ Name: <code>{safe_name}</code>",
-            f"⏳ Status: <code>{safe_status}</code>",
-            f"📅 Date: <code>{safe_due_date}</code>",
+            f"⏳ Status: <b>{status_html}</b>",
+            f"📅 Date: <b>{date_html}</b>",
         ],
         [
             "💳 Payment:",
-            f"💵 My amount: <code>{safe_amount}</code>",
+            amount_line,
+            method_line,
         ],
     ]
-    if safe_converted:
-        blocks[-1].append(f"≈ <code>{safe_converted}</code>")
-    blocks[-1].append(f"🏦 Method: <code>{safe_payment_label}</code>")
-    if safe_payment_details:
-        blocks[-1].append(f"<pre>{safe_payment_details}</pre>")
+    if not details_shown_above:
+        blocks[-1] += _render_payment_details_lines(payment_details, copyable=copyable)
     if safe_payment_link:
         blocks[-1].append(f"🔗 Link: {safe_payment_link}")
     if safe_comment:
-        blocks.append(["📝 Comment:", f"<code>{safe_comment}</code>"])
+        blocks.append([f"<blockquote>📝 {safe_comment}</blockquote>"])
     return blocks
 
 
@@ -239,9 +286,18 @@ def _build_batch_reminder_message(
     items: list[dict[str, object]],
     total_text: Optional[str],
     footer: str,
+    tz_name: Optional[str] = None,
+    today: Optional[date] = None,
 ) -> str:
     blocks: list[list[str]] = [[f"{escape_html(person_name)},"]]
+    rendered_details: set[str] = set()
     for idx, item in enumerate(items, 1):
+        item_due_value = item.get("due_value")
+        item_today = item.get("today")
+        item_details = str(item.get("payment_details") or "").strip()
+        details_shown_above = bool(item_details) and item_details in rendered_details
+        if item_details:
+            rendered_details.add(item_details)
         blocks += _build_subscription_blocks(
             index=idx,
             subscription_name=str(item["subscription_name"]),
@@ -253,15 +309,14 @@ def _build_batch_reminder_message(
             payment_details=str(item.get("payment_details") or ""),
             payment_link=str(item.get("payment_link") or ""),
             comment=str(item.get("comment") or ""),
+            due_value=str(item_due_value) if item_due_value else None,
+            tz_name=str(item.get("tz_name") or tz_name or "") or None,
+            today=item_today if isinstance(item_today, date) else today,
+            details_shown_above=details_shown_above,
+            copyable=bool(item.get("copyable")),
         )
     if total_text:
-        blocks.append(
-            [
-                "==============================",
-                "💳 Total:",
-                f"💰 Amount: <code>{escape_html(total_text)}</code>",
-            ]
-        )
+        blocks.append([f"💰 <b>Total: {escape_html(total_text)}</b>"])
     if footer:
         blocks.append([footer])
     return "\n\n".join("\n".join(block) for block in blocks)
@@ -889,6 +944,9 @@ async def _run_reminder_pass(
                                     "subscription_name": raw_name,
                                     "status_text": status_text,
                                     "due_date_text": due_date_text,
+                                    "due_value": cycle_due.isoformat(),
+                                    "tz_name": effective_timezone,
+                                    "today": local_today,
                                     "amount_text": f"{person_amount_value:.2f} {cycle_currency}",
                                     "payment_label": cycle_payment_label,
                                     "payment_details": cycle_payment_details,
@@ -920,6 +978,9 @@ async def _run_reminder_pass(
                                 "subscription_label": str(item.get("name", "")),
                                 "status_text": status_text,
                                 "due_date_text": due_date_text,
+                                "due_value": cycle_due.isoformat(),
+                                "tz_name": effective_timezone,
+                                "today": local_today,
                                 "amount_text": amount_text,
                                 "converted_text": converted_display,
                                 "payment_label": cycle_payment_label,
@@ -956,7 +1017,7 @@ async def _run_reminder_pass(
                     total_amount = float(details.get("amount") or item["amount"])
                     admin_comment_value = str(details.get("comment") or "").strip()
                     admin_comment = f"\nComment: {escape_html(admin_comment_value)}" if admin_comment_value else ""
-                    context_text = _format_context_text(due_date_value, today)
+                    context_text = _format_context_text(due_date_value, today, admin_timezone_name)
                     admin_note = (
                         f"🔔 {safe_name}\n"
                         f"{context_text}\n"
@@ -1018,7 +1079,7 @@ async def _run_reminder_pass(
                         continue
                 safe_currency = escape_html(cycle_currency)
                 admin_comment = f"\nComment: {escape_html(cycle_comment)}" if cycle_comment else ""
-                context_text = _format_context_text(cycle_due, today)
+                context_text = _format_context_text(cycle_due, today, admin_timezone_name)
                 admin_note = (
                     f"🔔 {safe_name}\n"
                     f"{context_text}\n"
@@ -1051,6 +1112,11 @@ async def _run_reminder_pass(
             payment_link=str(notice.get("payment_link") or ""),
             comment=str(notice.get("comment") or ""),
             footer=str(notice["footer"]),
+            due_value=str(notice["due_value"]),
+            tz_name=str(notice["tz_name"]),
+            today=notice["today"],
+            # No keyboard goes with an auto-paid notice, so nothing to copy.
+            copyable=False,
         )
         sent = await _send_message_with_retry(
             bot,
@@ -1068,6 +1134,7 @@ async def _run_reminder_pass(
         person_name = str(items[0].get("person_name") or "")
         if len(items) == 1:
             item = items[0]
+            item_details = str(item.get("payment_details") or "")
             message_text = _build_reminder_message(
                 person_name=person_name,
                 subscription_name=str(item["subscription_name"]),
@@ -1076,14 +1143,21 @@ async def _run_reminder_pass(
                 amount_text=str(item["amount_text"]),
                 converted_text=item.get("converted_text"),
                 payment_label=str(item.get("payment_label") or ""),
-                payment_details=str(item.get("payment_details") or ""),
+                payment_details=item_details,
                 payment_link=str(item.get("payment_link") or ""),
                 comment=str(item.get("comment") or ""),
                 footer="Tap “Paid” when the bill is covered.",
+                due_value=str(item["due_value"]),
+                tz_name=str(item["tz_name"]),
+                today=item["today"],
+                # The keyboard below carries the copy row for exactly these details.
+                copyable=extract_copyable_requisite(item_details) is not None,
             )
             keyboard = build_payment_confirmation_keyboard(
                 int(item["subscription_id"]),
                 item["due_date"],
+                payment_details=item_details,
+                payment_link=str(item.get("payment_link") or ""),
             )
             message_id = await _send_message_with_retry(
                 bot,
@@ -1127,13 +1201,36 @@ async def _run_reminder_pass(
             total_currency = str(items[0].get("target_currency") or converter.target_currency)
             total_text = format_converted_amount(total_value, total_currency, rounding_mode)
 
+        # One copy/link row for the whole batch: the first item whose details
+        # yield a copyable requisite provides it (identical details are the
+        # common case); only the items matching that requisite get the
+        # collapsed quote, the rest keep the monospace block.
+        batch_details = next(
+            (
+                details
+                for details in (str(item.get("payment_details") or "") for item in items)
+                if extract_copyable_requisite(details) is not None
+            ),
+            "",
+        )
+        batch_requisite = extract_copyable_requisite(batch_details)
+        for item in items:
+            item["copyable"] = (
+                batch_requisite is not None
+                and extract_copyable_requisite(str(item.get("payment_details") or "")) == batch_requisite
+            )
+        batch_link = next((str(item.get("payment_link") or "") for item in items if item.get("payment_link")), "")
         message_text = _build_batch_reminder_message(
             person_name=person_name,
             items=items,
             total_text=total_text,
             footer="Tap “Paid” when the bill is covered.",
         )
-        keyboard = build_batch_payment_confirmation_keyboard(items)
+        keyboard = build_batch_payment_confirmation_keyboard(
+            items,
+            payment_details=batch_details,
+            payment_link=batch_link,
+        )
         message_id = await _send_message_with_retry(
             bot,
             telegram_id,

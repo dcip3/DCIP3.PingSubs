@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import html
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from aiogram import Bot, F
 
@@ -57,6 +57,7 @@ from app.core.reminders import (
     normalize_time_string,
     normalize_timezone_name,
     parse_time_string,
+    parse_timezone,
 )
 from app.storage.db import Database
 from app.services import (
@@ -1342,7 +1343,11 @@ async def handle_test_reminder_send(
         return
 
     full_name = str(person.get("full_name") or "Unknown")
-    today = date.today()
+    recipient_timezone = normalize_timezone_name(
+        await db.get_effective_user_timezone(int(person["telegram_id"]), DEFAULT_REMINDER_TIMEZONE),
+        DEFAULT_REMINDER_TIMEZONE,
+    ) or DEFAULT_REMINDER_TIMEZONE
+    today = datetime.now(parse_timezone(recipient_timezone)).date()
     default_destination = None
     default_destination_id = await db.get_default_payment_destination_id()
     if default_destination_id is not None:
@@ -1412,11 +1417,19 @@ async def handle_test_reminder_send(
         payment_link=payment_link,
         comment="Test comment",
         footer="This is a test reminder. Tapping “Paid” will not record anything.",
+        due_value=today.isoformat(),
+        tz_name=recipient_timezone,
+        today=today,
     )
     await bot.send_message(
         int(person["telegram_id"]),
         text,
-        reply_markup=build_test_payment_confirmation_keyboard(0, today),
+        reply_markup=build_test_payment_confirmation_keyboard(
+            0,
+            today,
+            payment_details=payment_details,
+            payment_link=payment_link,
+        ),
     )
     await callback.answer("Test message sent.")
     await send_test_user_list(callback, db)
