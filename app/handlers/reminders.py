@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import contextlib
+import logging
 from datetime import datetime
 
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery
 
 from app.core.constants import PAYMENT_MODE_FIXED
@@ -15,15 +16,33 @@ from app.core.reminders import calculate_next_charge_date
 
 from . import public_router
 
+logger = logging.getLogger(__name__)
+
 
 @public_router.callback_query(ReminderAction.filter())
 async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderAction, db: Database) -> None:
+    user_id = callback.from_user.id if callback.from_user else None
     subscription = await db.get_subscription(callback_data.subscription_id)
-    if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
+    if not subscription or user_id is None:
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
         return
 
     due_value = callback_data.due_date
+    # Authorize before touching cycle state so that a forged callback can neither
+    # freeze snapshots nor probe which subscriptions and cycles exist.
+    known_state = (await db.list_cycle_participants_for_due_dates(subscription["id"], [due_value])).get(
+        due_value
+    ) or {}
+    known_participants = list(known_state.get("participants") or [])
+    if not known_participants and not bool(known_state.get("snapshot_ready")):
+        known_participants = await db.list_subscription_participants(subscription["id"])
+    known_ids = {
+        int(person["telegram_id"]) for person in known_participants if person.get("telegram_id") is not None
+    }
+    if user_id not in known_ids and not await db.is_admin(user_id):
+        await callback.answer("You don't have access to this subscription.", show_alert=True)
+        return
+
     # Do not recreate the cycle here: a stale "Paid" button (after the cycle was
     # moved, reset, or closed) must not resurrect a ghost cycle at the old date.
     open_cycles = await db.list_open_cycles(subscription["id"])
@@ -48,16 +67,6 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         cycle_amount = float(subscription["amount"])
     if not settings_snapshot_ready:
         cycle_share_limit = subscription.get("share_limit")
-
-    user_id = callback.from_user.id if callback.from_user else None
-    is_authorized = False
-    if user_id is not None:
-        participant_ids = {int(person["telegram_id"]) for person in cycle_participants}
-        if user_id in participant_ids or await db.is_admin(user_id):
-            is_authorized = True
-    if not is_authorized:
-        await callback.answer("Only users or admins can confirm payments.", show_alert=True)
-        return
 
     try:
         due_date = datetime.strptime(due_value, "%Y-%m-%d").date()
@@ -142,8 +151,10 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         for admin_id in admin_ids:
             if user_id is not None and admin_id == user_id:
                 continue
-            with contextlib.suppress(Exception):
+            try:
                 await callback.bot.send_message(admin_id, admin_note)
+            except TelegramAPIError as exc:
+                logger.warning("Cannot notify admin %s about a payment: %s", admin_id, exc)
 
     if admin_ids and notify_closed and cycle_closed:
         close_note = (
@@ -151,8 +162,10 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
             f"({format_due_date(due_value)})"
         )
         for admin_id in admin_ids:
-            with contextlib.suppress(Exception):
-                    await callback.bot.send_message(admin_id, close_note)
+            try:
+                await callback.bot.send_message(admin_id, close_note)
+            except TelegramAPIError as exc:
+                logger.warning("Cannot notify admin %s about a closed cycle: %s", admin_id, exc)
 
 
 @public_router.callback_query(TestPaidAction.filter())
