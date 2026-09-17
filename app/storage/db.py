@@ -534,28 +534,6 @@ class Database:
             return
         await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
-    async def upsert_friend(self, telegram_id: int, full_name: str) -> int:
-        assert self._conn is not None, "Database is not connected"
-        cursor = await self._conn.execute(
-            "SELECT id FROM friends WHERE telegram_id = ?",
-            (telegram_id,),
-        )
-        row = await cursor.fetchone()
-        if row:
-            await self._conn.execute(
-                "UPDATE friends SET full_name = ? WHERE telegram_id = ?",
-                (full_name, telegram_id),
-            )
-            await self._conn.commit()
-            return row["id"]
-
-        cursor = await self._conn.execute(
-            "INSERT INTO friends (telegram_id, full_name) VALUES (?, ?)",
-            (telegram_id, full_name),
-        )
-        await self._conn.commit()
-        return cursor.lastrowid
-
     async def create_friend_invite(
         self,
         full_name: str,
@@ -642,38 +620,6 @@ class Database:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
-    async def get_friend_balance(self, friend_id: int) -> float:
-        assert self._conn is not None, "Database is not connected"
-        cursor = await self._conn.execute(
-            "SELECT balance FROM friends WHERE id = ?",
-            (friend_id,),
-        )
-        row = await cursor.fetchone()
-        if not row:
-            return 0.0
-        try:
-            return float(row["balance"] or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    async def get_friend_balance_currency(
-        self,
-        friend_id: int,
-        default_currency: str = "RUB",
-    ) -> str:
-        assert self._conn is not None, "Database is not connected"
-        cursor = await self._conn.execute(
-            "SELECT balance_currency FROM friends WHERE id = ?",
-            (friend_id,),
-        )
-        row = await cursor.fetchone()
-        if not row:
-            return default_currency.strip().upper() or "RUB"
-        value = str(row["balance_currency"] or "").strip().upper()
-        if len(value) == 3 and value.isalpha():
-            return value
-        return default_currency.strip().upper() or "RUB"
-
     async def get_friend_balance_by_telegram(self, telegram_id: int) -> float:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
@@ -687,24 +633,6 @@ class Database:
             return float(row["balance"] or 0.0)
         except (TypeError, ValueError):
             return 0.0
-
-    async def get_friend_balance_currency_by_telegram(
-        self,
-        telegram_id: int,
-        default_currency: str = "RUB",
-    ) -> str:
-        assert self._conn is not None, "Database is not connected"
-        cursor = await self._conn.execute(
-            "SELECT balance_currency FROM friends WHERE telegram_id = ?",
-            (telegram_id,),
-        )
-        row = await cursor.fetchone()
-        if not row:
-            return default_currency.strip().upper() or "RUB"
-        value = str(row["balance_currency"] or "").strip().upper()
-        if len(value) == 3 and value.isalpha():
-            return value
-        return default_currency.strip().upper() or "RUB"
 
     async def get_friend_balance_snapshot_by_telegram(
         self,
@@ -727,25 +655,6 @@ class Database:
         if len(currency_value) != 3 or not currency_value.isalpha():
             currency_value = default_currency.strip().upper() or "RUB"
         return max(balance_value, 0.0), currency_value
-
-    async def add_friend_balance(self, friend_id: int, amount: float) -> Optional[float]:
-        assert self._conn is not None, "Database is not connected"
-        await self._conn.execute(
-            """
-            UPDATE friends
-            SET balance = COALESCE(balance, 0) + ?
-            WHERE id = ?
-            """,
-            (amount, friend_id),
-        )
-        await self._conn.commit()
-        friend = await self.get_friend(friend_id)
-        if not friend:
-            return None
-        try:
-            return float(friend.get("balance") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
 
     async def set_friend_balance(self, friend_id: int, amount: float) -> Optional[float]:
         assert self._conn is not None, "Database is not connected"
@@ -1128,16 +1037,6 @@ class Database:
 
         return subscriptions
 
-    async def postpone_subscription(self, subscription_id: int, next_charge: date) -> None:
-        assert self._conn is not None, "Database is not connected"
-        await self._conn.execute(
-            "UPDATE subscriptions SET next_charge_at = ? WHERE id = ?",
-            (next_charge.isoformat(), subscription_id),
-        )
-        await self._conn.execute("DELETE FROM reminder_logs WHERE subscription_id = ?", (subscription_id,))
-        await self._conn.execute("DELETE FROM reminder_user_logs WHERE subscription_id = ?", (subscription_id,))
-        await self._conn.commit()
-
     async def has_admins(self) -> bool:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute("SELECT 1 FROM admins LIMIT 1")
@@ -1308,12 +1207,6 @@ class Database:
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
-
-    async def clear_reminder_logs(self, subscription_id: int) -> None:
-        assert self._conn is not None, "Database is not connected"
-        await self._conn.execute("DELETE FROM reminder_logs WHERE subscription_id = ?", (subscription_id,))
-        await self._conn.execute("DELETE FROM reminder_user_logs WHERE subscription_id = ?", (subscription_id,))
-        await self._conn.commit()
 
     async def get_setting(self, key: str) -> Optional[str]:
         assert self._conn is not None, "Database is not connected"
@@ -1921,36 +1814,6 @@ class Database:
         )
         await self._conn.commit()
 
-    async def list_payment_summary_by_month(self) -> List[Dict[str, Any]]:
-        assert self._conn is not None, "Database is not connected"
-        cursor = await self._conn.execute(
-            """
-            SELECT substr(paid_at, 1, 7) AS month,
-                   COUNT(DISTINCT paid_by_telegram_id) AS people_count
-            FROM payment_logs
-            GROUP BY month
-            ORDER BY month DESC
-            """
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-    async def list_payment_activity(self, start_date: str) -> List[Dict[str, Any]]:
-        assert self._conn is not None, "Database is not connected"
-        cursor = await self._conn.execute(
-            """
-            SELECT subscription_id,
-                   paid_by_telegram_id,
-                   substr(paid_at, 1, 7) AS month
-            FROM payment_logs
-            WHERE paid_at >= ? AND paid_by_telegram_id IS NOT NULL
-            GROUP BY subscription_id, paid_by_telegram_id, month
-            """,
-            (start_date,),
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
     async def get_latest_paid_due_for_user(
         self,
         subscription_id: int,
@@ -2297,38 +2160,6 @@ class Database:
                 due_value,
             ),
         )
-
-    async def is_cycle_participant_snapshot_ready(self, subscription_id: int, due_date: date | str) -> bool:
-        assert self._conn is not None, "Database is not connected"
-        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
-        cursor = await self._conn.execute(
-            """
-            SELECT participants_snapshot_ready
-            FROM subscription_cycles
-            WHERE subscription_id = ? AND due_date = ?
-            LIMIT 1
-            """,
-            (subscription_id, due_value),
-        )
-        row = await cursor.fetchone()
-        if not row:
-            return False
-        return int(row["participants_snapshot_ready"] or 0) == 1
-
-    async def list_cycle_participants(self, subscription_id: int, due_date: date | str) -> List[Dict[str, Any]]:
-        assert self._conn is not None, "Database is not connected"
-        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
-        cursor = await self._conn.execute(
-            """
-            SELECT telegram_id, full_name, share_weight, fixed_amount
-            FROM subscription_cycle_participants
-            WHERE subscription_id = ? AND due_date = ?
-            ORDER BY full_name
-            """,
-            (subscription_id, due_value),
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
 
     async def list_cycle_participants_for_due_dates(
         self,

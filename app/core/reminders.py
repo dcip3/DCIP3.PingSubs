@@ -10,7 +10,6 @@ from app.core.constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
 DEFAULT_REMINDER_TIME = "16:00"
 DEFAULT_REMINDER_TIMEZONE = "Europe/Moscow"
 DEFAULT_REMINDER_OFFSETS = [-1, 0]
-REMINDER_TIMEZONE = ZoneInfo(DEFAULT_REMINDER_TIMEZONE)
 
 
 def normalize_monthly_anchor_day(value: object | None) -> int | None:

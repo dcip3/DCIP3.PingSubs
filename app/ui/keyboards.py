@@ -851,16 +851,6 @@ def subscription_payment_destination_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def subscription_reminder_time_edit_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="↩️ Default",
-        callback_data=SubscriptionAction(action="remindertime_default", subscription_id=subscription_id).pack(),
-    )
-    builder.adjust(1)
-    return builder.as_markup()
-
-
 def subscription_reminder_time_keyboard(
     subscription_id: int,
     current_time: str,
@@ -1103,66 +1093,6 @@ def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
     )
     return builder.as_markup()
-
-
-def subscription_payment_mode_keyboard(
-    subscription_id: int,
-    current_mode: str,
-) -> InlineKeyboardMarkup:
-    normalized_mode = (current_mode or PAYMENT_MODE_SPLIT).strip().lower()
-    rows: list[list[InlineKeyboardButton]] = []
-
-    if normalized_mode == PAYMENT_MODE_SPLIT:
-        split_button = InlineKeyboardButton(
-            text="Split by shares",
-            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_SPLIT}",
-            style="success",
-        )
-    else:
-        split_button = InlineKeyboardButton(
-            text="Split by shares",
-            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_SPLIT}",
-        )
-    if normalized_mode == PAYMENT_MODE_FIXED:
-        fixed_button = InlineKeyboardButton(
-            text="Fixed per user",
-            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
-            style="success",
-        )
-    else:
-        fixed_button = InlineKeyboardButton(
-            text="Fixed per user",
-            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
-        )
-    rows.append([split_button, fixed_button])
-    if normalized_mode == PAYMENT_MODE_FIXED:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="💵 Amount per user",
-                    callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
-                )
-            ]
-        )
-    else:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="➗ Split limit",
-                    callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack(),
-                )
-            ]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def subscription_user_amounts_keyboard(

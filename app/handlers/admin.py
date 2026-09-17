@@ -33,15 +33,12 @@ from app.ui.helpers import (
     send_public_subscription_detail,
     send_public_subscription_payment_report,
     send_public_user_payment_report,
-    send_member_list,
     send_settings_tests_menu,
     send_subscription_list,
     send_test_user_list,
     send_user_subscription_list,
 )
 from app.ui.states import (
-    FriendForm,
-    MemberEditForm,
     PublicAccountForm,
     PublicReminderForm,
     PublicSubscriptionCurrencyForm,
@@ -1401,7 +1398,6 @@ async def handle_test_reminder_send(
         subscription_name="Test subscription",
         status_text=status_text,
         due_date_text=due_date_text,
-        share_text="1/1",
         amount_text=f"{test_amount_value:.2f} {test_amount_currency}",
         converted_text=converted_text,
         payment_label=payment_label,

@@ -13,7 +13,6 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from app.ui.keyboards import (
     build_batch_payment_confirmation_keyboard,
     build_payment_confirmation_keyboard,
-    build_test_payment_confirmation_keyboard,
 )
 from app.core.constants import (
     MONTHLY_PERIOD_SENTINEL,
@@ -45,9 +44,6 @@ class CurrencyConverter:
         if self._session is not None:
             await self._session.close()
 
-    async def convert(self, amount: float, source_currency: str) -> float:
-        return await self.convert_to(amount, source_currency, self.target_currency)
-
     async def convert_to(self, amount: float, source_currency: str, target_currency: str) -> float:
         currency = source_currency.upper()
         target = target_currency.upper()
@@ -76,10 +72,6 @@ class CurrencyConverter:
 
         self._cache[cache_key] = (result, now)
         return result
-
-    def set_target_currency(self, target_currency: str) -> None:
-        self.target_currency = target_currency.upper()
-        self._cache.clear()
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -154,35 +146,12 @@ def _format_status_and_date(due_date: date, today: date) -> tuple[str, str]:
     return f"Overdue by {days_overdue} day(s)", due_display
 
 
-def _build_share_line(
-    *,
-    share_amount: float,
-    weight: int,
-    share_base: int,
-    safe_currency: str,
-    converted_base: Optional[float],
-    rounding_mode: str,
-    target_currency: str,
-) -> tuple[str, str, float, Optional[float], Optional[str]]:
-    weight_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
-    share_amount_value = share_amount * weight
-    amount_line = f"{share_amount_value:.2f} {safe_currency}"
-    converted_value: Optional[float] = None
-    converted_display: Optional[str] = None
-    if converted_base is not None:
-        converted = converted_base * weight
-        converted_display = format_converted_amount(converted, target_currency, rounding_mode)
-        converted_value = float(converted)
-    return weight_text, amount_line, share_amount_value, converted_value, converted_display
-
-
 def _build_reminder_message(
     *,
     person_name: str,
     subscription_name: str,
     status_text: str,
     due_date_text: str,
-    share_text: str,
     amount_text: str,
     converted_text: Optional[str],
     payment_label: str,
@@ -197,7 +166,6 @@ def _build_reminder_message(
         subscription_name=subscription_name,
         status_text=status_text,
         due_date_text=due_date_text,
-        share_text=share_text,
         amount_text=amount_text,
         converted_text=converted_text,
         payment_label=payment_label,
@@ -216,7 +184,6 @@ def _build_subscription_blocks(
     subscription_name: str,
     status_text: str,
     due_date_text: str,
-    share_text: str,
     amount_text: str,
     converted_text: Optional[str],
     payment_label: str,
@@ -231,7 +198,6 @@ def _build_subscription_blocks(
     safe_name = escape_html(subscription_name)
     safe_status = escape_html(status_text)
     safe_due_date = escape_html(due_date_text)
-    _ = share_text  # kept for compatibility with existing call sites
     safe_amount = escape_html(amount_text)
     safe_converted = escape_html(converted_text) if converted_text else None
     safe_payment_label = escape_html(payment_label) if payment_label else "not set"
@@ -276,7 +242,6 @@ def _build_batch_reminder_message(
             subscription_name=str(item["subscription_name"]),
             status_text=str(item["status_text"]),
             due_date_text=str(item["due_date_text"]),
-            share_text=str(item["share_text"]),
             amount_text=str(item["amount_text"]),
             converted_text=item.get("converted_text"),
             payment_label=str(item.get("payment_label") or ""),
@@ -755,10 +720,8 @@ async def _run_reminder_pass(
                     if cycle_payment_mode == PAYMENT_MODE_FIXED:
                         base_amount = fixed_amount if fixed_amount is not None else cycle_amount
                         person_amount_value = base_amount * weight
-                        share_text = "fixed"
                     else:
                         person_amount_value = share_amount * weight
-                        share_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
                     remaining_amount_value = float(person_amount_value)
                     balance_currency = user_balance_currency_cache.get(telegram_id)
                     current_balance = user_balance_cache.get(telegram_id)
@@ -943,7 +906,6 @@ async def _run_reminder_pass(
                                 "subscription_label": str(item.get("name", "")),
                                 "status_text": status_text,
                                 "due_date_text": due_date_text,
-                                "share_text": share_text,
                                 "amount_text": amount_text,
                                 "converted_text": converted_display,
                                 "payment_label": cycle_payment_label,
@@ -1068,7 +1030,6 @@ async def _run_reminder_pass(
             subscription_name=str(notice["subscription_name"]),
             status_text=str(notice["status_text"]),
             due_date_text=str(notice["due_date_text"]),
-            share_text="paid",
             amount_text=str(notice["amount_text"]),
             converted_text=None,
             payment_label=str(notice.get("payment_label") or ""),
@@ -1098,7 +1059,6 @@ async def _run_reminder_pass(
                 subscription_name=str(item["subscription_name"]),
                 status_text=str(item["status_text"]),
                 due_date_text=str(item["due_date_text"]),
-                share_text=str(item["share_text"]),
                 amount_text=str(item["amount_text"]),
                 converted_text=item.get("converted_text"),
                 payment_label=str(item.get("payment_label") or ""),
@@ -1203,139 +1163,6 @@ async def send_reminders_now(
         target_telegram_id=target_telegram_id,
         record_manual_suppressions=suppress_auto_today,
     )
-
-
-async def send_test_reminders(
-    bot: Bot,
-    db: Database,
-    converter: CurrencyConverter,
-    subscription_id: int,
-    rounding_mode: str = "precise",
-    target_telegram_id: Optional[int] = None,
-) -> int:
-    logger = logging.getLogger("test_reminder_sender")
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        return 0
-
-    participants = await db.list_subscription_participants(subscription_id)
-    target_participants = participants
-    if target_telegram_id is not None:
-        target_participants = [
-            person for person in participants
-            if person.get("telegram_id") == target_telegram_id
-        ]
-    if not target_participants:
-        return 0
-
-    try:
-        due_date = _parse_due_date(str(subscription["next_charge_at"]))
-    except (KeyError, ValueError):
-        return 0
-
-    raw_name = str(subscription.get("name", ""))
-    raw_currency = str(subscription.get("currency", ""))
-    raw_comment = str(subscription.get("comment", "")).strip()
-    current_payment_destination = await db.get_effective_subscription_payment_destination(subscription_id)
-    raw_payment_label = "not set"
-    raw_payment_details = ""
-    raw_payment_link = ""
-    if current_payment_destination:
-        try:
-            selected_destination_id = (
-                int(subscription.get("payment_destination_id"))
-                if subscription.get("payment_destination_id") is not None
-                else None
-            )
-        except (TypeError, ValueError):
-            selected_destination_id = None
-        label_base = f"{current_payment_destination['title']} · {current_payment_destination['currency']}"
-        raw_payment_label = label_base if selected_destination_id is not None else f"Default ({label_base})"
-        raw_payment_details = str(current_payment_destination.get("details") or "").strip()
-        raw_payment_link = str(current_payment_destination.get("payment_link") or "").strip()
-    source_currency = raw_currency.upper()
-    admin_timezone_name = normalize_timezone_name(
-        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
-        DEFAULT_REMINDER_TIMEZONE,
-    ) or DEFAULT_REMINDER_TIMEZONE
-    today = datetime.now(parse_timezone(admin_timezone_name)).date()
-    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
-    share_base = calculate_share_base(subscription, participants)
-    share_amount = subscription["amount"] / share_base
-
-    sent_count = 0
-    target_currency_cache: dict[int, str] = {}
-    converted_share_cache: dict[tuple[str, float], Optional[float]] = {}
-    for person in target_participants:
-        telegram_id = int(person["telegram_id"])
-        target_currency = target_currency_cache.get(telegram_id)
-        if target_currency is None:
-            target_currency = await db.get_effective_target_currency(
-                telegram_id,
-                subscription_id,
-                subscription_default=str(subscription.get("base_currency") or converter.target_currency),
-                default_currency=converter.target_currency,
-            )
-            target_currency_cache[telegram_id] = target_currency
-
-        weight = int(person.get("share_weight") or 1)
-        fixed_amount = parse_fixed_amount(person.get("fixed_amount"))
-        if payment_mode == PAYMENT_MODE_FIXED:
-            base_amount = fixed_amount if fixed_amount is not None else float(subscription["amount"])
-            person_amount_value = base_amount * weight
-            share_text = "fixed"
-        else:
-            person_amount_value = share_amount * weight
-            share_text = f"{weight}/{share_base}" if weight > 1 else f"1/{share_base}"
-        amount_text = f"{person_amount_value:.2f} {raw_currency}"
-
-        converted_cache_key = (target_currency, round(person_amount_value, 8))
-        converted_base = converted_share_cache.get(converted_cache_key)
-        if converted_cache_key not in converted_share_cache:
-            if source_currency == target_currency:
-                converted_base = None
-            else:
-                try:
-                    converted_base = await converter.convert_to(person_amount_value, source_currency, target_currency)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Conversion failed for test reminder %s and currency %s: %s",
-                        subscription_id,
-                        target_currency,
-                        exc,
-                    )
-                    converted_base = None
-            converted_share_cache[converted_cache_key] = converted_base
-        converted_display = None
-        if converted_base is not None:
-            converted_display = format_converted_amount(converted_base, target_currency, rounding_mode)
-        status_text, due_date_text = _format_status_and_date(due_date, today)
-        message_text = _build_reminder_message(
-            person_name=str(person["full_name"]),
-            subscription_name=raw_name,
-            status_text=status_text,
-            due_date_text=due_date_text,
-            share_text=share_text,
-            amount_text=amount_text,
-            converted_text=converted_display,
-            payment_label=raw_payment_label,
-            payment_details=raw_payment_details,
-            payment_link=raw_payment_link,
-            comment=raw_comment,
-            footer="This is a test reminder. Tapping “Paid” will not record anything.",
-        )
-        keyboard = build_test_payment_confirmation_keyboard(subscription_id, due_date)
-        message_id = await _send_message_with_retry(
-            bot,
-            telegram_id,
-            message_text,
-            reply_markup=keyboard,
-            logger=logger,
-        )
-        if message_id is not None:
-            sent_count += 1
-
-    return sent_count
 
 
 async def reminder_worker(

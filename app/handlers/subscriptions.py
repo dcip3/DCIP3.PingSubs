@@ -43,7 +43,6 @@ from app.ui.keyboards import (
     comment_edit_keyboard,
     dialog_cancel_inline_keyboard,
     subscription_payment_destination_keyboard,
-    subscription_payment_mode_keyboard,
     subscription_currency_keyboard,
     subscription_base_currency_keyboard,
     subscription_reminder_time_keyboard,
@@ -148,21 +147,6 @@ async def _advance_subscription_after_cycle_close(
     monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
     next_due = calculate_next_charge_date(cycle_due, period_days, monthly_anchor_day)
     await db.update_subscription_fields(int(subscription["id"]), next_charge_at=next_due)
-
-
-async def _show_payment_mode_menu(
-    callback: CallbackQuery,
-    subscription_id: int,
-    current_mode: str,
-) -> None:
-    if callback.message:
-        await callback.message.edit_text(
-            "💳 Payment mode:\n"
-            "\n"
-            "Choose how each user amount is calculated.\n"
-            "Then configure the option below.",
-            reply_markup=subscription_payment_mode_keyboard(subscription_id, current_mode),
-        )
 
 
 async def _show_reminder_time_menu(
@@ -295,8 +279,6 @@ async def _finalize_new_subscription(
     await state.clear()
 
     target = _response_target(responder)
-    period_days = int(data["period_days"])
-    cadence = "monthly" if period_days == MONTHLY_PERIOD_SENTINEL else f"every {period_days} days"
 
     await target.answer(
         "Subscription saved.",

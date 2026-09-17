@@ -19,9 +19,9 @@ from app.core.constants import (
     DEFAULT_CURRENCIES,
     MONTHLY_PERIOD_SENTINEL,
     PAYMENT_MODE_FIXED,
-    PAYMENT_MODE_SPLIT,
 )
 from app.storage.db import Database
+from app.services import normalize_payment_mode, parse_fixed_amount
 from app.ui.keyboards import (
     admin_reply_keyboard,
     build_members_list_keyboard,
@@ -48,7 +48,6 @@ from app.ui.keyboards import (
     subscription_cycle_actions_keyboard,
     subscription_open_cycles_keyboard,
     subscription_more_keyboard,
-    subscription_payment_destination_keyboard,
     subscription_payment_info_keyboard,
     subscription_report_keyboard,
     subscription_detail_keyboard,
@@ -111,27 +110,8 @@ def _build_user_info_text(
     return "\n".join(lines)
 
 
-def _normalize_payment_mode(raw_value: object) -> str:
-    value = str(raw_value or PAYMENT_MODE_SPLIT).strip().lower()
-    if value == PAYMENT_MODE_FIXED:
-        return PAYMENT_MODE_FIXED
-    return PAYMENT_MODE_SPLIT
-
-
-def _to_fixed_amount(raw_value: object) -> Optional[float]:
-    if raw_value is None:
-        return None
-    try:
-        value = float(raw_value)
-    except (TypeError, ValueError):
-        return None
-    if value < 0:
-        return None
-    return value
-
-
 def _effective_fixed_amount(subscription_amount: float, raw_value: object) -> float:
-    fixed_amount = _to_fixed_amount(raw_value)
+    fixed_amount = parse_fixed_amount(raw_value)
     if fixed_amount is None:
         return subscription_amount
     return fixed_amount
@@ -156,7 +136,7 @@ def _sum_users_total(
 ) -> float:
     if not participants:
         return 0.0
-    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
     if payment_mode == PAYMENT_MODE_FIXED:
         subscription_amount = float(subscription.get("amount") or 0.0)
         total = 0.0
@@ -514,7 +494,7 @@ async def send_public_subscription_detail(
         except ValueError:
             pass
     next_charge = _format_iso_date(next_charge_value)
-    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
     _, share_text = _share_details(subscription, participants)
     split_share_base = _split_share_base(subscription, participants)
     per_person = subscription["amount"] / split_share_base
@@ -1081,7 +1061,7 @@ def _share_details(
     subscription: Dict[str, object],
     participants: Sequence[Dict[str, object]],
 ) -> tuple[int, str]:
-    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
     if payment_mode == PAYMENT_MODE_FIXED:
         return 1, "fixed per user"
 
@@ -1108,7 +1088,7 @@ def _build_subscription_detail_text(
     payment_details: str,
     payment_link: str,
 ) -> str:
-    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
     split_share_base = _split_share_base(subscription, participants)
     _, share_text = _share_details(subscription, participants)
     per_person = subscription["amount"] / split_share_base
@@ -1419,7 +1399,7 @@ async def send_participants_settings(target: Responder, db: Database, subscripti
         return
 
     participants = await db.list_subscription_participants(subscription_id)
-    payment_mode = _normalize_payment_mode(subscription.get("payment_mode"))
+    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
     total_shares = sum(int(person.get("share_weight") or 1) for person in participants)
     if payment_mode == PAYMENT_MODE_FIXED:
         mode_details = "per-user amounts"

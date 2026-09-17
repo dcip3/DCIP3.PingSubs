@@ -34,6 +34,8 @@ required.
 ```bash
 python -m unittest discover -s tests -v
 python -m compileall -q app main.py scripts tests
+python -m pip install ruff==0.16.8
+python -m ruff check --select F401,F811,F821,F822,F823,F841 app main.py scripts tests
 python scripts/check_commit_messages.py --rev-range HEAD
 gitleaks git --log-opts="--all --full-history" --redact
 python -m pip install pip-audit
