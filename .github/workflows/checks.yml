@@ -26,7 +26,7 @@ jobs:
           echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz' | sha256sum --check
           tar -xzf gitleaks.tar.gz gitleaks
       - name: Scan full history for secrets
-        run: '"$RUNNER_TEMP/gitleaks" git --log-opts="--all --full-history" --redact --no-banner'
+        run: '"$RUNNER_TEMP/gitleaks" git --log-opts="--all --full-history" --redact --verbose --no-banner'
 
   python:
     strategy:
@@ -51,6 +51,22 @@ jobs:
       - run: python scripts/check_commit_messages.py --rev-range HEAD
       # Whitespace errors in the committed tree (the empty tree is the diff base).
       - run: git diff --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The deployment builds this image; a Dockerfile mistake stops here.
+      - run: docker build --pull --tag pingsubs:ci .
+      # .dockerignore lets in only the files it lists, and some modules load only
+      # when the bot starts, so a missing one would pass the build and crash
+      # the bot. Import every module, offline.
+      - run: >-
+          docker run --rm --network none
+          pingsubs:ci python -c "import importlib, sys; [importlib.import_module(m) for m in sys.argv[1:]]"
+          $(git ls-files 'app/*.py' main.py | sed -e 's/[.]py$//' -e 's#/__init__$##' -e 's#/#.#g')
 
   dependencies:
     runs-on: ubuntu-latest
