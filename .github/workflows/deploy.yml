@@ -15,21 +15,52 @@ concurrency:
 
 jobs:
   deploy:
+    # Only pushes to main of this repository; never a pull request or a fork.
     if: >-
       github.repository == 'dcip3/DCIP3.PingSubs'
       && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
       && github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY_URL: https://github.com/${{ github.repository }}.git
         with:
           host: ${{ secrets.VDS_HOST }}
           username: ${{ secrets.VDS_USER }}
           key: ${{ secrets.VDS_SSH_KEY }}
+          fingerprint: ${{ secrets.VDS_HOST_FINGERPRINT }}
+          envs: DEPLOY_SHA,REPOSITORY_URL
           script: |
-            set -euo pipefail
+            set -eu
             cd /opt/DCIP3.PingSubs
-            git fetch --prune origin main
-            git reset --hard origin/main
+            # A forced fetch and a hard reset also survive a history rewrite
+            # or a repository move.
+            git remote set-url origin "$REPOSITORY_URL"
+            git fetch --quiet --prune origin +refs/heads/main:refs/remotes/origin/main
+            # Checks can finish out of order: deploy only the current tip of main.
+            if [ "$DEPLOY_SHA" != "$(git rev-parse origin/main)" ]; then
+              echo "Skipping $DEPLOY_SHA: main has moved on."
+              exit 0
+            fi
+            git reset --quiet --hard "$DEPLOY_SHA"
+            echo "Deploying $(git log -1 --format='%h %s')"
             docker compose up -d --build --remove-orphans
+            # A bot that exits at startup (a bad .env, say) keeps restarting and
+            # would still look deployed. Compare with the count right after the
+            # start, since an unchanged container keeps its old restarts.
+            # The bot's logs name Telegram users, so they stay on the server.
+            container=$(docker compose ps -q pingsubs)
+            [ -n "$container" ] || { echo "The bot container is not running."; exit 1; }
+            restarts=$(docker inspect -f '{{.RestartCount}}' "$container")
+            sleep 20
+            state=$(docker inspect -f '{{.State.Status}}, restarts: {{.RestartCount}}' "$container")
+            echo "pingsubs: $state"
+            if [ "$state" != "running, restarts: $restarts" ]; then
+              echo "The bot did not stay up; run docker compose logs pingsubs on the server."
+              exit 1
+            fi
