@@ -9,4 +9,4 @@ if ! command -v "$scanner" >/dev/null 2>&1; then
   echo "Install Gitleaks or set git config --local gitleaks.path /path/to/gitleaks." >&2
   exit 1
 fi
-exec "$scanner" git --pre-commit --staged --redact --no-banner
+exec "$scanner" git --pre-commit --staged --redact --verbose --no-banner

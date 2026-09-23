@@ -19,6 +19,8 @@ ENV/
 *.key
 *.p12
 *.pfx
+id_rsa*
+id_ed25519*
 credentials.json
 service-account*.json
 
@@ -33,7 +35,9 @@ data/
 backups/
 *.bundle
 
-# IDE files
+# Local tool and editor settings
+.claude/
+.codex/
 .vscode/
 .idea/
 .DS_Store
