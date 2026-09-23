@@ -11,9 +11,12 @@ Use the latest version on `main`; older revisions do not receive security fixes.
 - Keep the bot token in `.env` or your deployment secret store. Never commit it.
 - Set `ADMIN_IDS` to your own Telegram ID before the first startup. Without it,
   the first user to send `/start` to a fresh database becomes the administrator.
+- Invite links work once and expire after seven days; whoever opens one first is
+  linked to that member, so send each link privately to its person.
 - Keep the SQLite data directory private and back it up outside the repository.
 - Store deployment credentials in GitHub Actions secrets, using a dedicated SSH
-  account with only the access needed to deploy the bot.
+  account with only the access needed to deploy the bot, and pin the server's
+  host key with `VDS_HOST_FINGERPRINT`.
 - Run the secret and dependency checks described in `CONTRIBUTING.md` before
   publishing changes. Automated scans reduce risk but cannot prove no secret exists.
 

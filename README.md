@@ -48,13 +48,17 @@ Stop with `docker compose down`. Back up `data/` while the bot is stopped, and k
 <details>
 <summary>Optional: GitHub Actions deployment</summary>
 
-[deploy.yml](.github/workflows/deploy.yml) deploys `main` over SSH after the
-repository checks pass. Prepare a working installation at `/opt/DCIP3.PingSubs` on
-the server and configure the repository secrets `VDS_HOST`, `VDS_USER`, and
-`VDS_SSH_KEY`. The SSH user needs access to that directory, Git, and Docker; `.env`
-and `data/` remain on the server. The deployment resets the server checkout to
-`origin/main`, so keep local changes out of that directory. For a private
-repository, the server also needs GitHub read access.
+[deploy.yml](.github/workflows/deploy.yml) deploys the tip of `main` over SSH once
+the repository checks pass. Prepare a working installation at `/opt/DCIP3.PingSubs`
+on the server and add the repository secrets `VDS_HOST`, `VDS_USER`, and
+`VDS_SSH_KEY`, plus `VDS_HOST_FINGERPRINT` to pin the server's host key: the `SHA256:...`
+value from `ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub` on the server. The SSH user
+needs access to that directory, Git, and Docker; `.env` and `data/` stay on the
+server. The deployment points the checkout at this repository over HTTPS and resets
+it to the commit that passed the checks, so keep local changes out of that
+directory. It fails when the bot does not stay up for 20 seconds; the bot's logs
+stay on the server. In a fork, change the repository name in the workflow's `if:`
+condition and the installation path in its script.
 
 </details>
 
@@ -116,5 +120,7 @@ In **Settings**, users can choose their reminder time and timezone; a display
 currency can be picked per subscription from the subscription card.
 Reminders follow each recipient's timezone; subscription-specific times override
 base settings. Balance top-ups are credited after an admin confirms the transfer.
+
+No license has been chosen yet; public visibility alone does not grant permission to reuse the code.
 
 [Contributing & checks](CONTRIBUTING.md) · [Security](SECURITY.md)

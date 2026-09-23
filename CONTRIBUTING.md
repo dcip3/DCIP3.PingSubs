@@ -10,8 +10,9 @@ git config --local core.hooksPath .githooks
 
 If Gitleaks is not on PATH, set its executable with
 `git config --local gitleaks.path /absolute/path/to/gitleaks`.
-The pre-commit hook scans staged changes for secrets. The commit-msg hook checks
-the message format. CI also scans the complete Git history.
+The pre-commit hook scans staged changes for secrets with the rules in
+`.gitleaks.toml`. The commit-msg hook checks the message format. CI also scans
+the complete Git history.
 
 ## Commit messages
 
@@ -28,7 +29,8 @@ docs: explain local setup
 Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`,
 `chore`, `revert`. An optional scope and breaking-change `!` are supported.
 Credit actual human contributions accurately; generated tool signatures are not
-required.
+required. Pull requests are squash-merged, so give them a title in the same
+format; GitHub's own `Revert "..."` titles are accepted too.
 
 ## Local checks
 
@@ -44,7 +46,16 @@ gitleaks git --log-opts="--all --full-history" --redact
 python -m pip_audit -r requirements.txt
 ```
 
+CI also builds the Docker image and imports the bot inside it:
+
+```bash
+docker build --tag pingsubs:ci .
+docker run --rm --network none pingsubs:ci python -c "import main"
+```
+
+The tests run offline: they use temporary databases and never contact Telegram
+or the exchange-rate service.
+
 Keep `.env`, bot tokens, databases, backups, and real member/payment data out of
-commits and issue reports. Tests use temporary databases and never send Telegram
-messages. No license has been selected yet; public visibility alone does not
-grant permission to reuse the project.
+commits and issue reports. No license has been selected yet; public visibility
+alone does not grant permission to reuse the project.
