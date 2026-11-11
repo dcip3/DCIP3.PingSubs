@@ -9,6 +9,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from aiogram.types import CallbackQuery, Message, Update
 
 import app.handlers.admin as admin_handlers
+import app.handlers.members as members_handlers
 import main
 from app.error_handler import (
     ADMIN_ALERT_TITLE,
@@ -21,10 +22,10 @@ from app.error_handler import (
 )
 from app.handlers import admin_router, fallback_router, public_router
 from app.handlers.fallback import DEAD_BUTTON_TOAST, USE_THE_MENU_TEXT
-from app.ui.helpers import answer_callback_once, edit_in_place, respond_with_markup
+from app.ui.helpers import USER_GONE, answer_callback_once, edit_in_place, respond_with_markup
 from app.ui.keyboards import admin_reply_keyboard, guest_reply_keyboard, public_reply_keyboard
 from app.ui.states import MemberAction, SubscriptionForm
-from dispatcher_harness import RealDispatcherTestCase
+from dispatcher_harness import ADMIN_ID, RealDispatcherTestCase
 from keyboard_guard import install_keyboard_guard
 from telegram_fakes import (
     CHAT_ID,
@@ -409,6 +410,44 @@ class FallbackRouterTests(RealDispatcherTestCase):
         await self.feed(self.message("hello", chat_type="group"))
 
         self.assertEqual(self.bot.calls, [])
+
+
+class CardButtonTests(RealDispatcherTestCase):
+    async def test_card_button_opens_the_member_card_as_a_new_message(self):
+        await self.make_admin()
+        friend_id = await self.db.create_friend_invite("Ivan Petrov", "join_y", "2099-01-01T00:00:00")
+        alert = make_message(self.bot, 321, "🚨 Bot error", from_bot=True)
+
+        await self.feed(self.callback(MemberAction(action="open_new", friend_id=friend_id).pack(), alert))
+
+        sent = self.bot.of(SendMessage)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Ivan Petrov", sent[0].text)
+        self.assertEqual(self.bot.of(EditMessageText), [], "the alert stays as it is")
+        self.assertEqual(len(self.bot.answers()), 1)
+        self.assertNotEqual(self.bot.answers()[0].text, DEAD_BUTTON_TOAST)
+
+    async def test_card_button_for_a_deleted_user_toasts(self):
+        await self.make_admin()
+
+        await self.feed(self.callback(MemberAction(action="open_new", friend_id=999).pack()))
+
+        self.assertEqual([answer.text for answer in self.bot.answers()], [USER_GONE])
+        self.assertEqual(self.bot.of(SendMessage), [])
+
+    async def test_a_failing_handler_is_reported_through_the_real_dispatcher(self):
+        await self.make_admin()
+
+        with mock.patch.object(members_handlers, "send_member_list", mock.AsyncMock(side_effect=RuntimeError("db gone"))):
+            with self.assertLogs("app.error_handler", level="ERROR"):
+                await self.feed(self.message("👥 Users"), allow_errors=True)
+
+        texts = self.bot.sent_texts()
+        self.assertIn(USER_ERROR_TEXT, texts)
+        alerts = [text for text in texts if text.startswith(ADMIN_ALERT_TITLE)]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("RuntimeError: db gone", alerts[0])
+        self.assertIn(f"tg://user?id={ADMIN_ID}", alerts[0])
 
 
 class BotCommandsTests(unittest.TestCase):

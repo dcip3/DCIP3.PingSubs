@@ -138,11 +138,28 @@ class TestPaidAction(CallbackData, prefix="testpaid"):
 
 
 class MemberAction(CallbackData, prefix="member"):
+    """Users section buttons. ``friend_id`` is the page number for ``page``.
+
+    Actions: page, back, add, open, open_new (the card as a NEW message with
+    [✖️ Close], from admin alerts), report, invite (now asks first),
+    invite_yes (makes the new sign-in link), balance, balance_set,
+    balance_currency, balance_currency_other, rename, payment_destination,
+    delete (asks first), confirm_delete.
+    """
+
     action: str
     friend_id: int
 
 
 class PaymentDestinationAction(CallbackData, prefix="paydest"):
+    """Admin 💳 Payment buttons (handlers in app/handlers/payment_methods.py).
+
+    Actions: menu, open, create, edit_title, edit_currency, edit_details,
+    edit_link, clear_link (the link prompt's [🗑 Clear link]), set_default,
+    delete (asks first), confirm_delete. The wizard's quick buttons use the
+    raw callbacks 'paydest_wiz_cur:<CODE>' and 'paydest_wiz_skip'.
+    """
+
     action: str
     destination_id: int
 

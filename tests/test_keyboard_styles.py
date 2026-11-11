@@ -2,7 +2,6 @@
 
 import unittest
 
-from app.handlers.members import invite_link_keyboard
 from app.ui.keyboards import (
     COPY_TEXT_MAX_LEN,
     build_currency_keyboard,
@@ -12,6 +11,7 @@ from app.ui.keyboards import (
     build_subscription_list_keyboard,
     comment_edit_keyboard,
     dialog_cancel_inline_keyboard,
+    invite_link_keyboard,
     member_balance_keyboard,
     member_delete_confirm_keyboard,
     pagination_row,
@@ -63,16 +63,33 @@ class PrimaryActionTests(unittest.TestCase):
         self.assertEqual([button for button in _buttons(markup) if button.get("style")], [])
         self.assertEqual(_buttons(markup)[0]["text"], "➕ New subscription")
 
-    def test_add_user_is_the_primary_action(self):
-        markup = build_members_list_keyboard([{"id": 1, "full_name": "Anna"}], total_users=1)
-        self._assert_single_primary(markup, "➕ Add user")
+    def test_add_user_is_the_primary_action_only_while_there_are_no_users(self):
+        self._assert_single_primary(build_members_list_keyboard([], total_users=0), "➕ Add user")
+        markup = build_members_list_keyboard([{"id": 1, "full_name": "Anna", "telegram_id": 42}], total_users=1)
+        self.assertEqual([button for button in _buttons(markup) if button.get("style")], [])
+        self.assertEqual(_buttons(markup)[0]["text"], "➕ Add user")
 
-    def test_add_payment_method_is_the_primary_action(self):
+    def test_add_payment_method_is_the_primary_action_only_while_there_are_no_methods(self):
+        self._assert_single_primary(payment_destinations_keyboard([], None, 0), "➕ Add payment method")
         markup = payment_destinations_keyboard([{"id": 1, "title": "Card", "currency": "RUB"}], 1, 0)
-        self._assert_single_primary(markup, "➕ Add payment method")
+        self.assertEqual([button for button in _buttons(markup) if button.get("style")], [])
+        self.assertEqual(_buttons(markup)[-1]["text"], "➕ Add payment method")
+
+    def test_pending_top_ups_are_the_primary_action_while_some_wait(self):
+        markup = payment_destinations_keyboard([{"id": 1, "title": "Card", "currency": "RUB"}], 1, 2)
+        self._assert_single_primary(markup, "📥 Pending top-ups (2)")
+        self.assertEqual(_buttons(markup)[0]["callback_data"], "topup:admin_list:0")
+        # With no method yet the waiting top-ups stay the one call to action.
+        self._assert_single_primary(payment_destinations_keyboard([], None, 1), "📥 Pending top-ups (1)")
 
     def test_top_up_is_the_primary_action(self):
         self._assert_single_primary(public_account_keyboard(), "➕ Top up")
+
+    def test_balance_screen_has_no_coloured_button(self):
+        # Setting a balance is an everyday edit, not a call to action that is due now.
+        markup = member_balance_keyboard(7)
+        self.assertEqual([button for button in _buttons(markup) if button.get("style")], [])
+        self.assertEqual(_button(markup, "✏️ Set amount")["callback_data"], "member:balance_set:7")
 
     def test_amount_per_user_has_no_coloured_button(self):
         # Setting amounts is an everyday edit; "Set all" asks a red confirmation instead (WP5).
@@ -94,24 +111,38 @@ class PrimaryActionTests(unittest.TestCase):
         paid = reminder_send_targets_keyboard(3, [{"full_name": "Anna", "telegram_id": 42, "status": "paid"}])
         self.assertEqual([button for button in _buttons(paid) if button.get("style")], [])
 
-    def test_balance_set_is_the_primary_action(self):
-        self._assert_single_primary(member_balance_keyboard(7), "✏️ Set")
-
     def test_send_test_reminders_is_the_primary_action(self):
         self._assert_single_primary(tests_menu_keyboard(), "📬 Send test reminders")
 
 
 class DeleteConfirmationTests(unittest.TestCase):
     def test_member_delete_confirm_is_red_with_bin_label(self):
-        button = _button(member_delete_confirm_keyboard(5), "🗑 Yes, delete")
+        button = _button(member_delete_confirm_keyboard(5), "🗑 Delete")
         self.assertEqual(button["style"], "danger")
         self.assertEqual(button["callback_data"], "member:confirm_delete:5")
-        self.assertNotIn("style", _button(member_delete_confirm_keyboard(5), "⬅️ Back"))
+        self.assertEqual(
+            _dump(member_delete_confirm_keyboard(5))["inline_keyboard"],
+            [
+                [
+                    {"text": "✖️ Cancel", "callback_data": "member:open:5"},
+                    {"text": "🗑 Delete", "callback_data": "member:confirm_delete:5", "style": "danger"},
+                ]
+            ],
+        )
 
     def test_payment_destination_delete_confirm_is_red_with_bin_label(self):
-        button = _button(payment_destination_delete_keyboard(9), "🗑 Yes, delete")
+        button = _button(payment_destination_delete_keyboard(9), "🗑 Delete")
         self.assertEqual(button["style"], "danger")
         self.assertEqual(button["callback_data"], "paydest:confirm_delete:9")
+        self.assertEqual(
+            _dump(payment_destination_delete_keyboard(9))["inline_keyboard"],
+            [
+                [
+                    {"text": "✖️ Cancel", "callback_data": "paydest:open:9"},
+                    {"text": "🗑 Delete", "callback_data": "paydest:confirm_delete:9", "style": "danger"},
+                ]
+            ],
+        )
 
     def test_dialog_cancel_is_a_plain_way_out(self):
         # Cancel only drops the prompt: it is a way out, never styled (principle button-styles).

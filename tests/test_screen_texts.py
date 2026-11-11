@@ -17,8 +17,6 @@ from app.ui.helpers import (
     _build_user_info_text,
     _payment_info_lines,
     build_subscription_card,
-    send_member_detail,
-    send_member_list,
     send_participants_settings,
     send_pricing_settings,
     send_public_account_detail,
@@ -33,6 +31,7 @@ from app.ui.helpers import (
     send_test_user_list,
     send_user_subscription_list,
 )
+from app.ui.member_screens import send_member_detail, send_member_list
 from app.ui.style import SUBITEM_INDENT
 from keyboard_guard import install_keyboard_guard
 
@@ -451,14 +450,24 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
     async def test_member_screens(self):
         detail = await self._render(send_member_detail, self.db, self.anna)
         self._assert_value_style(detail)
-        self.assertTrue(detail.startswith("👤 User Info:\n<b>Anna &lt;K&gt;</b>\nTelegram ID: <code>1001</code>\n"))
-        self.assertIn("Balance: <b>0.00 RUB</b>", detail)
-        self.assertIn("• Netflix", detail)
-        self.assertTrue(detail.endswith("Payment method: Default (Card · RUB)"))
+        self.assertEqual(
+            detail,
+            '👤 <b><a href="tg://user?id=1001">Anna &lt;K&gt;</a></b>\n'
+            f"{SUBITEM_INDENT}Telegram ID: <code>1001</code>\n"
+            f"{SUBITEM_INDENT}Balance: <b>0.00 RUB</b>\n"
+            f"{SUBITEM_INDENT}Payment method: ⭐ Card · RUB (default)\n"
+            "\n"
+            "📋 <b>Subscriptions: 1</b>\n"
+            f"{SUBITEM_INDENT}Netflix · <b>400.00 RUB</b> · ⚠️ unpaid",
+        )
 
         pending = await self._render(send_member_detail, self.db, self.pending)
-        self.assertIn("Telegram ID: not linked", pending)
-        self.assertIn("Status: Awaiting authorization\nInvite expires at (UTC): <code>2099-01-01</code>", pending)
+        self._assert_value_style(pending)
+        self.assertTrue(pending.startswith(f"👤 <b>Pending P</b>\n{SUBITEM_INDENT}⏳ Not signed in yet\n"), pending)
+        self.assertIn(f"{SUBITEM_INDENT}Link works until <tg-time unix=", pending)
+        self.assertIn('format="wDt">Thu, 01.01.2099 00:00 (UTC)</tg-time> (in ', pending)
+        self.assertNotIn("Telegram ID", pending)
+        self.assertTrue(pending.endswith("Not in any subscription yet."), pending)
 
         account = await self._render(send_public_account_detail, self.db, 1001)
         self._assert_value_style(account)
@@ -468,8 +477,8 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
         members = await self._render(send_member_list, self.db)
         self.assertEqual(
             members,
-            "👥 Users:\nChoose a user to manage:\n1. <b>Anna &lt;K&gt;</b>\n2. <b>Boris</b>\n3. <b>Dmitry</b>\n"
-            "4. <b>Pending P</b> (pending)",
+            # Attention first: the three people of the overdue Netflix cycle are unpaid.
+            "👥 <b>Users</b> · 4\n\n⚠️ Unpaid: <b>3</b>\n⏳ Not signed in yet: <b>1</b>\n\nTap a user to open their card.",
         )
         self.assertNotIn("Page:", members)
         for index in range(7):

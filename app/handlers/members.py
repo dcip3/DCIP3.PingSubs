@@ -1,29 +1,81 @@
+"""Admin Users section: list, add user, member card, sign-in link, balance, rename, delete.
+
+Screens live in app/ui/member_screens.py. Every inline button edits the
+message it sits on and answers the tap once; typed input goes through
+app/ui/prompts.py and, on success, redraws the screen the prompt came from
+with a result banner. Destructive actions (delete, a new sign-in link) ask
+first and run under a double-tap guard.
+"""
 from __future__ import annotations
 
-import math
+import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from typing import Any, Mapping, Optional
 
 from aiogram import Bot, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
-from app.ui.helpers import send_member_detail, send_member_list, send_member_report
-from app.ui.keyboards import (
-    COPY_TEXT_MAX_LEN,
-    admin_reply_keyboard,
-    dialog_cancel_inline_keyboard,
-    member_balance_currency_keyboard,
-    member_balance_keyboard,
-    member_delete_confirm_keyboard,
-)
-from app.ui.states import FriendForm, MemberAction, MemberEditForm
 from app.storage.db import Database
-from app.ui.text import validate_person_name
+from app.ui.guards import guarded
+from app.ui.helpers import (
+    USER_GONE,
+    prompt_out_of_date_text,
+    answer_callback_once,
+    is_not_modified_error,
+    is_uneditable_error,
+    resolve_report_timezone,
+    respond_with_markup,
+    is_spawned_screen,
+    remember_spawned,
+    spawned_screen_of,
+)
+from app.ui.keyboards import MENU_USERS
+from app.ui.member_screens import (
+    added_heading,
+    balance_currency_prompt_text,
+    balance_prompt_text,
+    first_name_of,
+    friend_balance,
+    full_name_of,
+    invite_expires_at,
+    is_pending,
+    member_balance_currency_screen,
+    member_balance_screen,
+    member_card_screen,
+    member_delete_confirm_screen,
+    member_invite_confirm_screen,
+    member_list_screen,
+    new_link_heading,
+    members_in_list_order,
+    page_of_member,
+    send_member_detail,
+    send_member_list,
+    send_member_report,
+    show_user_gone,
+    sign_in_link_screen,
+    storage_timestamp,
+)
+from app.ui.prompts import ask, finish_prompt, note_typo, origin_of
+from app.ui.states import FriendForm, MemberAction, MemberEditForm
+from app.ui.style import SEP, toast_from_html
+from app.ui.text import escape_html, format_money, parse_amount, parse_currency, validate_person_name
 
 from . import admin_router
 
-INVITE_TTL_DAYS = 7
+logger = logging.getLogger(__name__)
+
+
+EDIT_MEMBER_ID = "edit_member_id"
+PROMPT_OUT_OF_DATE = prompt_out_of_date_text("👥 Users")
+ADD_USER_PROMPT = "Name of the new user?\nExample: <code>Anna Petrova</code>"
+AMOUNT_HINT = "⚠️ Need a number, for example <code>1200</code> or <code>+500</code>."
+NEGATIVE_BALANCE_HINT = "⚠️ The balance cannot go below zero."
+CURRENCY_HINT = "⚠️ Need three letters, for example <code>USD</code>."
+NEW_LINK_TOAST = "New link ready"
+USERNAME_MISSING_ALERT = "Bot username is not set"
 
 
 def _generate_invite_payload() -> str:
@@ -31,11 +83,8 @@ def _generate_invite_payload() -> str:
 
 
 def _invite_expires_at() -> str:
-    return (
-        (datetime.now(timezone.utc) + timedelta(days=INVITE_TTL_DAYS))
-        .replace(tzinfo=None, microsecond=0)
-        .isoformat()
-    )
+    """The stored (naive UTC ISO) expiry of a link made now."""
+    return storage_timestamp(invite_expires_at())
 
 
 async def _build_invite_link(bot: Bot, payload: str) -> str:
@@ -46,26 +95,64 @@ async def _build_invite_link(bot: Bot, payload: str) -> str:
     return f"https://t.me/{username}?start={payload}"
 
 
-def invite_link_keyboard(invite_link: str) -> InlineKeyboardMarkup:
-    """One-tap copy button for the personal authorization link.
-
-    The persistent admin reply keyboard is never removed (no ReplyKeyboardRemove
-    in the bot), so this inline markup can replace it on the invite message.
-    """
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📋 Copy link",
-                    copy_text=CopyTextButton(text=invite_link[:COPY_TEXT_MAX_LEN]),
-                    style="primary",
-                )
-            ]
-        ]
-    )
+async def _try_invite_link(bot: Bot, payload: str) -> Optional[str]:
+    try:
+        return await _build_invite_link(bot, payload)
+    except RuntimeError:
+        return None
 
 
-@admin_router.message(F.text == "👥 Users")
+def _expiry_moment(stored: str) -> datetime:
+    return datetime.fromisoformat(stored).replace(tzinfo=timezone.utc)
+
+
+# ----------------------------------------------------------- shared plumbing
+
+
+async def _show_on_origin(
+    message: Message,
+    data: Mapping[str, Any],
+    text: str,
+    markup: Optional[InlineKeyboardMarkup],
+) -> None:
+    """Redraw the screen a prompt came from; send the screen anew when it is gone."""
+    origin = origin_of(data)
+    bot = message.bot
+    if origin is not None and bot is not None:
+        chat_id, message_id = origin
+        try:
+            await bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id, reply_markup=markup)
+            return
+        except TelegramBadRequest as error:
+            if is_not_modified_error(error):
+                return
+            if not is_uneditable_error(error):
+                raise
+            logger.debug("Origin screen %s is gone, sending a new one: %s", message_id, error)
+    await message.answer(text, reply_markup=markup)
+
+
+def _friend_id_of(data: Mapping[str, Any]) -> Optional[int]:
+    try:
+        return int(data.get(EDIT_MEMBER_ID) or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _prompt_out_of_date(message: Message, state: FSMContext) -> None:
+    await finish_prompt(message, state)
+    await message.answer(PROMPT_OUT_OF_DATE)
+
+
+async def _show_list_after_gone(message: Message, data: Mapping[str, Any], db: Database) -> None:
+    text, markup = await member_list_screen(db, banner="⚠️ This user was deleted")
+    await _show_on_origin(message, data, text, markup)
+
+
+# ---------------------------------------------------------------------- list
+
+
+@admin_router.message(F.text == MENU_USERS)
 async def handle_members_menu(message: Message, db: Database) -> None:
     await send_member_list(message, db)
 
@@ -88,18 +175,12 @@ async def handle_members_page(
     await send_member_list(callback, db, page=max(1, callback_data.friend_id))
 
 
+# ------------------------------------------------------------------ add user
+
+
 @admin_router.callback_query(MemberAction.filter(F.action == "add"))
 async def handle_member_add(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    await state.set_state(FriendForm.full_name)
-    if callback.message:
-        await callback.message.answer(
-            "👥 New User:\n"
-            "Send the user's full name.\n"
-            "I'll create the profile and generate an authorization link.\n",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+    await ask(callback, state, FriendForm.full_name, ADD_USER_PROMPT, origin_screen="member_list")
 
 
 @admin_router.message(FriendForm.full_name)
@@ -111,32 +192,26 @@ async def handle_member_create(
 ) -> None:
     full_name, error_message = validate_person_name(message.text)
     if error_message:
-        await message.answer(error_message)
+        await note_typo(message, state, error_message)
         return
 
     invite_payload = _generate_invite_payload()
-    invite_expires_at = _invite_expires_at()
-    friend_id = await db.create_friend_invite(full_name, invite_payload, invite_expires_at)
-    try:
-        invite_link = await _build_invite_link(bot, invite_payload)
-    except RuntimeError:
-        await state.clear()
-        await message.answer(
-            "User created, but I couldn't build a Telegram link because the bot username is not configured.",
-            reply_markup=admin_reply_keyboard(),
-        )
-        await send_member_detail(message, db, friend_id)
-        return
-
-    await state.clear()
-    await message.answer(
-        "User created.\n\n"
-        "Share this authorization link with the user:\n"
-        f"{invite_link}\n\n"
-        f"Expires at (UTC): <code>{invite_expires_at}</code>",
-        reply_markup=invite_link_keyboard(invite_link),
+    stored_expiry = _invite_expires_at()
+    friend_id = await db.create_friend_invite(full_name, invite_payload, stored_expiry)
+    invite_link = await _try_invite_link(bot, invite_payload)
+    data = await finish_prompt(message, state)
+    friend = await db.get_friend(friend_id) or {"id": friend_id, "full_name": full_name}
+    text, markup = sign_in_link_screen(
+        friend,
+        added_heading(friend),
+        invite_link,
+        _expiry_moment(stored_expiry),
+        await resolve_report_timezone(db),
     )
-    await send_member_detail(message, db, friend_id)
+    await _show_on_origin(message, data, text, markup)
+
+
+# ---------------------------------------------------------------------- card
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "open"))
@@ -148,6 +223,28 @@ async def handle_member_open(
     await send_member_detail(callback, db, callback_data.friend_id)
 
 
+@admin_router.callback_query(MemberAction.filter(F.action == "open_new"))
+async def handle_member_open_new(
+    callback: CallbackQuery,
+    callback_data: MemberAction,
+    db: Database,
+) -> None:
+    """[👤 Card] under an admin alert: the card as a NEW message with [✖️ Close]; the alert stays."""
+    screen = await member_card_screen(db, callback_data.friend_id, spawned=True)
+    if screen is None:
+        await answer_callback_once(callback, USER_GONE)
+        return
+    text, markup = screen
+    sent = None
+    if isinstance(callback.message, Message):
+        sent = await callback.message.answer(text, reply_markup=markup)
+    elif callback.message is not None and callback.bot is not None:
+        sent = await callback.bot.send_message(callback.message.chat.id, text, reply_markup=markup)
+    # Its sub-screens come back through plain member:open; remembered, it keeps [✖️ Close].
+    remember_spawned(sent)
+    await answer_callback_once(callback)
+
+
 @admin_router.callback_query(MemberAction.filter(F.action == "report"))
 async def handle_member_report(
     callback: CallbackQuery,
@@ -157,40 +254,84 @@ async def handle_member_report(
     await send_member_report(callback, db, callback_data.friend_id)
 
 
+# ------------------------------------------------------------ sign-in link
+
+
 @admin_router.callback_query(MemberAction.filter(F.action == "invite"))
 async def handle_member_invite_refresh(
     callback: CallbackQuery,
     callback_data: MemberAction,
     db: Database,
-    bot: Bot,
 ) -> None:
+    """The old action now asks first: a new link makes the old one stop working."""
     friend = await db.get_friend(callback_data.friend_id)
     if not friend:
-        await callback.answer("User not found.", show_alert=True)
+        await show_user_gone(callback, db)
         return
-    if friend.get("telegram_id") is not None:
-        await callback.answer("This user is already linked.", show_alert=True)
+    if not is_pending(friend):
+        await send_member_detail(callback, db, callback_data.friend_id, toast=_already_signed_in(friend))
         return
+    text, markup = await member_invite_confirm_screen(db, friend)
+    await respond_with_markup(callback, text, reply_markup=markup)
 
-    invite_payload = _generate_invite_payload()
-    invite_expires_at = _invite_expires_at()
-    await db.refresh_friend_invite(callback_data.friend_id, invite_payload, invite_expires_at)
-    try:
-        invite_link = await _build_invite_link(bot, invite_payload)
-    except RuntimeError:
-        await callback.answer("Bot username is not configured.", show_alert=True)
-        await send_member_detail(callback, db, callback_data.friend_id)
-        return
 
-    if callback.message:
-        await callback.message.answer(
-            "Authorization link refreshed:\n"
-            f"{invite_link}\n\n"
-            f"Expires at (UTC): <code>{invite_expires_at}</code>",
-            reply_markup=invite_link_keyboard(invite_link),
+def _already_signed_in(friend: Mapping[str, Any]) -> str:
+    return f"{first_name_of(dict(friend))} already signed in"
+
+
+@admin_router.callback_query(MemberAction.filter(F.action == "invite_yes"))
+async def handle_member_invite_yes(
+    callback: CallbackQuery,
+    callback_data: MemberAction,
+    db: Database,
+    bot: Bot,
+) -> None:
+    friend_id = callback_data.friend_id
+    async with guarded(callback, ("member_invite", friend_id)) as acquired:
+        if not acquired:
+            return
+        friend = await db.get_friend(friend_id)
+        if not friend:
+            await show_user_gone(callback, db)
+            return
+        if not is_pending(friend):
+            await send_member_detail(callback, db, friend_id, toast=_already_signed_in(friend))
+            return
+        invite_payload = _generate_invite_payload()
+        invite_link = await _try_invite_link(bot, invite_payload)
+        if invite_link is None:
+            # The old link keeps working: nothing is changed when the new one cannot be shown.
+            screen = await member_card_screen(db, friend_id, spawned=spawned_screen_of(callback))
+            if screen is None:
+                await show_user_gone(callback, db)
+                return
+            await respond_with_markup(callback, screen[0], reply_markup=screen[1], toast=USERNAME_MISSING_ALERT, alert=True)
+            return
+        stored_expiry = _invite_expires_at()
+        if not await db.refresh_friend_invite(friend_id, invite_payload, stored_expiry):
+            await send_member_detail(callback, db, friend_id, toast=_already_signed_in(friend))
+            return
+        text, markup = sign_in_link_screen(
+            friend,
+            new_link_heading(friend),
+            invite_link,
+            _expiry_moment(stored_expiry),
+            await resolve_report_timezone(db),
         )
-    await callback.answer("Authorization link refreshed.")
-    await send_member_detail(callback, db, callback_data.friend_id)
+        await respond_with_markup(callback, text, reply_markup=markup, toast=NEW_LINK_TOAST)
+
+
+# ------------------------------------------------------------------- balance
+
+
+async def _show_balance(callback: CallbackQuery, db: Database, friend_id: int, **kwargs: Any) -> None:
+    banner = kwargs.pop("banner", None)
+    screen = await member_balance_screen(db, friend_id, banner=banner)
+    if screen is None:
+        await show_user_gone(callback, db)
+        return
+    text, markup = screen
+    await respond_with_markup(callback, text, reply_markup=markup, **kwargs)
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "balance"))
@@ -198,45 +339,8 @@ async def handle_member_balance_menu(
     callback: CallbackQuery,
     callback_data: MemberAction,
     db: Database,
-    state: FSMContext,
 ) -> None:
-    await state.clear()
-    friend = await db.get_friend(callback_data.friend_id)
-    if not friend:
-        await callback.answer("User not found.", show_alert=True)
-        return
-    try:
-        balance_value = float(friend.get("balance") or 0.0)
-    except (TypeError, ValueError):
-        balance_value = 0.0
-    default_balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
-    balance_currency = str(friend.get("balance_currency") or "").strip().upper()
-    if len(balance_currency) != 3 or not balance_currency.isalpha():
-        balance_currency = default_balance_currency
-    if callback.message:
-        await callback.message.edit_text(
-            "💰 Balance:\n"
-            "\n"
-            f"User: <code>{friend['full_name']}</code>\n"
-            f"💰 Amount: <code>{balance_value:.2f}</code>\n"
-            f"💱 Currency: <code>{balance_currency}</code>\n\n"
-            "Choose an action:",
-            reply_markup=member_balance_keyboard(callback_data.friend_id),
-        )
-    await callback.answer()
-
-
-async def _start_member_balance_edit(callback: CallbackQuery, state: FSMContext, friend_id: int) -> None:
-    await state.set_state(MemberEditForm.balance)
-    await state.update_data(edit_member_id=friend_id)
-    if callback.message:
-        await callback.message.answer(
-            "💰 Set balance:\n"
-            "Send the new balance value.\n"
-            "Example: <code>1200</code>.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+    await _show_balance(callback, db, callback_data.friend_id)
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "balance_set"))
@@ -246,10 +350,19 @@ async def handle_member_balance_set_prompt(
     db: Database,
     state: FSMContext,
 ) -> None:
-    if not await db.get_friend(callback_data.friend_id):
-        await callback.answer("User not found.", show_alert=True)
+    friend = await db.get_friend(callback_data.friend_id)
+    if not friend:
+        await show_user_gone(callback, db)
         return
-    await _start_member_balance_edit(callback, state, callback_data.friend_id)
+    amount, currency = await friend_balance(db, friend)
+    await ask(
+        callback,
+        state,
+        MemberEditForm.balance,
+        balance_prompt_text(friend, amount, currency),
+        origin_screen=f"member_balance:{callback_data.friend_id}",
+        data={EDIT_MEMBER_ID: callback_data.friend_id},
+    )
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "balance_currency"))
@@ -258,23 +371,16 @@ async def handle_member_balance_currency_menu(
     callback_data: MemberAction,
     db: Database,
 ) -> None:
-    friend = await db.get_friend(callback_data.friend_id)
-    if not friend:
-        await callback.answer("User not found.", show_alert=True)
+    screen = await member_balance_currency_screen(db, callback_data.friend_id)
+    if screen is None:
+        await show_user_gone(callback, db)
         return
-    default_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
-    current_currency = str(friend.get("balance_currency") or "").strip().upper()
-    if len(current_currency) != 3 or not current_currency.isalpha():
-        current_currency = default_currency
-    if callback.message:
-        await callback.message.edit_text(
-            "💰 Balance:\n"
-            f"User: <code>{friend['full_name']}</code>\n"
-            f"💱 Currency: <code>{current_currency}</code>\n\n"
-            "Choose a value:",
-            reply_markup=member_balance_currency_keyboard(callback_data.friend_id, current_currency),
-        )
-    await callback.answer()
+    text, markup = screen
+    await respond_with_markup(callback, text, reply_markup=markup)
+
+
+def _currency_banner(currency: str) -> str:
+    return f"✅ Currency{SEP}<b>{escape_html(currency)}</b>"
 
 
 @admin_router.callback_query(F.data.startswith("member_balance_currency:"))
@@ -282,30 +388,20 @@ async def handle_member_balance_currency_select(
     callback: CallbackQuery,
     db: Database,
 ) -> None:
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
-        return
-    _, friend_id_raw, raw_currency = parts
+    parts = (callback.data or "").split(":", 2)
     try:
-        friend_id = int(friend_id_raw)
+        friend_id = int(parts[1]) if len(parts) == 3 else 0
     except ValueError:
-        await callback.answer("Invalid user.", show_alert=True)
-        return
-    currency = raw_currency.strip().upper()
-    if len(currency) != 3 or not currency.isalpha():
-        await callback.answer("Currency must contain 3 letters.", show_alert=True)
+        friend_id = 0
+    currency = parse_currency(parts[2]) if len(parts) == 3 else None
+    if not friend_id or currency is None:
+        await answer_callback_once(callback, "This button no longer works")
         return
     updated = await db.set_friend_balance_currency(friend_id, currency)
     if updated is None:
-        await callback.answer("User not found.", show_alert=True)
+        await show_user_gone(callback, db)
         return
-    await callback.answer(f"Currency set to {updated}")
-    await handle_member_balance_currency_menu(
-        callback,
-        MemberAction(action="balance_currency", friend_id=friend_id),
-        db,
-    )
+    await _show_balance(callback, db, friend_id, banner=_currency_banner(updated), toast=f"Currency: {updated}")
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "balance_currency_other"))
@@ -315,57 +411,18 @@ async def handle_member_balance_currency_other(
     db: Database,
     state: FSMContext,
 ) -> None:
-    if not await db.get_friend(callback_data.friend_id):
-        await callback.answer("User not found.", show_alert=True)
+    friend = await db.get_friend(callback_data.friend_id)
+    if not friend:
+        await show_user_gone(callback, db)
         return
-    await state.set_state(MemberEditForm.balance_currency)
-    await state.update_data(edit_member_id=callback_data.friend_id)
-    if callback.message:
-        await callback.message.answer(
-            "💱 Balance currency:\n"
-            "Send a 3-letter currency code.\n"
-            "Example: <code>USD</code>.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
-
-
-@admin_router.callback_query(MemberAction.filter(F.action == "rename"))
-async def handle_member_rename(
-    callback: CallbackQuery,
-    callback_data: MemberAction,
-    state: FSMContext,
-) -> None:
-    await state.set_state(MemberEditForm.full_name)
-    await state.update_data(edit_member_id=callback_data.friend_id)
-    if callback.message:
-        await callback.message.answer(
-            "Rename User:\n🏷️ Send new name:",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
-
-
-@admin_router.message(MemberEditForm.full_name)
-async def handle_member_rename_input(
-    message: Message,
-    state: FSMContext,
-    db: Database,
-) -> None:
-    raw_name, error_message = validate_person_name(message.text)
-    if error_message:
-        await message.answer(error_message)
-        return
-    data = await state.get_data()
-    friend_id = data.get("edit_member_id")
-    if not friend_id:
-        await state.clear()
-        await message.answer("Session expired. Open users again.")
-        return
-    await db.update_friend_name(int(friend_id), raw_name)
-    await state.clear()
-    await message.answer("Name updated.", reply_markup=admin_reply_keyboard())
-    await send_member_detail(message, db, int(friend_id))
+    await ask(
+        callback,
+        state,
+        MemberEditForm.balance_currency,
+        balance_currency_prompt_text(friend),
+        origin_screen=f"member_balance:{callback_data.friend_id}",
+        data={EDIT_MEMBER_ID: callback_data.friend_id},
+    )
 
 
 @admin_router.message(MemberEditForm.balance)
@@ -374,32 +431,35 @@ async def handle_member_balance_input(
     state: FSMContext,
     db: Database,
 ) -> None:
-    data = await state.get_data()
-    friend_id = data.get("edit_member_id")
-    if not friend_id:
-        await state.clear()
-        await message.answer("Session expired. Open users again.")
+    friend_id = _friend_id_of(await state.get_data())
+    if friend_id is None:
+        await _prompt_out_of_date(message, state)
         return
-
-    try:
-        amount = float((message.text or "").strip().replace(",", "."))
-    except ValueError:
-        await message.answer("Amount must be a number. Example: 300")
+    friend = await db.get_friend(friend_id)
+    if not friend:
+        await _show_list_after_gone(message, await finish_prompt(message, state), db)
         return
-
-    if not math.isfinite(amount) or amount < 0:
-        await message.answer("Balance must be zero or a positive number.")
+    parsed = parse_amount(message.text, allow_signed=True)
+    if parsed is None:
+        await note_typo(message, state, AMOUNT_HINT)
         return
-    updated_balance = await db.set_friend_balance(int(friend_id), amount)
-
-    if updated_balance is None:
-        await state.clear()
-        await message.answer("User not found.")
+    value, relative = parsed
+    current, currency = await friend_balance(db, friend)
+    new_balance = round(current + value if relative else value, 2)
+    if new_balance < 0:
+        await note_typo(message, state, NEGATIVE_BALANCE_HINT)
         return
-
-    await state.clear()
-    await message.answer("Balance updated.", reply_markup=admin_reply_keyboard())
-    await send_member_detail(message, db, int(friend_id))
+    updated = await db.set_friend_balance(friend_id, new_balance)
+    data = await finish_prompt(message, state)
+    if updated is None:
+        await _show_list_after_gone(message, data, db)
+        return
+    banner = f"✅ Balance updated{SEP}{format_money(updated, currency, bold=True)}"
+    screen = await member_balance_screen(db, friend_id, banner=banner)
+    if screen is None:
+        await _show_list_after_gone(message, data, db)
+        return
+    await _show_on_origin(message, data, *screen)
 
 
 @admin_router.message(MemberEditForm.balance_currency)
@@ -408,38 +468,96 @@ async def handle_member_balance_currency_input(
     state: FSMContext,
     db: Database,
 ) -> None:
-    data = await state.get_data()
-    friend_id = data.get("edit_member_id")
-    if not friend_id:
-        await state.clear()
-        await message.answer("Session expired. Open users again.")
+    friend_id = _friend_id_of(await state.get_data())
+    if friend_id is None:
+        await _prompt_out_of_date(message, state)
         return
+    currency = parse_currency(message.text)
+    if currency is None:
+        await note_typo(message, state, CURRENCY_HINT)
+        return
+    updated = await db.set_friend_balance_currency(friend_id, currency)
+    data = await finish_prompt(message, state)
+    screen = None
+    if updated is not None:
+        screen = await member_balance_screen(db, friend_id, banner=_currency_banner(updated))
+    if screen is None:
+        await _show_list_after_gone(message, data, db)
+        return
+    await _show_on_origin(message, data, *screen)
 
-    currency = (message.text or "").strip().upper()
-    if len(currency) != 3 or not currency.isalpha():
-        await message.answer("Currency must contain 3 letters. Example: USD")
+
+# -------------------------------------------------------------------- rename
+
+
+@admin_router.callback_query(MemberAction.filter(F.action == "rename"))
+async def handle_member_rename(
+    callback: CallbackQuery,
+    callback_data: MemberAction,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    friend = await db.get_friend(callback_data.friend_id)
+    if not friend:
+        await show_user_gone(callback, db)
         return
-    updated = await db.set_friend_balance_currency(int(friend_id), currency)
-    if updated is None:
-        await state.clear()
-        await message.answer("User not found.")
+    await ask(
+        callback,
+        state,
+        MemberEditForm.full_name,
+        f"New name for {escape_html(full_name_of(friend))}?",
+        origin_screen=f"member_card:{callback_data.friend_id}",
+        data={EDIT_MEMBER_ID: callback_data.friend_id},
+    )
+
+
+@admin_router.message(MemberEditForm.full_name)
+async def handle_member_rename_input(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    friend_id = _friend_id_of(await state.get_data())
+    if friend_id is None:
+        await _prompt_out_of_date(message, state)
         return
-    await state.clear()
-    await message.answer("Balance currency updated.", reply_markup=admin_reply_keyboard())
-    await send_member_detail(message, db, int(friend_id))
+    raw_name, error_message = validate_person_name(message.text)
+    if error_message:
+        await note_typo(message, state, error_message)
+        return
+    data = await finish_prompt(message, state)
+    if not await db.get_friend(friend_id):
+        await _show_list_after_gone(message, data, db)
+        return
+    await db.update_friend_name(friend_id, raw_name)
+    origin = origin_of(data)
+    screen = await member_card_screen(
+        db,
+        friend_id,
+        banner=f"✅ Renamed{SEP}<b>{escape_html(raw_name)}</b>",
+        spawned=origin is not None and is_spawned_screen(*origin),
+    )
+    if screen is None:
+        await _show_list_after_gone(message, data, db)
+        return
+    await _show_on_origin(message, data, *screen)
+
+
+# -------------------------------------------------------------------- delete
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "delete"))
 async def handle_member_delete_prompt(
     callback: CallbackQuery,
     callback_data: MemberAction,
+    db: Database,
 ) -> None:
-    if callback.message:
-        await callback.message.edit_text(
-            "Are you sure you want to delete this user?",
-            reply_markup=member_delete_confirm_keyboard(callback_data.friend_id),
-        )
-    await callback.answer()
+    friend = await db.get_friend(callback_data.friend_id)
+    if not friend:
+        await show_user_gone(callback, db)
+        return
+    text, markup = await member_delete_confirm_screen(db, friend)
+    await respond_with_markup(callback, text, reply_markup=markup)
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "confirm_delete"))
@@ -448,6 +566,15 @@ async def handle_member_delete_confirm(
     callback_data: MemberAction,
     db: Database,
 ) -> None:
-    await db.delete_friend(callback_data.friend_id)
-    await callback.answer("User deleted.")
-    await send_member_list(callback, db)
+    friend_id = callback_data.friend_id
+    async with guarded(callback, ("member_delete", friend_id)) as acquired:
+        if not acquired:
+            return
+        friend = await db.get_friend(friend_id)
+        if not friend:
+            await show_user_gone(callback, db)
+            return
+        page = page_of_member(await members_in_list_order(db), friend_id) or 1
+        await db.delete_friend(friend_id)
+        banner = f"✅ {escape_html(full_name_of(friend))} deleted"
+        await send_member_list(callback, db, page=page, banner=banner, toast=toast_from_html(banner))

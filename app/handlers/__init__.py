@@ -10,6 +10,7 @@ from . import reminder_settings as _reminder_settings  # noqa: F401
 from . import subscription_payment as _subscription_payment  # noqa: F401
 from . import reminders as _reminders  # noqa: F401
 from . import members as _members  # noqa: F401
+from . import payment_methods as _payment_methods  # noqa: F401
 from . import topups as _topups  # noqa: F401
 # Catch-alls: include this router after every other one (see main.build_dispatcher).
 from .fallback import fallback_router  # noqa: E402

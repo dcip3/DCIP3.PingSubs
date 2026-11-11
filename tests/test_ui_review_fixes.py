@@ -16,19 +16,21 @@ from unittest import mock
 from zoneinfo import ZoneInfo
 
 from aiogram.methods import EditMessageText, SendMessage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import Chat, InaccessibleMessage, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.core.reminders import tg_due
 from app.handlers.subscriptions import PAST_DATE_HINT
 from app.services import CurrencyConverter
+from app.ui import helpers
 from app.ui.helpers import build_subscription_card, edit_in_place, split_text_chunks
-from app.ui.keyboards import guest_reply_keyboard, public_reply_keyboard
+from app.ui.keyboards import CLOSE_CALLBACK, guest_reply_keyboard, public_reply_keyboard
+from app.ui.prompts import REOPEN_SCREEN_ALERT
 from app.ui.shell import JOIN_ALREADY_LINKED_TEXT
 from app.ui.style import expandable, visible_len
 from app.ui.text import escape_html, parse_amount, parse_date_loose
 from dispatcher_harness import RealDispatcherTestCase
 from keyboard_guard import install_keyboard_guard
-from telegram_fakes import CHAT_ID, FakeBot, make_message
+from telegram_fakes import CHAT_ID, FakeBot, make_callback, make_message
 
 install_keyboard_guard()
 
@@ -207,6 +209,72 @@ class PastDueDateTests(_Case):
         stored = str((await self.db.get_subscription(sub_id))["next_charge_at"])
         self.assertLessEqual(stored, self.today.isoformat())
         self.assertIsNone(await self.state().get_state())
+
+
+# ============================================================ spawned cards
+
+
+class SpawnedCardTests(_Case):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        await self.make_admin()
+
+    def _spawned_id(self) -> int:
+        chat_id, message_id = list(helpers._SPAWNED_SCREENS)[-1]
+        self.assertEqual(chat_id, CHAT_ID)
+        return message_id
+
+    async def test_admin_card_from_a_push_keeps_close_after_a_sub_screen(self):
+        sub_id = await self.db.create_subscription("Netflix", 10.0, "USD", self.today + timedelta(days=5), 30, None)
+        await self.feed(self.callback(f"sub:open_new:{sub_id}", self._screen(900)))
+        card = self.bot.of(SendMessage)[-1]
+        self.assertEqual(card.reply_markup.inline_keyboard[-1][0].callback_data, CLOSE_CALLBACK)
+        copy_id = self._spawned_id()
+
+        await self.feed(self.callback(f"sub:pricing:{sub_id}", self._screen(copy_id)))
+        await self.feed(self.callback(f"sub:open:{sub_id}", self._screen(copy_id)))
+        redrawn = self.bot.of(EditMessageText)[-1]
+        self.assertEqual(redrawn.message_id, copy_id)
+        self.assertEqual(_texts(redrawn.reply_markup)[-1], ["✖️ Close"])
+
+        # A typed value redraws the same copy, still with Close.
+        await self.feed(self.callback(f"sub:amount:{sub_id}", self._screen(copy_id)))
+        await self.feed(self.message("12"))
+        self.assertEqual(self.bot.of(EditMessageText)[-1].message_id, copy_id)
+        await self.feed(self.callback(f"sub:open:{sub_id}", self._screen(copy_id)))
+        self.assertEqual(_texts(self.bot.of(EditMessageText)[-1].reply_markup)[-1], ["✖️ Close"])
+
+        # A card in the list flow still goes back to the list.
+        await self.feed(self.callback(f"sub:open:{sub_id}", self._screen(4321)))
+        self.assertEqual(_texts(self.bot.of(EditMessageText)[-1].reply_markup)[-1], ["◀️ To list"])
+
+    async def test_member_card_from_an_alert_keeps_close_after_balance(self):
+        anna = await self._friend("Anna Petrova", 5001)
+        await self.feed(self.callback(f"member:open_new:{anna}", self._screen(900)))
+        copy_id = self._spawned_id()
+        await self.feed(self.callback(f"member:balance:{anna}", self._screen(copy_id)))
+        await self.feed(self.callback(f"member:open:{anna}", self._screen(copy_id)))
+        redrawn = self.bot.of(EditMessageText)[-1]
+        self.assertEqual(redrawn.message_id, copy_id)
+        self.assertEqual(_texts(redrawn.reply_markup)[-1], ["✖️ Close"])
+
+
+# ================================================= inaccessible messages
+
+
+class InaccessiblePromptTests(_Case):
+    async def test_a_prompt_on_an_old_message_gets_a_calm_alert(self):
+        await self.make_admin()
+        old = InaccessibleMessage(chat=Chat(id=CHAT_ID, type="private"), message_id=5, date=0)
+        sub_id = await self.db.create_subscription("Netflix", 10.0, "USD", self.today + timedelta(days=5), 30, None)
+        for data in ("member:add:0", f"sub:rename:{sub_id}", f"sub:amount:{sub_id}"):
+            with self.subTest(data=data):
+                self.bot.calls.clear()
+                await self.feed(make_callback(self.bot, old, data))  # the harness fails on the error handler
+                answers = self.bot.answers()
+                self.assertEqual([(a.text, a.show_alert) for a in answers], [(REOPEN_SCREEN_ALERT, True)])
+                self.assertIsNone(await self.state().get_state())
+                self.assertFalse(self.bot.of(SendMessage))
 
 
 class ReportChunkTests(unittest.TestCase):

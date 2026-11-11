@@ -296,6 +296,13 @@ def payment_method_label(title: object, currency: object = "", *, default: bool 
     return f"{DEFAULT_METHOD_MARK}{label}" if default else label
 
 
+def default_method_value(default_target: Optional[Dict[str, object]]) -> str:
+    """``'Default (⭐ Sber · RUB)'`` / ``'Default (not set)'``: the Default choice of a payment-method picker."""
+    if not default_target:
+        return "Default (not set)"
+    return f"Default ({payment_method_label(default_target.get('title'), default_target.get('currency'), default=True)})"
+
+
 def default_method_option_label(default_target: Optional[Dict[str, object]], selected: bool) -> str:
     """``'✅ Default (⭐ Sber · RUB)'`` fit to a full row: the title is cut, ``' · RUB)'`` kept."""
     if not default_target:
@@ -421,14 +428,43 @@ def build_subscription_list_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# ------------------------------------------------------------ Users section
+#
+# Users list (top-level: no nav row), member card (hub, ≤6 rows), and the
+# card's sub-screens, which return to it with "◀️ To card".
+
+MEMBERS_PER_PAGE = 6
+ADD_USER_TEXT = "➕ Add user"
+NOT_SIGNED_IN_MARK = "⏳ "
+NOT_SIGNED_IN_TAIL = f"{SEP}not signed in"
+UNPAID_LIST_MARK = "⚠️ "
+UNPAID_LIST_TAIL = f"{SEP}unpaid"
 # Every currency picker offers the same codes in the same order, two per row
 # (``currency_option_rows``); anything else is typed via "✏️ Other currency".
 CURRENCY_OPTIONS = ("RUB", "USD", "EUR", "TRY")
+MEMBER_BALANCE_CURRENCIES = CURRENCY_OPTIONS
 
 
 def currency_option_rows(buttons: Sequence[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
     """Currency options two per row, the one layout of every currency picker."""
     return pair_rows(buttons)
+
+
+def _member_callback(action: str, friend_id: int) -> str:
+    return MemberAction(action=action, friend_id=friend_id).pack()
+
+
+def member_list_button_label(friend: Dict[str, object]) -> str:
+    """``'Anna Petrova'``, ``'⚠️ Anna Petrova · unpaid'`` or ``'⏳ Ivan Sidorov · not signed in'``.
+
+    The name is cut, the state tail kept (principle list-rows-and-paging).
+    """
+    name = str(friend.get("full_name") or "").strip() or "Unknown"
+    if friend.get("telegram_id") is None:
+        return fit_label(f"{NOT_SIGNED_IN_MARK}{name}", 1, tail=NOT_SIGNED_IN_TAIL)
+    if friend.get("unpaid"):
+        return fit_label(f"{UNPAID_LIST_MARK}{name}", 1, tail=UNPAID_LIST_TAIL)
+    return fit_label(name, 1)
 
 
 def build_members_list_keyboard(
@@ -438,175 +474,150 @@ def build_members_list_keyboard(
     total_pages: int = 1,
     total_users: int = 0,
 ) -> InlineKeyboardMarkup:
+    """[➕ Add user] (primary only while there are no users), one user per row, paging; no nav row."""
+    is_empty = not friends and total_users <= 0
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text="➕ Add user",
-                callback_data=MemberAction(action="add", friend_id=0).pack(),
-                style="primary",
+                text=ADD_USER_TEXT,
+                callback_data=_member_callback("add", 0),
+                style="primary" if is_empty else None,
             )
         ]
     ]
-
-    columns = 2 if total_users > 4 else 1
-    friend_buttons = [
-        InlineKeyboardButton(
-            text=str(friend["full_name"]),
-            callback_data=MemberAction(action="open", friend_id=int(friend["id"])).pack(),
+    for friend in friends:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=member_list_button_label(friend),
+                    callback_data=_member_callback("open", int(friend["id"])),
+                )
+            ]
         )
-        for friend in friends
-    ]
-    for index in range(0, len(friend_buttons), columns):
-        rows.append(friend_buttons[index : index + columns])
-
     if total_pages > 1:
         rows.append(
             pagination_row(
                 page,
                 total_pages,
-                previous_callback=MemberAction(action="page", friend_id=page - 1).pack(),
-                next_callback=MemberAction(action="page", friend_id=page + 1).pack(),
+                previous_callback=_member_callback("page", page - 1),
+                next_callback=_member_callback("page", page + 1),
             )
         )
-
-    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def member_detail_keyboard(friend_id: int, *, is_pending: bool = False) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✏️ Rename",
-        callback_data=MemberAction(action="rename", friend_id=friend_id).pack(),
-    )
-    if is_pending:
-        builder.button(
-            text="🔗 Auth link",
-            callback_data=MemberAction(action="invite", friend_id=friend_id).pack(),
+def member_detail_keyboard(
+    friend_id: int,
+    *,
+    is_pending: bool = False,
+    spawned: bool = False,
+) -> InlineKeyboardMarkup:
+    """The member card: [💰 Balance][📊 Reports] / [🏦 Method][✏️ Rename] / [🔗 New sign-in link]
+    (pending only) / [🗑 Delete] / [◀️ To list]. ``spawned`` (opened as a new message from an
+    alert) ends with [✖️ Close] instead."""
+    actions = [
+        InlineKeyboardButton(text="💰 Balance", callback_data=_member_callback("balance", friend_id)),
+        InlineKeyboardButton(text="📊 Reports", callback_data=_member_callback("report", friend_id)),
+    ]
+    if not is_pending:
+        actions.append(
+            InlineKeyboardButton(text="🏦 Method", callback_data=_member_callback("payment_destination", friend_id))
         )
-    builder.button(
-        text="📊 Reports",
-        callback_data=MemberAction(action="report", friend_id=friend_id).pack(),
+    actions.append(InlineKeyboardButton(text="✏️ Rename", callback_data=_member_callback("rename", friend_id)))
+    rows = pair_rows(actions)
+    if is_pending:
+        rows.append(
+            [InlineKeyboardButton(text="🔗 New sign-in link", callback_data=_member_callback("invite", friend_id))]
+        )
+    rows.append([InlineKeyboardButton(text="🗑 Delete", callback_data=_member_callback("delete", friend_id))])
+    if spawned:
+        rows.append(nav_row(CLOSE_CALLBACK))
+    else:
+        rows.append(nav_row(_member_callback("back", friend_id), TO_LIST_TEXT))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def member_card_nav_keyboard(friend_id: int) -> InlineKeyboardMarkup:
+    """A dead end inside the card's subtree: only [◀️ To card]."""
+    return InlineKeyboardMarkup(inline_keyboard=[nav_row(_member_callback("open", friend_id), TO_CARD_TEXT)])
+
+
+def invite_link_keyboard(invite_link: str, friend_id: int | None = None) -> InlineKeyboardMarkup:
+    """[📋 Copy link] (the one call to action) / [◀️ To card] for the sign-in link screen."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="📋 Copy link",
+                copy_text=CopyTextButton(text=invite_link[:COPY_TEXT_MAX_LEN]),
+                style="primary",
+            )
+        ]
+    ]
+    if friend_id is not None:
+        rows.append(nav_row(_member_callback("open", friend_id), TO_CARD_TEXT))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def member_invite_confirm_keyboard(friend_id: int) -> InlineKeyboardMarkup:
+    """[✖️ Cancel][🔗 New link]: a new link makes the old one stop working."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            confirm_row(_member_callback("open", friend_id), "🔗 New link", _member_callback("invite_yes", friend_id))
+        ]
     )
-    builder.button(
-        text="💰 Balance",
-        callback_data=MemberAction(action="balance", friend_id=friend_id).pack(),
-    )
-    builder.button(
-        text="💳 Payment method",
-        callback_data=MemberAction(action="payment_destination", friend_id=friend_id).pack(),
-    )
-    builder.button(
-        text="🗑 Delete",
-        callback_data=MemberAction(action="delete", friend_id=friend_id).pack(),
-    )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=MemberAction(action="back", friend_id=friend_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
 
 
 def member_balance_keyboard(friend_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✏️ Set",
-        callback_data=MemberAction(action="balance_set", friend_id=friend_id).pack(),
-        style="primary",
+    """[✏️ Set amount][💱 Currency] / [◀️ To card]."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️ Set amount", callback_data=_member_callback("balance_set", friend_id)),
+                InlineKeyboardButton(text="💱 Currency", callback_data=_member_callback("balance_currency", friend_id)),
+            ],
+            nav_row(_member_callback("open", friend_id), TO_CARD_TEXT),
+        ]
     )
-    builder.button(
-        text="💱 Currency",
-        callback_data=MemberAction(action="balance_currency", friend_id=friend_id).pack(),
-    )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
 
 
 def member_balance_currency_keyboard(
     friend_id: int,
     current_currency: str,
 ) -> InlineKeyboardMarkup:
-    options = ("USD", "EUR", "RUB")
-    normalized_current = current_currency.upper()
-    rows: list[list[InlineKeyboardButton]] = []
-    option_buttons: list[InlineKeyboardButton] = []
-    for code in options:
-        is_active = code == normalized_current
-        if is_active:
-            option_buttons.append(
+    """[✅ RUB][USD] / [EUR][TRY] (radio, no colour) / [✏️ Other currency] / [◀️ Back] to the balance."""
+    normalized_current = (current_currency or "").strip().upper()
+    options = [
+        InlineKeyboardButton(
+            text=radio_label(code, code == normalized_current),
+            callback_data=f"member_balance_currency:{friend_id}:{code}",
+        )
+        for code in MEMBER_BALANCE_CURRENCIES
+    ]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            *currency_option_rows(options),
+            [
                 InlineKeyboardButton(
-                    text=code,
-                    callback_data=f"member_balance_currency:{friend_id}:{code}",
-                    style="success",
+                    text="✏️ Other currency",
+                    callback_data=_member_callback("balance_currency_other", friend_id),
                 )
-            )
-        else:
-            option_buttons.append(
-                InlineKeyboardButton(
-                    text=code,
-                    callback_data=f"member_balance_currency:{friend_id}:{code}",
-                )
-            )
-    rows.append(option_buttons)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Other",
-                callback_data=MemberAction(action="balance_currency_other", friend_id=friend_id).pack(),
-            )
+            ],
+            nav_row(_member_callback("balance", friend_id)),
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=MemberAction(action="balance", friend_id=friend_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def member_delete_confirm_keyboard(friend_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="🗑 Yes, delete",
-        callback_data=MemberAction(action="confirm_delete", friend_id=friend_id).pack(),
-        style="danger",
+    """[✖️ Cancel][🗑 Delete]: Cancel returns to the card."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            confirm_row(_member_callback("open", friend_id), "🗑 Delete", _member_callback("confirm_delete", friend_id))
+        ]
     )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
 
 
 def member_report_keyboard(friend_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+    return member_card_nav_keyboard(friend_id)
 
 
 def member_payment_destination_keyboard(
@@ -615,48 +626,64 @@ def member_payment_destination_keyboard(
     assigned_destination_id: int | None,
     default_destination_id: int | None,
 ) -> InlineKeyboardMarkup:
+    """[✅ Default (⭐ Sber · RUB)] / one radio row per method ('⭐ Sber · RUB') / [◀️ To card]."""
     rows: list[list[InlineKeyboardButton]] = []
-    default_label = "Default"
-    if default_destination_id:
-        default_target = next(
-            (item for item in destinations if int(item.get("id") or 0) == default_destination_id),
-            None,
-        )
-        if default_target:
-            default_label = f"Default ({default_target['title']})"
-    default_style = "success" if assigned_destination_id is None else None
+    default_target = next(
+        (item for item in destinations if int(item.get("id") or 0) == (default_destination_id or 0)),
+        None,
+    )
+    default_selected = assigned_destination_id is None
+    default_label = default_method_option_label(default_target, default_selected)
     rows.append(
         [
             InlineKeyboardButton(
                 text=default_label,
                 callback_data=f"member_payment_destination_default:{friend_id}",
-                style=default_style,
             )
         ]
     )
     for item in destinations:
         destination_id = int(item["id"])
-        label = f"{item['title']} ({item['currency']})"
-        style = "success" if assigned_destination_id == destination_id else None
+        method = payment_method_label(item.get("title"), "", default=destination_id == default_destination_id)
+        label = fit_label(
+            radio_label(method, assigned_destination_id == destination_id),
+            1,
+            tail=f"{SEP}{str(item.get('currency') or '').strip().upper()}",
+        )
         rows.append(
             [
                 InlineKeyboardButton(
                     text=label,
                     callback_data=f"member_payment_destination:{friend_id}:{destination_id}",
-                    style=style,
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=MemberAction(action="open", friend_id=friend_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
-    )
+    rows.append(nav_row(_member_callback("open", friend_id), TO_CARD_TEXT))
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+ADD_PAYMENT_METHOD_TEXT = "➕ Add payment method"
+PENDING_TOPUPS_TEXT = "📥 Pending top-ups"
+MAKE_DEFAULT_TEXT = "⭐ Make default"
+CLEAR_LINK_TEXT = "🗑 Clear link"
+SKIP_TEXT = "⏭ Skip"
+# New raw callbacks of the one-message "New payment method" wizard.
+PAYMENT_WIZARD_CURRENCY_PREFIX = "paydest_wiz_cur:"
+PAYMENT_WIZARD_SKIP_CALLBACK = "paydest_wiz_skip"
+PAYMENT_WIZARD_CURRENCIES = CURRENCY_OPTIONS
+
+
+def _paydest_callback(action: str, destination_id: int = 0) -> str:
+    return PaymentDestinationAction(action=action, destination_id=destination_id).pack()
+
+
+def payment_method_button_label(item: Dict[str, object], default_destination_id: int | None) -> str:
+    """``'⭐ Sber · RUB'`` / ``'Revolut · EUR'``: the title is cut, the currency tail is kept."""
+    destination_id = int(item.get("id") or 0)
+    is_default = default_destination_id is not None and destination_id == default_destination_id
+    name = payment_method_label(item.get("title") or f"Method {destination_id}", "", default=is_default)
+    currency = str(item.get("currency") or "").strip().upper()
+    return fit_label(name, 1, tail=f"{SEP}{currency}" if currency else "")
 
 
 def payment_destinations_keyboard(
@@ -664,35 +691,41 @@ def payment_destinations_keyboard(
     default_destination_id: int | None,
     pending_count: int,
 ) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(
-                text="➕ Add payment method",
-                callback_data=PaymentDestinationAction(action="create", destination_id=0).pack(),
-                style="primary",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"📥 Pending top-ups ({pending_count})",
-                callback_data=TopUpAction(action="admin_list", request_id=0).pack(),
-            )
-        ],
-    ]
-    for item in destinations:
-        destination_id = int(item["id"])
-        title = str(item.get("title") or f"Method {destination_id}")
-        currency = str(item.get("currency") or "RUB")
-        prefix = "✅ " if default_destination_id == destination_id else ""
+    """The 💳 Payment root (top level, no nav row).
+
+    [📥 Pending top-ups (2)] on top (primary) only while some wait / one row per
+    method ('⭐ Sber · RUB') / [➕ Add payment method], primary only while there
+    is no method and nothing else is due.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if pending_count > 0:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{prefix}{title} ({currency})",
-                    callback_data=PaymentDestinationAction(action="open", destination_id=destination_id).pack(),
+                    text=f"{PENDING_TOPUPS_TEXT} ({pending_count})",
+                    callback_data=TopUpAction(action="admin_list", request_id=0).pack(),
+                    style="primary",
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close")])
+    for item in destinations:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=payment_method_button_label(item, default_destination_id),
+                    callback_data=_paydest_callback("open", int(item["id"])),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=ADD_PAYMENT_METHOD_TEXT,
+                callback_data=_paydest_callback("create"),
+                style="primary" if not destinations and pending_count <= 0 else None,
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -701,59 +734,60 @@ def payment_destination_detail_keyboard(
     *,
     is_default: bool,
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✏️ Title",
-        callback_data=PaymentDestinationAction(action="edit_title", destination_id=destination_id).pack(),
-    )
-    builder.button(
-        text="💱 Currency",
-        callback_data=PaymentDestinationAction(action="edit_currency", destination_id=destination_id).pack(),
-    )
-    builder.button(
-        text="📝 Details",
-        callback_data=PaymentDestinationAction(action="edit_details", destination_id=destination_id).pack(),
-    )
-    builder.button(
-        text="🔗 Link",
-        callback_data=PaymentDestinationAction(action="edit_link", destination_id=destination_id).pack(),
-    )
-    builder.button(
-        text="⭐ Default" if is_default else "☆ Set default",
-        callback_data=PaymentDestinationAction(action="set_default", destination_id=destination_id).pack(),
-        style="success" if is_default else None,
-    )
-    builder.button(
-        text="🗑 Delete",
-        callback_data=PaymentDestinationAction(action="delete", destination_id=destination_id).pack(),
-    )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=PaymentDestinationAction(action="menu", destination_id=0).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+    """[✏️ Title][💱 Currency] / [📝 Details][🔗 Link] / [⭐ Make default] (not default) / [🗑 Delete] / [◀️ Back]."""
+    fields = [
+        InlineKeyboardButton(text="✏️ Title", callback_data=_paydest_callback("edit_title", destination_id)),
+        InlineKeyboardButton(text="💱 Currency", callback_data=_paydest_callback("edit_currency", destination_id)),
+        InlineKeyboardButton(text="📝 Details", callback_data=_paydest_callback("edit_details", destination_id)),
+        InlineKeyboardButton(text="🔗 Link", callback_data=_paydest_callback("edit_link", destination_id)),
+    ]
+    rows = pair_rows(fields)
+    if not is_default:
+        rows.append(
+            [InlineKeyboardButton(text=MAKE_DEFAULT_TEXT, callback_data=_paydest_callback("set_default", destination_id))]
+        )
+    rows.append([InlineKeyboardButton(text="🗑 Delete", callback_data=_paydest_callback("delete", destination_id))])
+    rows.append(nav_row(_paydest_callback("menu")))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def payment_destination_delete_keyboard(destination_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="🗑 Yes, delete",
-        callback_data=PaymentDestinationAction(action="confirm_delete", destination_id=destination_id).pack(),
-        style="danger",
+    """[✖️ Cancel][🗑 Delete]: Cancel returns to the method, Delete (red) keeps its old callback."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            confirm_row(
+                _paydest_callback("open", destination_id),
+                "🗑 Delete",
+                _paydest_callback("confirm_delete", destination_id),
+            )
+        ]
     )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=PaymentDestinationAction(action="open", destination_id=destination_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+
+
+def payment_wizard_keyboard(step: int) -> InlineKeyboardMarkup:
+    """The "New payment method" wizard: quick values above [✖️ Cancel].
+
+    Step 2 offers [RUB][USD] / [EUR][TRY], step 4 offers [⏭ Skip].
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if step == 2:
+        rows.extend(
+            currency_option_rows(
+                [
+                    InlineKeyboardButton(text=code, callback_data=f"{PAYMENT_WIZARD_CURRENCY_PREFIX}{code}")
+                    for code in PAYMENT_WIZARD_CURRENCIES
+                ]
+            )
+        )
+    elif step == 4:
+        rows.append([InlineKeyboardButton(text=SKIP_TEXT, callback_data=PAYMENT_WIZARD_SKIP_CALLBACK)])
+    rows.append([cancel_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payment_link_clear_rows(destination_id: int) -> list[list[InlineKeyboardButton]]:
+    """The quick-value row of the link prompt: [🗑 Clear link] (sits above ✖️ Cancel)."""
+    return [[InlineKeyboardButton(text=CLEAR_LINK_TEXT, callback_data=_paydest_callback("clear_link", destination_id))]]
 
 
 def topup_request_submit_keyboard(

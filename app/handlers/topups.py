@@ -12,31 +12,29 @@ from aiogram.types import CallbackQuery, Message
 from app.core.constants import DATE_INPUT_FORMAT
 from app.core.reminders import tg_time
 from app.storage.db import Database
-from app.ui.helpers import respond_with_markup, send_member_detail
+from app.ui.helpers import DEAD_BUTTON, METHOD_GONE, answer_callback_once, respond_with_markup
 from app.ui.keyboards import (
-    admin_reply_keyboard,
     dialog_cancel_inline_keyboard,
-    member_payment_destination_keyboard,
-    payment_destination_delete_keyboard,
-    payment_destination_detail_keyboard,
-    payment_destinations_keyboard,
     public_reply_keyboard,
     topup_destination_keyboard,
     topup_pending_requests_keyboard,
     topup_request_review_keyboard,
     topup_request_submit_keyboard,
 )
-from app.ui.states import (
-    MemberAction,
-    PaymentDestinationAction,
-    PaymentDestinationEditForm,
-    PaymentDestinationForm,
-    TopUpAction,
-    TopUpForm,
+from app.ui.member_screens import (
+    member_payment_method_screen,
+    payment_method_banner,
+    send_member_detail,
+    show_user_gone,
 )
+from app.ui.states import MemberAction, TopUpAction, TopUpForm
+from app.ui.style import toast_from_html
 from app.ui.text import escape_html
 
 from . import admin_router, public_router
+from .payment_methods import show_payment_root as _send_payment_destinations_menu
+
+DEAD_MEMBER_BUTTON_TOAST = DEAD_BUTTON
 
 
 def _normalize_link(raw_value: str) -> str:
@@ -191,115 +189,23 @@ async def _send_topup_destination_menu(
     )
 
 
-async def _send_payment_destinations_menu(
-    target: Message | CallbackQuery,
-    db: Database,
-    *,
-    notice: Optional[str] = None,
-) -> None:
-    destinations = await db.list_payment_destinations()
-    default_destination_id = await db.get_default_payment_destination_id()
-    pending_requests = await db.list_pending_topup_requests()
-    lines = ["💳 Payment:"]
-    if notice:
-        lines = [escape_html(notice), "", *lines]
-    if destinations:
-        lines.append("Choose a method to edit or add a new one.")
-        lines.append("")
-        for index, item in enumerate(destinations, 1):
-            marker = "⭐ " if int(item["id"]) == (default_destination_id or 0) else ""
-            lines.append(
-                f"{index}. <code>{escape_html(marker + str(item['title']))}</code> "
-                f"({escape_html(str(item['currency']))})"
-            )
-    else:
-        lines.append("No payment methods yet.")
-    await respond_with_markup(
-        target,
-        "\n".join(lines),
-        reply_markup=payment_destinations_keyboard(
-            destinations,
-            default_destination_id,
-            len(pending_requests),
-        ),
-    )
-
-
-async def _send_payment_destination_detail(
-    target: Message | CallbackQuery,
-    db: Database,
-    destination_id: int,
-    *,
-    notice: Optional[str] = None,
-) -> None:
-    destination = await db.get_payment_destination(destination_id)
-    if not destination:
-        await respond_with_markup(target, "Payment method not found.")
-        return
-    default_destination_id = await db.get_default_payment_destination_id()
-    assignees = await db.list_payment_destination_assignees(destination_id)
-    text = _format_destination_text(
-        destination,
-        is_default=default_destination_id == destination_id,
-        assigned_count=len(assignees),
-    )
-    if notice:
-        text = f"{escape_html(notice)}\n\n{text}"
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=payment_destination_detail_keyboard(
-            destination_id,
-            is_default=default_destination_id == destination_id,
-        ),
-    )
+# ------------------------------------------------------------ member picker
 
 
 async def _send_member_payment_destination_menu(
     target: Message | CallbackQuery,
     db: Database,
     friend_id: int,
+    *,
+    toast: Optional[str] = None,
 ) -> None:
-    friend = await db.get_friend(friend_id)
-    if not friend:
-        await respond_with_markup(target, "User not found.")
+    """The member's payment method picker (Users → card → 🏦 Method)."""
+    screen = await member_payment_method_screen(db, friend_id)
+    if screen is None:
+        await show_user_gone(target, db)
         return
-    if friend.get("telegram_id") is None:
-        await respond_with_markup(
-            target,
-            "This user has not authorized their Telegram account yet. Generate and share the authorization link first.",
-        )
-        return
-    destinations = await db.list_payment_destinations()
-    if not destinations:
-        await respond_with_markup(target, "No payment methods configured yet.")
-        return
-    assigned_destination_id = await db.get_user_payment_destination_id(int(friend["telegram_id"]))
-    default_destination_id = await db.get_default_payment_destination_id()
-    current_destination = await db.get_effective_payment_destination_for_user(int(friend["telegram_id"]))
-    current_label = "Not configured"
-    if current_destination:
-        current_label = f"{current_destination['title']} ({current_destination['currency']})"
-        if assigned_destination_id is None:
-            current_label = f"Default: {current_label}"
-    await respond_with_markup(
-        target,
-        "\n".join(
-            [
-                "💳 User payment method:",
-                f"User: <code>{escape_html(str(friend['full_name']))}</code>",
-                f"Current: <code>{escape_html(current_label)}</code>",
-                "",
-                "Choose a payment method for this user.",
-            ]
-        ),
-        reply_markup=member_payment_destination_keyboard(
-            friend_id,
-            destinations,
-            assigned_destination_id,
-            default_destination_id,
-        ),
-    )
+    text, markup = screen
+    await respond_with_markup(target, text, reply_markup=markup, toast=toast)
 
 
 async def _send_pending_topups(
@@ -371,335 +277,12 @@ async def _start_public_topup_flow(
 
 @admin_router.message(F.text.in_({"💳 Payment", "💳 Payment methods"}))
 async def handle_payment_methods_menu(message: Message, db: Database) -> None:
+    """'💳 Payment' (and the old '💳 Payment methods'): the root, as a new message.
+
+    Every paydest:* button and the "New payment method" wizard live in
+    app/handlers/payment_methods.py.
+    """
     await _send_payment_destinations_menu(message, db)
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "menu"))
-async def handle_payment_methods_menu_callback(
-    callback: CallbackQuery,
-    db: Database,
-) -> None:
-    await _send_payment_destinations_menu(callback, db)
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "open"))
-async def handle_payment_destination_open(
-    callback: CallbackQuery,
-    callback_data: PaymentDestinationAction,
-    db: Database,
-) -> None:
-    await _send_payment_destination_detail(callback, db, callback_data.destination_id)
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "create"))
-async def handle_payment_destination_create_start(
-    callback: CallbackQuery,
-    state: FSMContext,
-) -> None:
-    await state.clear()
-    await state.set_state(PaymentDestinationForm.title)
-    if callback.message:
-        await callback.message.answer(
-            "💳 New payment method:\n"
-            "Send the title.\n"
-            "Example: <code>Main RUB card</code>.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
-
-
-@admin_router.message(PaymentDestinationForm.title)
-async def handle_payment_destination_title(
-    message: Message,
-    state: FSMContext,
-) -> None:
-    title = (message.text or "").strip()
-    if not title:
-        await message.answer("Title cannot be empty.")
-        return
-    await state.update_data(payment_destination_title=title)
-    await state.set_state(PaymentDestinationForm.currency)
-    await message.answer(
-        "Send the 3-letter currency code. Example: <code>RUB</code>.",
-        reply_markup=dialog_cancel_inline_keyboard(),
-    )
-
-
-@admin_router.message(PaymentDestinationForm.currency)
-async def handle_payment_destination_currency(
-    message: Message,
-    state: FSMContext,
-) -> None:
-    currency = (message.text or "").strip().upper()
-    if len(currency) != 3 or not currency.isalpha():
-        await message.answer("Currency must contain exactly 3 letters. Example: <code>USD</code>.")
-        return
-    await state.update_data(payment_destination_currency=currency)
-    await state.set_state(PaymentDestinationForm.details)
-    await message.answer(
-        "Send the payment details text.\n"
-        "You can use multiple lines.",
-        reply_markup=dialog_cancel_inline_keyboard(),
-    )
-
-
-@admin_router.message(PaymentDestinationForm.details)
-async def handle_payment_destination_details(
-    message: Message,
-    state: FSMContext,
-) -> None:
-    details = (message.text or "").strip()
-    if not details:
-        await message.answer("Details cannot be empty.")
-        return
-    await state.update_data(payment_destination_details=details)
-    await state.set_state(PaymentDestinationForm.payment_link)
-    await message.answer(
-        "Send the payment link, or <code>-</code> to skip.",
-        reply_markup=dialog_cancel_inline_keyboard(),
-    )
-
-
-@admin_router.message(PaymentDestinationForm.payment_link)
-async def handle_payment_destination_link(
-    message: Message,
-    state: FSMContext,
-    db: Database,
-) -> None:
-    data = await state.get_data()
-    destination_id = await db.create_payment_destination(
-        title=str(data["payment_destination_title"]),
-        currency=str(data["payment_destination_currency"]),
-        details=str(data["payment_destination_details"]),
-        payment_link=_normalize_link(message.text or ""),
-    )
-    if await db.get_default_payment_destination_id() is None:
-        await db.set_default_payment_destination_id(destination_id)
-    await state.clear()
-    await message.answer("Payment method saved.", reply_markup=admin_reply_keyboard())
-    await _send_payment_destination_detail(message, db, destination_id)
-
-
-async def _start_destination_edit(
-    callback: CallbackQuery,
-    state: FSMContext,
-    destination_id: int,
-    *,
-    field: str,
-    prompt: str,
-) -> None:
-    await state.update_data(edit_destination_id=destination_id)
-    if field == "title":
-        await state.set_state(PaymentDestinationEditForm.title)
-    elif field == "currency":
-        await state.set_state(PaymentDestinationEditForm.currency)
-    elif field == "details":
-        await state.set_state(PaymentDestinationEditForm.details)
-    else:
-        await state.set_state(PaymentDestinationEditForm.payment_link)
-    if callback.message:
-        await callback.message.answer(prompt, reply_markup=dialog_cancel_inline_keyboard())
-    await callback.answer()
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "edit_title"))
-async def handle_payment_destination_edit_title(
-    callback: CallbackQuery,
-    callback_data: PaymentDestinationAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    if not await db.get_payment_destination(callback_data.destination_id):
-        await callback.answer("Payment method not found.", show_alert=True)
-        return
-    await _start_destination_edit(
-        callback,
-        state,
-        callback_data.destination_id,
-        field="title",
-        prompt="Send the new title.",
-    )
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "edit_currency"))
-async def handle_payment_destination_edit_currency(
-    callback: CallbackQuery,
-    callback_data: PaymentDestinationAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    if not await db.get_payment_destination(callback_data.destination_id):
-        await callback.answer("Payment method not found.", show_alert=True)
-        return
-    await _start_destination_edit(
-        callback,
-        state,
-        callback_data.destination_id,
-        field="currency",
-        prompt="Send the new 3-letter currency code.",
-    )
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "edit_details"))
-async def handle_payment_destination_edit_details(
-    callback: CallbackQuery,
-    callback_data: PaymentDestinationAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    if not await db.get_payment_destination(callback_data.destination_id):
-        await callback.answer("Payment method not found.", show_alert=True)
-        return
-    await _start_destination_edit(
-        callback,
-        state,
-        callback_data.destination_id,
-        field="details",
-        prompt="Send the new details text.",
-    )
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "edit_link"))
-async def handle_payment_destination_edit_link(
-    callback: CallbackQuery,
-    callback_data: PaymentDestinationAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    if not await db.get_payment_destination(callback_data.destination_id):
-        await callback.answer("Payment method not found.", show_alert=True)
-        return
-    await _start_destination_edit(
-        callback,
-        state,
-        callback_data.destination_id,
-        field="payment_link",
-        prompt="Send the new link, or <code>-</code> to clear it.",
-    )
-
-
-@admin_router.message(PaymentDestinationEditForm.title)
-async def handle_payment_destination_edit_title_input(
-    message: Message,
-    state: FSMContext,
-    db: Database,
-) -> None:
-    title = (message.text or "").strip()
-    if not title:
-        await message.answer("Title cannot be empty.")
-        return
-    data = await state.get_data()
-    destination_id = int(data["edit_destination_id"])
-    await db.update_payment_destination_fields(destination_id, title=title)
-    await state.clear()
-    await message.answer("Payment method updated.", reply_markup=admin_reply_keyboard())
-    await _send_payment_destination_detail(message, db, destination_id)
-
-
-@admin_router.message(PaymentDestinationEditForm.currency)
-async def handle_payment_destination_edit_currency_input(
-    message: Message,
-    state: FSMContext,
-    db: Database,
-) -> None:
-    currency = (message.text or "").strip().upper()
-    if len(currency) != 3 or not currency.isalpha():
-        await message.answer("Currency must contain exactly 3 letters.")
-        return
-    data = await state.get_data()
-    destination_id = int(data["edit_destination_id"])
-    await db.update_payment_destination_fields(destination_id, currency=currency)
-    await state.clear()
-    await message.answer("Payment method updated.", reply_markup=admin_reply_keyboard())
-    await _send_payment_destination_detail(message, db, destination_id)
-
-
-@admin_router.message(PaymentDestinationEditForm.details)
-async def handle_payment_destination_edit_details_input(
-    message: Message,
-    state: FSMContext,
-    db: Database,
-) -> None:
-    details = (message.text or "").strip()
-    if not details:
-        await message.answer("Details cannot be empty.")
-        return
-    data = await state.get_data()
-    destination_id = int(data["edit_destination_id"])
-    await db.update_payment_destination_fields(destination_id, details=details)
-    await state.clear()
-    await message.answer("Payment method updated.", reply_markup=admin_reply_keyboard())
-    await _send_payment_destination_detail(message, db, destination_id)
-
-
-@admin_router.message(PaymentDestinationEditForm.payment_link)
-async def handle_payment_destination_edit_link_input(
-    message: Message,
-    state: FSMContext,
-    db: Database,
-) -> None:
-    data = await state.get_data()
-    destination_id = int(data["edit_destination_id"])
-    await db.update_payment_destination_fields(
-        destination_id,
-        payment_link=_normalize_link(message.text or ""),
-    )
-    await state.clear()
-    await message.answer("Payment method updated.", reply_markup=admin_reply_keyboard())
-    await _send_payment_destination_detail(message, db, destination_id)
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "set_default"))
-async def handle_payment_destination_set_default(
-    callback: CallbackQuery,
-    callback_data: PaymentDestinationAction,
-    db: Database,
-) -> None:
-    destination = await db.get_payment_destination(callback_data.destination_id)
-    if not destination:
-        await callback.answer("Payment method not found.", show_alert=True)
-        return
-    await db.set_default_payment_destination_id(callback_data.destination_id)
-    await callback.answer("Default payment method updated.")
-    await _send_payment_destination_detail(
-        callback,
-        db,
-        callback_data.destination_id,
-        notice="Default payment method updated.",
-    )
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "delete"))
-async def handle_payment_destination_delete_prompt(
-    callback: CallbackQuery,
-    callback_data: PaymentDestinationAction,
-    db: Database,
-) -> None:
-    destination = await db.get_payment_destination(callback_data.destination_id)
-    if not destination:
-        await callback.answer("Payment method not found.", show_alert=True)
-        return
-    if callback.message:
-        await callback.message.edit_text(
-            "Delete this payment method?\n"
-            f"<code>{escape_html(str(destination['title']))}</code>",
-            reply_markup=payment_destination_delete_keyboard(callback_data.destination_id),
-        )
-    await callback.answer()
-
-
-@admin_router.callback_query(PaymentDestinationAction.filter(F.action == "confirm_delete"))
-async def handle_payment_destination_delete(
-    callback: CallbackQuery,
-    callback_data: PaymentDestinationAction,
-    db: Database,
-) -> None:
-    if not await db.get_payment_destination(callback_data.destination_id):
-        await callback.answer("Payment method not found.", show_alert=True)
-        return
-    await db.delete_payment_destination(callback_data.destination_id)
-    await callback.answer("Payment method deleted.")
-    await _send_payment_destinations_menu(callback, db, notice="Payment method deleted.")
 
 
 @admin_router.callback_query(MemberAction.filter(F.action == "payment_destination"))
@@ -717,20 +300,22 @@ async def handle_member_payment_destination_default(
     db: Database,
 ) -> None:
     try:
-        friend_id = int(callback.data.split(":", 1)[1])
-    except (TypeError, ValueError):
-        await callback.answer("Invalid user.", show_alert=True)
+        friend_id = int((callback.data or "").split(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        await answer_callback_once(callback, DEAD_MEMBER_BUTTON_TOAST)
         return
     friend = await db.get_friend(friend_id)
     if not friend:
-        await callback.answer("User not found.", show_alert=True)
+        await show_user_gone(callback, db)
         return
     if friend.get("telegram_id") is None:
-        await callback.answer("User has not linked Telegram yet.", show_alert=True)
+        await _send_member_payment_destination_menu(callback, db, friend_id)
         return
     await db.clear_user_payment_destination_id(int(friend["telegram_id"]))
-    await callback.answer("User now uses the default payment method.")
-    await send_member_detail(callback, db, friend_id)
+    default_id = await db.get_default_payment_destination_id()
+    default = await db.get_payment_destination(default_id) if default_id is not None else None
+    banner = payment_method_banner(default, default=True)
+    await send_member_detail(callback, db, friend_id, banner=banner, toast=toast_from_html(banner))
 
 
 @admin_router.callback_query(F.data.startswith("member_payment_destination:"))
@@ -738,30 +323,29 @@ async def handle_member_payment_destination_assign(
     callback: CallbackQuery,
     db: Database,
 ) -> None:
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
-        return
+    parts = (callback.data or "").split(":")
     try:
         friend_id = int(parts[1])
         destination_id = int(parts[2])
-    except ValueError:
-        await callback.answer("Invalid action.", show_alert=True)
+    except (IndexError, ValueError):
+        await answer_callback_once(callback, DEAD_MEMBER_BUTTON_TOAST)
         return
     friend = await db.get_friend(friend_id)
-    destination = await db.get_payment_destination(destination_id)
     if not friend:
-        await callback.answer("User not found.", show_alert=True)
+        await show_user_gone(callback, db)
         return
-    if friend.get("telegram_id") is None:
-        await callback.answer("User has not linked Telegram yet.", show_alert=True)
-        return
-    if not destination:
-        await callback.answer("Payment method not found.", show_alert=True)
+    destination = await db.get_payment_destination(destination_id)
+    if friend.get("telegram_id") is None or not destination:
+        # Signed out in the meantime, or the method was deleted: show the picker as it is now.
+        toast = METHOD_GONE if not destination else None
+        await _send_member_payment_destination_menu(callback, db, friend_id, toast=toast)
         return
     await db.set_user_payment_destination_id(int(friend["telegram_id"]), destination_id)
-    await callback.answer("Payment method assigned.")
-    await send_member_detail(callback, db, friend_id)
+    default_id = await db.get_default_payment_destination_id()
+    banner = payment_method_banner(
+        destination, default=False, is_default_method=default_id is not None and int(default_id) == destination_id
+    )
+    await send_member_detail(callback, db, friend_id, banner=banner, toast=toast_from_html(banner))
 
 
 @public_router.message(F.text == "➕ Top up")
