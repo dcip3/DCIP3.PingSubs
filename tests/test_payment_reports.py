@@ -37,6 +37,11 @@ class ScheduleLineTests(unittest.TestCase):
             f"({tg_due('2026-10-01', TZ, 'r', 'in 14 days')}) · 1 of 3 paid",
         )
         self.assertNotIn("<code>", line)
+        # Tomorrow stays a plain word, as on the card: a live entity anchored at
+        # noon would render "in 14 hours" on new clients.
+        tomorrow = _build_report_schedule_line(None, date(2026, 9, 18), TODAY, TZ)
+        self.assertTrue(tomorrow.endswith("</tg-time> (tomorrow)"), tomorrow)
+        self.assertNotIn('format="r"', tomorrow)
 
     def test_overdue_next_charge_keeps_server_side_overdue_text(self):
         line = _build_report_schedule_line("2026-08-15", date(2026, 9, 15), TODAY, TZ)

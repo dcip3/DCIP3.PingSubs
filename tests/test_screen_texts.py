@@ -11,11 +11,9 @@ from zoneinfo import ZoneInfo
 from aiogram.types import Chat, Message, User
 
 from app.core.constants import MONTHLY_PERIOD_SENTINEL, PAYMENT_MODE_FIXED
-from app.core.reminders import calculate_next_charge_date, tg_due
+from app.core.reminders import calculate_next_charge_date, tg_clock, tg_due
 from app.storage.db import Database
 from app.ui.helpers import (
-    _build_user_info_text,
-    _payment_info_lines,
     build_subscription_card,
     send_participants_settings,
     send_pricing_settings,
@@ -80,86 +78,6 @@ class MemberMessage(Message):
 
     async def answer(self, text: str, reply_markup=None, **_: object) -> None:
         type(self).sent.append(text)
-
-
-def _sections(text: str) -> list[str]:
-    """The blockquote bodies of a card, in order; also checks the tags are balanced."""
-    bodies = re.findall(r"<blockquote>(.*?)</blockquote>", text, flags=re.S)
-    assert text.count("<blockquote") == len(bodies) == text.count("</blockquote>"), text
-    return bodies
-
-
-class PaymentInfoLinesTests(unittest.TestCase):
-    def test_single_heading_per_line_code_and_no_empty_comment(self):
-        lines = _payment_info_lines(
-            "Default (Card (RUB))",
-            "2200 1234 5678 9012\n\n  Ivan I. <bank>  \n",
-            "https://pay.example/x?a=1&b=2",
-            "",
-        )
-        self.assertEqual(
-            lines,
-            [
-                "💳 Payment: Default (Card (RUB))",
-                "<code>2200 1234 5678 9012</code>",
-                "<code>Ivan I. &lt;bank&gt;</code>",
-                "🔗 Link: https://pay.example/x?a=1&amp;b=2",
-            ],
-        )
-        self.assertEqual(sum(1 for line in lines if line.startswith("💳 Payment")), 1)
-        self.assertNotIn("<pre>", "\n".join(lines))
-
-    def test_comment_is_plain_text_when_present(self):
-        lines = _payment_info_lines("Card", "", "", "Pay <before> the 5th")
-        self.assertEqual(lines, ["💳 Payment: Card", "📝 Comment: Pay &lt;before&gt; the 5th"])
-
-    def test_compact_card_variant_drops_labels_and_a_comment_repeating_the_requisites(self):
-        details = "2200 1234 5678 9012\nIvan I."
-        lines = _payment_info_lines("Card", details, "", "  2200 1234  5678 9012 \n\n Ivan I.  ", compact=True)
-        self.assertEqual(lines, ["💳 Card", "<code>2200 1234 5678 9012</code>", "<code>Ivan I.</code>"])
-        self.assertNotIn("📝", "\n".join(lines))
-
-        lines = _payment_info_lines("Card", details, "https://pay.example/x", "Pay <early>", compact=True)
-        self.assertEqual(lines[-2:], ["🔗 Link: https://pay.example/x", "📝 Pay &lt;early&gt;"])
-        self.assertNotIn("Comment:", "\n".join(lines))
-        # Empty requisites never suppress an empty comment into a stray line.
-        self.assertEqual(_payment_info_lines("not set", "", "", "", compact=True), ["💳 not set"])
-
-
-class UserInfoTextTests(unittest.TestCase):
-    def test_shape_with_telegram_id(self):
-        text = _build_user_info_text(
-            {"full_name": "Anna <K>", "telegram_id": 1001, "balance": 150, "balance_currency": "rub"},
-            [{"name": "Netflix"}, {"name": "Spotify & co"}],
-            include_telegram_id=True,
-            title="👤 User Info:",
-        )
-        self.assertEqual(
-            text,
-            "👤 User Info:\n"
-            "<b>Anna &lt;K&gt;</b>\n"
-            "Telegram ID: <code>1001</code>\n"
-            "\n"
-            "Balance: <b>150.00 RUB</b>\n"
-            "\n"
-            "Subscriptions:\n"
-            "• Netflix\n"
-            "• Spotify &amp; co",
-        )
-
-    def test_shape_without_telegram_id_and_empty_subscriptions(self):
-        text = _build_user_info_text(
-            {"full_name": None, "telegram_id": None, "balance": "bad"},
-            [],
-            include_telegram_id=False,
-            title="👤 Account:",
-        )
-        self.assertEqual(
-            text,
-            "👤 Account:\n<b>Unknown</b>\n\nBalance: <b>0.00 RUB</b>\n\nSubscriptions:\nNo subscriptions yet.",
-        )
-        self.assertNotIn("🔴", text)
-        self.assertNotIn("🟢", text)
 
 
 class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
@@ -243,20 +161,32 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
         await send_subscription_list(message, self.db)
         self.assertEqual(message.text, "📋 <b>Subscriptions</b>\n\nNo subscriptions yet.")
 
-    async def test_public_subscription_list_uses_live_next_charge(self):
-        upcoming_value = self.upcoming.isoformat()
-        text = await self._render(send_user_subscription_list, self.db, 1001)
+    async def test_member_subscription_list_counts_unpaid_and_lists_items_as_buttons(self):
+        message = FakeMessage()
+        await send_user_subscription_list(message, self.db, 1001)
         self.assertEqual(
-            text,
-            "📋 Subscriptions:\nYour plans:\n\n"
-            f"1. <b>Netflix</b> — next charge {tg_due(upcoming_value, TZ, 'wD')} "
-            f"({tg_due(upcoming_value, TZ, 'r', 'in 14 d')})",
+            message.text,
+            "📋 <b>Subscriptions</b> · 1\n\n⚠️ Unpaid: <b>1</b>\n\nTap one to see your share and how to pay.",
         )
+        rows = [[button.text for button in row] for row in message.markups[-1].inline_keyboard]
+        self.assertEqual(rows, [["⚠️ Netflix · overdue"]])
+
+        # Spotify's next charge is in the past (the worker has not run): the list shows the next one ahead.
         await self.db.set_participant(self.spotify, self.anna, True)
-        text = await self._render(send_user_subscription_list, self.db, 1001)
-        overdue_value = self.overdue.isoformat()
-        self.assertIn(f"<b>Spotify &amp; co</b> — next charge {tg_due(overdue_value, TZ, 'wD')}\n", text)
-        self.assertNotIn(f"{tg_due(overdue_value, TZ, 'wD')} (", text)
+        message = FakeMessage()
+        await send_user_subscription_list(message, self.db, 1001)
+        self.assertTrue(message.text.startswith("📋 <b>Subscriptions</b> · 2\n\n⚠️ Unpaid: <b>1</b>"), message.text)
+        following = calculate_next_charge_date(self.overdue, 30, None)
+        rows = [[button.text for button in row] for row in message.markups[-1].inline_keyboard]
+        self.assertEqual(rows, [["⚠️ Netflix · overdue"], [f"Spotify & co · {following:%d.%m}"]])
+
+        message = FakeMessage()
+        await send_user_subscription_list(message, self.db, 9999)
+        self.assertEqual(
+            message.text,
+            "📋 <b>Subscriptions</b>\n\nYou are not in any subscription yet. The admin adds you.",
+        )
+        self.assertEqual(message.markups, [None])
 
     async def _admin_card(self, subscription_id: int, comment: str | None = None) -> str:
         if comment is not None:
@@ -307,9 +237,6 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
         )
         for stale in ("Pricing & schedule", "Payment mode", "Payment:", "Comment:", "Users (", " d overdue", "day(s)"):
             self.assertNotIn(stale, text)
-
-    def _next_charge(self, due, distance: str) -> str:
-        return f"📅 Next charge: <b>{tg_due(due.isoformat(), TZ, 'wD')}</b> ({distance})"
 
     async def test_admin_card_shown_in_comment_and_next_charge_rules(self):
         await self.db.update_subscription_fields(self.netflix, base_currency="TRY")
@@ -471,7 +398,13 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
 
         account = await self._render(send_public_account_detail, self.db, 1001)
         self._assert_value_style(account)
-        self.assertIn("Top-up methods: Choose when topping up (default: Card · RUB)", account)
+        self.assertEqual(
+            account,
+            "👤 <b>Anna &lt;K&gt;</b>\n\n"
+            "💰 Balance: <b>0.00 RUB</b>\n"
+            "🏦 Payment method: ⭐ Card · RUB\n"
+            "📋 Subscriptions: Netflix",
+        )
         self.assertNotIn("Telegram ID", account)
 
         members = await self._render(send_member_list, self.db)
@@ -489,27 +422,42 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Page:", tests_page)
         self.assertNotIn("<code>", tests_page)
 
-    PAYMENT_SECTION = (
-        "💳 Default (Card (RUB))\n<code>2200 1234 5678 9012</code>\n<code>Ivan I.</code>\n"
-        "🔗 Link: https://pay.example/x\n📝 Pay &lt;early&gt;"
+    # The member card's payment block: the requisites fold under the copy button,
+    # the openable link is a button only, the comment stays.
+    HOW_TO_PAY = (
+        "💳 <b>How to pay</b>\n"
+        f"{SUBITEM_INDENT}Card · RUB\n"
+        "<blockquote expandable><code>2200 1234 5678 9012</code>\n<code>Ivan I.</code></blockquote>\n"
+        f"{SUBITEM_INDENT}📝 Pay &lt;early&gt;"
     )
+
+    def _member_next_charge(self, due, distance: str, *, paid: bool = False) -> str:
+        line = f"{SUBITEM_INDENT}Next charge: <b>{tg_due(due.isoformat(), TZ, 'wD')}</b> ({distance})"
+        return line + (" · ✅ paid" if paid else "")
+
+    def _member_reminder(self, time_value: str, *, default: bool = True, shown_in: str = "RUB (default)") -> str:
+        clock = tg_clock(time_value, TZ, time_value)
+        return (
+            "⏰ <b>Reminder</b>\n"
+            f"{SUBITEM_INDENT}<b>{clock}</b> your time" + (" · default" if default else "") + "\n"
+            f"{SUBITEM_INDENT}Shown in: {shown_in}"
+        )
 
     async def test_public_subscription_detail(self):
         upcoming_value = self.upcoming.isoformat()
         text = await self._render(send_public_subscription_detail, self.db, self.netflix)
         self._assert_value_style(text)
-        sections = _sections(text)
-        self.assertEqual(len(sections), 3)
-        self.assertTrue(text.startswith("<b>🏷️ Netflix</b>\n\n<blockquote>"), text)
+        # No viewer: no share, so the schedule block; no admin extras.
         self.assertEqual(
-            sections[0],
-            "💵 My amount: n/a · reminders in RUB (default)\n"
-            f"{self._next_charge(self.upcoming, tg_due(upcoming_value, TZ, 'r', 'in 14 d'))}\n"
-            "🔁 Every 30 days",
+            text,
+            "🏷️ <b>Netflix</b>\n\n"
+            "📅 <b>Schedule</b>\n"
+            f"{self._member_next_charge(self.upcoming, tg_due(upcoming_value, TZ, 'r', 'in 14 days'))}\n"
+            f"{SUBITEM_INDENT}Repeats: every 30 days\n\n"
+            f"{self._member_reminder('10:15')}\n\n"
+            f"{self.HOW_TO_PAY}",
         )
-        self.assertEqual(sections[1], "⏰ <code>10:15</code> (UTC) · default")
-        self.assertEqual(sections[2], self.PAYMENT_SECTION)
-        for admin_only in ("💰", "👥", "after due", "Overdue", "1200.00"):
+        for admin_only in ("💰", "👥", "after due", "1 200.00", "Default ("):
             self.assertNotIn(admin_only, text)
 
     async def _member_card(self, telegram_id: int, subscription_id: int) -> str:
@@ -520,56 +468,55 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
         self._assert_value_style(text)
         return text
 
-    async def test_member_card_overdue_block_and_personal_settings(self):
+    async def test_member_card_unpaid_block_and_personal_settings(self):
         overdue_value = self.overdue.isoformat()
-        # Anna paid the upcoming cycle, so her next charge is the one after it.
-        following = calculate_next_charge_date(self.upcoming, 30, None)
+        upcoming_value = self.upcoming.isoformat()
+        # Anna paid the upcoming cycle ahead: it is shown with '✅ paid'; the overdue one leads.
         text = await self._member_card(1001, self.netflix)
-        sections = _sections(text)
-        self.assertEqual(len(sections), 4)
         self.assertEqual(
-            sections[0],
-            "💵 My amount: <b>400.00 RUB</b> · reminders in RUB (default)\n"
-            f"{self._next_charge(following, tg_due(following.isoformat(), TZ, 'r', 'in 44 d'))}\n"
-            "🔁 Every 30 days",
+            text,
+            "🏷️ <b>Netflix</b>\n\n"
+            "⚠️ <b>Unpaid</b>\n"
+            f"{SUBITEM_INDENT}<b>{tg_due(overdue_value, TZ, 'wD')}</b> · overdue by 2 days\n\n"
+            "💵 <b>Your share</b>\n"
+            f"{SUBITEM_INDENT}Amount: <b>400.00\u00a0RUB</b>\n"
+            f"{self._member_next_charge(self.upcoming, tg_due(upcoming_value, TZ, 'r', 'in 14 days'), paid=True)}\n"
+            f"{SUBITEM_INDENT}Repeats: every 30 days\n\n"
+            f"{self._member_reminder('10:15')}\n\n"
+            f"{self.HOW_TO_PAY}",
         )
-        self.assertEqual(sections[1], f"⚠️ Overdue\n• <b>{tg_due(overdue_value, TZ, 'wD')}</b>")
-        self.assertEqual(sections[2], "⏰ <code>10:15</code> (UTC) · default")
-        self.assertEqual(sections[3], self.PAYMENT_SECTION)
 
         await self.db.log_payment(self.netflix, overdue_value, 1001)
         await self.db.set_user_subscription_setting(1001, self.netflix, "reminder_time", "08:00")
         await self.db.set_user_subscription_setting(1001, self.netflix, "target_currency", "usd")
         text = await self._member_card(1001, self.netflix)
-        sections = _sections(text)
-        self.assertEqual(len(sections), 3)
-        self.assertNotIn("Overdue", text)
-        self.assertIn("💵 My amount: <b>400.00 RUB</b> · reminders in USD\n", text)
-        self.assertEqual(sections[1], "⏰ <code>08:00</code> (UTC)")
+        self.assertNotIn("Unpaid", text)
+        self.assertTrue(text.startswith("🏷️ <b>Netflix</b>\n\n💵 <b>Your share</b>\n"), text)
+        self.assertIn(self._member_reminder("08:00", default=False, shown_in="USD"), text)
 
-    async def test_member_card_admin_view_folds_admin_extras_into_sections(self):
+    async def test_member_card_admin_view_adds_the_admin_extras(self):
         await self.db.add_admin(1002, "Dmitry")
         upcoming_value = self.upcoming.isoformat()
         text = await self._member_card(1002, self.netflix)
-        sections = _sections(text)
-        self.assertEqual(len(sections), 5)
+        share = "<b>≈ 400.00\u00a0RUB</b>"
         self.assertEqual(
-            sections[0],
-            "💰 <b>1200.00 RUB</b>\n"
-            "💵 My amount: <b>400.00 RUB</b> · reminders in RUB (default)\n"
-            f"{self._next_charge(self.upcoming, tg_due(upcoming_value, TZ, 'r', 'in 14 d'))}\n"
-            "🔁 Every 30 days",
+            text,
+            "🏷️ <b>Netflix</b> · <b>1\u00a0200.00\u00a0RUB</b>\n\n"
+            "⚠️ <b>Unpaid</b>\n"
+            f"{SUBITEM_INDENT}<b>{tg_due(self.overdue.isoformat(), TZ, 'wD')}</b> · overdue by 2 days\n\n"
+            "💵 <b>Your share</b>\n"
+            f"{SUBITEM_INDENT}Amount: <b>400.00\u00a0RUB</b>\n"
+            f"{self._member_next_charge(self.upcoming, tg_due(upcoming_value, TZ, 'r', 'in 14 days'))}\n"
+            f"{SUBITEM_INDENT}Repeats: every 30 days\n\n"
+            "👥 <b>Participants: 3</b>\n"
+            f"{SUBITEM_INDENT}Split by shares · 3 shares × {share}\n"
+            f"{SUBITEM_INDENT}• Anna &lt;K&gt; — {share}\n"
+            f"{SUBITEM_INDENT}• Boris — {share}\n"
+            f"{SUBITEM_INDENT}• Dmitry — {share}\n\n"
+            f"{self._member_reminder('10:15')}\n"
+            f"{SUBITEM_INDENT}1 day before, on the day · After due date: daily until paid\n\n"
+            f"{self.HOW_TO_PAY}",
         )
-        self.assertEqual(
-            sections[1],
-            "👥 <b>3 users</b> · split by shares, 3 shares × <b>≈ 400.00 RUB</b>\n"
-            "• Anna &lt;K&gt; — <b>≈ 400.00 RUB</b>\n• Boris — <b>≈ 400.00 RUB</b>\n• Dmitry — <b>≈ 400.00 RUB</b>",
-        )
-        self.assertEqual(sections[2], f"⚠️ Overdue\n• <b>{tg_due(self.overdue.isoformat(), TZ, 'wD')}</b>")
-        self.assertEqual(
-            sections[3], "⏰ <code>10:15</code> (UTC) · default · 1 day before, on the day · after due: <b>on</b>"
-        )
-        self.assertEqual(sections[4], self.PAYMENT_SECTION)
 
 
 if __name__ == "__main__":

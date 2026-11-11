@@ -9,6 +9,7 @@ from aiogram.types import ReplyKeyboardMarkup
 from app.core.reminders import tg_due
 from app.handlers.admin import HELP_ROLE_ADMIN, HELP_ROLE_GUEST, HELP_ROLE_MEMBER, help_text
 from app.ui.keyboards import (
+    MENU_ACCOUNT,
     MENU_HELP,
     admin_reply_keyboard,
     dialog_cancel_inline_keyboard,
@@ -417,6 +418,19 @@ class MenuHandlerTests(RealDispatcherTestCase):
         await self.feed(self.message("/help"))
         sent = self.bot.of(SendMessage)
         self.assertEqual([call.text for call in sent], [help_text(HELP_ROLE_ADMIN)] * 2)
+
+    async def test_admin_tapping_account(self):
+        await self.make_admin()
+        await self.feed(self.message(MENU_ACCOUNT))
+        call = self.bot.of(SendMessage)[-1]
+        self.assertEqual(call.text, ADMIN_ACCOUNT_TEXT)
+        self.assertEqual(call.reply_markup.keyboard, admin_reply_keyboard().keyboard)
+
+    async def test_admin_rename_account_gets_members_only_alert(self):
+        await self.make_admin()
+        await self.feed(self.callback("public_account:rename"))
+        answer = self.bot.answers()[-1]
+        self.assertEqual((answer.text, answer.show_alert), (MEMBERS_ONLY_ALERT, True))
 
 
 class CloseCancelTests(RealDispatcherTestCase):

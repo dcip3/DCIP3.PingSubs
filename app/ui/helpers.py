@@ -28,22 +28,14 @@ from app.ui.keyboards import (
     build_currency_keyboard,
     build_creation_payment_mode_keyboard,
     build_period_keyboard,
-    build_public_subscription_list_keyboard,
-    public_account_keyboard,
     build_share_limit_keyboard,
     build_subscription_list_keyboard,
     pricing_settings_keyboard,
-    public_subscription_detail_keyboard,
-    public_subscription_report_keyboard,
-    public_reply_keyboard,
-    settings_tests_keyboard,
     subscription_detail_keyboard,
-    tests_menu_keyboard,
 )
 from app.ui.states import Responder
 from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
-    calculate_next_charge_date,
     format_offsets_for_display,
     normalize_monthly_anchor_day,
     normalize_time_string,
@@ -75,51 +67,21 @@ from app.ui.style import (  # noqa: E402
     with_banner,
 )
 from app.ui.text import days_left_phrase, format_days, format_money, format_shares  # noqa: E402
+# Member account and own reports (WP10).
+from app.ui.keyboards import guest_reply_keyboard, member_own_report_keyboard  # noqa: E402
+from app.ui.member_account import (  # noqa: E402
+    NOT_SET_UP_ALERT,
+    NOT_SET_UP_TEXT,
+    REPORTS_EMPTY_TEXT,
+    account_screen,
+    typing_action,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_TELEGRAM_MESSAGE_LEN = 3900
 BLOCKQUOTE_OPEN = "<blockquote expandable>"
 BLOCKQUOTE_CLOSE = "</blockquote>"
-
-
-def _build_user_info_text(
-    friend: Dict[str, object],
-    subscriptions: Sequence[Dict[str, object]],
-    *,
-    include_telegram_id: bool,
-    title: str,
-) -> str:
-    try:
-        balance_value = float(friend.get("balance") or 0.0)
-    except (TypeError, ValueError):
-        balance_value = 0.0
-    balance_currency = str(friend.get("balance_currency") or "").strip().upper() or "RUB"
-    if subscriptions:
-        sub_lines = "\n".join(f"• {escape_html(sub['name'])}" for sub in subscriptions)
-    else:
-        sub_lines = "No subscriptions yet."
-
-    lines = [
-        title,
-        f"<b>{escape_html(str(friend.get('full_name') or 'Unknown'))}</b>",
-    ]
-    if include_telegram_id:
-        telegram_id = friend.get("telegram_id")
-        if telegram_id is None:
-            lines.append("Telegram ID: not linked")
-        else:
-            lines.append(f"Telegram ID: <code>{telegram_id}</code>")
-    lines.extend(
-        [
-            "",
-            f"Balance: <b>{balance_value:.2f} {escape_html(balance_currency)}</b>",
-            "",
-            "Subscriptions:",
-            sub_lines,
-        ]
-    )
-    return "\n".join(lines)
 
 
 def _effective_fixed_amount(subscription_amount: float, raw_value: object) -> float:
@@ -165,181 +127,6 @@ def _sum_users_total(
         weight = int(person.get("share_weight") or 1)
         total += per_share * weight
     return total
-
-
-def _on_off(value: object) -> str:
-    return "<b>on</b>" if value else "<b>off</b>"
-
-
-def _money(amount: float, currency: object) -> str:
-    return f"<b>{amount:.2f} {escape_html(str(currency))}</b>"
-
-
-def _next_charge_html(next_value: str, tz_name: str, today: date) -> str:
-    """Live "next charge" date plus a relative part for charges still ahead.
-
-    A charge due today is labelled with a static "(today)" instead of a
-    relative entity, so clients never render it as "in 3 hours" / "2 hours ago".
-    """
-    text = tg_due(next_value, tz_name, "wD")
-    try:
-        due_date = datetime.strptime(next_value, "%Y-%m-%d").date()
-    except (TypeError, ValueError):
-        return text
-    if due_date < today:
-        return text
-    if due_date == today:
-        return f"{text} (today)"
-    days = (due_date - today).days
-    return f"{text} ({tg_due(next_value, tz_name, 'r', f'in {days} d')})"
-
-
-def _approx_money(amount: float, currency: object) -> str:
-    return f"<b>≈ {amount:.2f} {escape_html(str(currency))}</b>"
-
-
-def _quote(lines: Sequence[str]) -> str:
-    """Wrap card lines into one plain (non-expandable) blockquote."""
-    body = "\n".join(lines)
-    return f"<blockquote>{body}</blockquote>"
-
-
-def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
-
-
-def _cadence_text(subscription: Dict[str, object]) -> str:
-    if subscription["period_days"] == MONTHLY_PERIOD_SENTINEL:
-        return "Every month on the same day"
-    return f"Every {escape_html(str(subscription['period_days']))} days"
-
-
-def _next_charge_line(next_value: str, tz_name: str, today: date) -> str:
-    """Bold localized next-charge date with its distance from today.
-
-    Future dates get a live relative entity ("in 14 d" fallback); a charge due
-    today or already overdue is labelled with static text, so no client
-    renders it as "in 3 hours" / "2 hours ago".
-    """
-    text = f"<b>{tg_due(next_value, tz_name, 'wD')}</b>"
-    try:
-        due_date = datetime.strptime(next_value, "%Y-%m-%d").date()
-    except (TypeError, ValueError):
-        return text
-    if due_date == today:
-        return f"{text} (today)"
-    days = abs((due_date - today).days)
-    if due_date < today:
-        return f"{text} ({days} d overdue)"
-    return f"{text} ({tg_due(next_value, tz_name, 'r', f'in {days} d')})"
-
-
-def _amount_line(subscription: Dict[str, object]) -> str:
-    """Bold amount line, plus "· shown in X" when the conversion currency differs."""
-    currency = str(subscription["currency"]).upper()
-    base_currency = str(subscription.get("base_currency") or currency).strip().upper() or currency
-    line = f"💰 {_money(float(subscription['amount']), currency)}"
-    if base_currency != currency:
-        line += f" · shown in {escape_html(base_currency)}"
-    return line
-
-
-def _users_summary_line(
-    subscription: Dict[str, object],
-    participants: Sequence[Dict[str, object]],
-    payment_mode: str,
-) -> str:
-    """Users count and payment mode, with the users total (fixed) or share count and value (split)."""
-    users_text = f"👥 <b>{_plural(len(participants), 'user')}</b>"
-    if payment_mode == PAYMENT_MODE_FIXED:
-        users_total = _sum_users_total(subscription, participants)
-        return f"{users_text} · fixed per user, total {_money(users_total, subscription['currency'])}"
-    if not participants and not int(subscription.get("share_limit") or 0):
-        return f"{users_text} · split by shares"
-    split_share_base = _split_share_base(subscription, participants)
-    per_person = float(subscription["amount"]) / split_share_base
-    return (
-        f"{users_text} · split by shares, {_plural(split_share_base, 'share')} × "
-        f"{_approx_money(per_person, subscription['currency'])}"
-    )
-
-
-def _participants_block(
-    subscription: Dict[str, object],
-    participants: Sequence[Dict[str, object]],
-    payment_mode: str,
-) -> str:
-    if not participants:
-        return "No users yet."
-    subscription_amount = float(subscription.get("amount") or 0.0)
-    per_person = subscription_amount / _split_share_base(subscription, participants)
-    lines = []
-    for person in participants:
-        weight = int(person.get("share_weight") or 1)
-        weight_text = f" ×{weight}" if weight > 1 else ""
-        if payment_mode == PAYMENT_MODE_FIXED:
-            fixed_amount = _effective_fixed_amount(subscription_amount, person.get("fixed_amount"))
-            amount_text = _money(fixed_amount * weight, subscription["currency"])
-        else:
-            amount_text = _approx_money(per_person * weight, subscription["currency"])
-        lines.append(f"• {escape_html(person['full_name'])}{weight_text} — {amount_text}")
-    return "\n".join(lines)
-
-
-def _users_quote(subscription: Dict[str, object], participants: Sequence[Dict[str, object]]) -> str:
-    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
-    return _quote(
-        [
-            _users_summary_line(subscription, participants, payment_mode),
-            _participants_block(subscription, participants, payment_mode),
-        ]
-    )
-
-
-def _subscription_payment_label(
-    subscription: Dict[str, object],
-    destination: Optional[Dict[str, object]],
-) -> str:
-    raw_destination_id = subscription.get("payment_destination_id")
-    try:
-        selected_destination_id = int(raw_destination_id) if raw_destination_id is not None else None
-    except (TypeError, ValueError):
-        selected_destination_id = None
-    if not destination:
-        return "not set"
-    base = f"{destination['title']} ({destination['currency']})"
-    if selected_destination_id is None:
-        return f"Default ({base})"
-    return base
-
-
-def _payment_info_lines(
-    payment_label: str,
-    payment_details: str,
-    payment_link: str,
-    comment_value: str,
-    *,
-    compact: bool = False,
-) -> list[str]:
-    """Payment block: label, one <code> per requisite line, link and comment.
-
-    ``compact`` is the card variant: the "Payment:"/"Comment:" words are
-    dropped and a comment that merely repeats the requisites is skipped.
-    """
-    label_prefix = "💳 " if compact else "💳 Payment: "
-    lines = [f"{label_prefix}{escape_html(payment_label)}"]
-    for detail_line in payment_details.splitlines():
-        detail_line = detail_line.strip()
-        if detail_line:
-            lines.append(f"<code>{escape_html(detail_line)}</code>")
-    if payment_link:
-        lines.append(f"🔗 Link: {escape_html(payment_link)}")
-    if compact and " ".join(comment_value.split()) == " ".join(payment_details.split()):
-        comment_value = ""
-    if comment_value:
-        comment_prefix = "📝 " if compact else "📝 Comment: "
-        lines.append(f"{comment_prefix}{escape_html(comment_value)}")
-    return lines
 
 
 def _build_open_cycle_summary(
@@ -977,193 +764,41 @@ async def show_subscription_gone(target: Responder, db: Database) -> None:
     await send_subscription_list(target, db, banner=SUBSCRIPTION_GONE_BANNER)
 
 
-async def send_user_subscription_list(message: Message, db: Database, telegram_id: int) -> None:
-    subs = await db.list_subscriptions_for_user(telegram_id)
-    if not subs:
-        await message.answer("📋 Subscriptions:\nYou don't have any subscriptions yet.")
-        return
+async def send_user_subscription_list(
+    target: Responder,
+    db: Database,
+    telegram_id: int,
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """The member's 📋 Subscriptions (WP9, app/ui/member_subscriptions.py); a tap edits in place."""
+    from app.ui.member_subscriptions import send_member_list  # it imports this module
 
-    base_tz = await resolve_report_timezone(db)
-    tz_name = normalize_timezone_name(
-        await db.get_effective_user_timezone(telegram_id, base_tz),
-        base_tz,
-    ) or base_tz
-    today = datetime.now(parse_timezone(tz_name)).date()
-    lines = ["📋 Subscriptions:", "Your plans:", ""]
-    for idx, sub in enumerate(subs, 1):
-        next_value = str(sub["next_charge_at"])
-        lines.append(
-            f"{idx}. <b>{escape_html(sub['name'])}</b> — next charge {_next_charge_html(next_value, tz_name, today)}"
-        )
-    await message.answer(
-        "\n".join(lines),
-        reply_markup=build_public_subscription_list_keyboard(subs),
-    )
+    return await send_member_list(target, db, telegram_id, banner=banner, toast=toast)
 
 
 async def send_public_subscription_detail(
     target: Responder,
     db: Database,
     subscription_id: int,
-) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+    close: bool = False,
+    converter: object = None,
+) -> Optional[Message]:
+    """The member card for the target's sender (WP9, app/ui/member_subscriptions.py)."""
+    from app.ui.member_subscriptions import send_member_card  # it imports this module
 
-    participants = await db.list_subscription_participants(subscription_id)
-    open_cycles = await db.list_open_cycles(subscription_id)
-    unpaid_overdue = []
-    paid_due_map = set()
-    user_id = None
-    if isinstance(target, CallbackQuery) and target.from_user:
-        user_id = target.from_user.id
-    elif isinstance(target, Message) and target.from_user:
-        user_id = target.from_user.id
-    is_admin_view = bool(user_id is not None and await db.is_admin(user_id))
-
-    admin_timezone = normalize_timezone_name(
-        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
-        DEFAULT_REMINDER_TIMEZONE,
-    ) or DEFAULT_REMINDER_TIMEZONE
-    reminder_timezone = admin_timezone
-    if user_id is not None:
-        reminder_timezone = normalize_timezone_name(
-            await db.get_effective_user_timezone(user_id, admin_timezone),
-            admin_timezone,
-        ) or admin_timezone
-    today = datetime.now(parse_timezone(reminder_timezone)).date()
-
-    if user_id is not None:
-        payments_for_open = await db.list_payments_for_cycles(subscription_id, open_cycles)
-        paid_due_map = {
-            (row["due_date"], row["paid_by_telegram_id"])
-            for row in payments_for_open
-            if row.get("paid_by_telegram_id") is not None
-        }
-        for due_value in open_cycles:
-            try:
-                due_date = datetime.strptime(due_value, "%Y-%m-%d").date()
-            except ValueError:
-                continue
-            if due_date < today and (due_value, user_id) not in paid_due_map:
-                unpaid_overdue.append(due_value)
-
-    next_charge_value = str(subscription["next_charge_at"])
-    if user_id is not None and (next_charge_value, user_id) in paid_due_map:
-        period_days = int(subscription.get("period_days") or 30)
-        monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
-        try:
-            current_due = datetime.strptime(next_charge_value, "%Y-%m-%d").date()
-            next_charge_value = calculate_next_charge_date(
-                current_due,
-                period_days,
-                monthly_anchor_day,
-            ).isoformat()
-        except ValueError:
-            pass
-    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
-    split_share_base = _split_share_base(subscription, participants)
-    per_person = subscription["amount"] / split_share_base
-    person_by_telegram: dict[int, Dict[str, object]] = {
-        int(person["telegram_id"]): person
-        for person in participants
-        if person.get("telegram_id") is not None
-    }
-
-    admin_base_time = parse_time_string(
-        await db.get_effective_base_reminder_time(),
-    ).strftime("%H:%M")
-    subscription_override = normalize_time_string(subscription.get("reminder_time"))
-    user_sub_override = None
-    user_base_time = admin_base_time
-    if user_id is not None:
-        user_sub_override = normalize_time_string(
-            await db.get_user_subscription_setting(user_id, subscription_id, "reminder_time")
-        )
-        user_base_time = parse_time_string(
-            await db.get_effective_user_base_reminder_time(user_id, admin_base_time),
-            admin_base_time,
-        ).strftime("%H:%M")
-    default_reminder_time = subscription_override or user_base_time
-    reminder_time_display = (
-        f"<code>{escape_html(user_sub_override or default_reminder_time)}</code> ({escape_html(reminder_timezone)})"
-    )
-    if not user_sub_override:
-        reminder_time_display += " · default"
-
-    default_target_currency = str(
-        subscription.get("base_currency") or subscription.get("currency") or "RUB"
-    ).strip().upper()
-    user_target_currency = ""
-    if user_id is not None:
-        user_target_currency = str(
-            await db.get_user_subscription_setting(
-                user_id,
-                subscription_id,
-                "target_currency",
-            ) or ""
-        ).strip().upper()
-    if user_target_currency:
-        my_currency_display = user_target_currency
-    else:
-        my_currency_display = f"{default_target_currency} (default)"
-
-    my_amount_display = "n/a"
-    if user_id is not None:
-        current_person = person_by_telegram.get(int(user_id))
-        if current_person:
-            weight = int(current_person.get("share_weight") or 1)
-            if payment_mode == PAYMENT_MODE_FIXED:
-                fixed_amount = _effective_fixed_amount(
-                    float(subscription.get("amount") or 0.0),
-                    current_person.get("fixed_amount"),
-                )
-                my_amount_display = _money(fixed_amount * weight, subscription["currency"])
-            else:
-                my_amount_display = _money(per_person * weight, subscription["currency"])
-    comment_value = (subscription.get("comment") or "").strip()
-    payment_destination = await db.get_effective_subscription_payment_destination(subscription_id)
-    payment_label = _subscription_payment_label(subscription, payment_destination)
-    payment_details = str(payment_destination.get("details") or "").strip() if payment_destination else ""
-    payment_link = str(payment_destination.get("payment_link") or "").strip() if payment_destination else ""
-
-    # Member card: title, then one blockquote per section; admin viewers also
-    # get the subscription amount, the users block and the reminder days.
-    summary_lines = []
-    if is_admin_view:
-        summary_lines.append(_amount_line(subscription))
-    summary_lines.extend(
-        [
-            f"💵 My amount: {my_amount_display} · reminders in {escape_html(my_currency_display)}",
-            f"📅 Next charge: {_next_charge_line(next_charge_value, reminder_timezone, today)}",
-            f"🔁 {_cadence_text(subscription)}",
-        ]
-    )
-    quotes = [_quote(summary_lines)]
-    if is_admin_view:
-        quotes.append(_users_quote(subscription, participants))
-    if unpaid_overdue:
-        quotes.append(
-            _quote(
-                ["⚠️ Overdue", *(f"• <b>{tg_due(value, reminder_timezone, 'wD')}</b>" for value in unpaid_overdue)]
-            )
-        )
-    reminder_line = f"⏰ {reminder_time_display}"
-    if is_admin_view:
-        offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
-        reminder_line += (
-            f" · {escape_html(offsets_text)} · after due: {_on_off(subscription.get('remind_after_due'))}"
-        )
-    quotes.append(_quote([reminder_line]))
-    quotes.append(
-        _quote(_payment_info_lines(payment_label, payment_details, payment_link, comment_value, compact=True))
-    )
-    text = "\n".join([f"<b>🏷️ {escape_html(subscription['name'])}</b>", "", *quotes])
-    await respond_with_markup(
+    return await send_member_card(
         target,
-        text,
-        reply_markup=public_subscription_detail_keyboard(subscription_id),
+        db,
+        subscription_id,
+        banner=banner,
+        toast=toast,
+        close=close,
+        converter=converter,
     )
 
 
@@ -1214,35 +849,13 @@ async def send_public_subscription_payment_report(
     db: Database,
     subscription_id: int,
     telegram_id: int,
+    *,
+    close: bool = False,
 ) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
+    """'📊 <b>Reports · Netflix</b>' for one member (WP9, app/ui/member_subscriptions.py)."""
+    from app.ui.member_subscriptions import send_member_report  # it imports this module
 
-    subs_for_user = await db.list_subscriptions_for_user(telegram_id)
-    if not any(sub["id"] == subscription_id for sub in subs_for_user):
-        await respond_with_markup(target, "You don't have access to this subscription.")
-        return
-
-    participants = await db.list_subscription_participants(subscription_id)
-    user = next((p for p in participants if p["telegram_id"] == telegram_id), None)
-    if not user:
-        await respond_with_markup(target, "You don't have access to this subscription.")
-        return
-    text = await _build_subscription_payment_report_text(
-        db,
-        subscription,
-        participants,
-        scope="user",
-        user_id=telegram_id,
-        tz_name=await resolve_report_timezone(db),
-    )
-    await send_chunked_responder_text(
-        target,
-        assemble_payments_report([text]),
-        reply_markup=public_subscription_report_keyboard(subscription_id),
-    )
+    await send_member_report(target, db, subscription_id, telegram_id, close=close)
 
 
 # A member overview collapses its on-track tail once it lists more than four subscriptions.
@@ -1256,13 +869,25 @@ async def send_public_user_payment_report(
     db: Database,
     telegram_id: int,
 ) -> None:
-    blocks = await _build_user_payment_blocks(db, telegram_id, await resolve_report_timezone(db))
-    if not blocks:
-        await message.answer("No payments to report yet.")
+    """The member's own 📊 Reports (WP10), built under a typing action.
+
+    The last chunk carries one '🔴 Netflix' button per subscription that needs
+    attention, opening its card as a new message. A top-level screen: no nav row.
+    Today and overdue are counted in the viewer's own timezone, as on the card.
+    """
+    from app.ui.member_subscriptions import viewer_timezone  # it imports this module
+
+    async with typing_action(message.bot, message.chat.id):
+        items = await _build_user_payment_items(db, telegram_id, await viewer_timezone(db, telegram_id))
+    if not items:
+        await message.answer(REPORTS_EMPTY_TEXT)
         return
+    blocks = [block for _, block in items]
+    attention = [sub for sub, block in items if _is_attention_block(block)]
     await send_chunked_responder_text(
         message,
         assemble_payments_report(blocks, collapse_min_total=MEMBER_REPORT_COLLAPSE_MIN_TOTAL),
+        reply_markup=member_own_report_keyboard(attention),
     )
 
 
@@ -1371,9 +996,13 @@ def _format_due_distance(due_date: date, today: date) -> str:
 
 
 def _format_report_distance(due_value: str, due_date: date, today: date, tz_name: Optional[str]) -> str:
-    """Live "in N d" for future dates; overdue text stays server-side so the word is never lost."""
+    """Live "in 3 days" two or more days ahead; today, tomorrow and overdue stay plain words.
+
+    The same rule as the card (``_due_phrase_html``): the live entity is
+    anchored at noon, so for tomorrow a client would render "in 14 hours".
+    """
     distance = _format_due_distance(due_date, today)
-    if due_date > today:
+    if (due_date - today).days >= 2:
         return tg_due(due_value, tz_name, "r", distance)
     return distance
 
@@ -1892,45 +1521,30 @@ async def send_subscription_detail(
     return await respond_with_markup(target, text, reply_markup=markup, toast=toast)
 
 
-async def send_public_account_detail(message: Message, db: Database, telegram_id: int) -> None:
-    friend = await db.get_friend_by_telegram(telegram_id)
-    if not friend:
-        await message.answer(
-            "👤 Account:\nYour profile is not set up yet. Ask an admin to add you to the users list.",
-            reply_markup=public_reply_keyboard(),
-        )
-        return
+# The admin Users screens (list, member card, member report) live in app/ui/member_screens.py.
 
-    default_balance_currency = str(await db.get_setting("target_currency") or "RUB").strip().upper() or "RUB"
-    balance_currency = str(friend.get("balance_currency") or "").strip().upper()
-    if len(balance_currency) != 3 or not balance_currency.isalpha():
-        friend = {**friend, "balance_currency": default_balance_currency}
 
-    subscriptions = await db.list_subscriptions_for_user(telegram_id)
-    destinations = await db.list_payment_destinations()
-    default_destination_id = await db.get_default_payment_destination_id()
-    default_destination = (
-        next((item for item in destinations if int(item.get("id") or 0) == default_destination_id), None)
-        if default_destination_id is not None
-        else None
-    )
-    payment_label = "Not configured"
-    if destinations:
-        payment_label = "Choose when topping up"
-        if default_destination:
-            payment_label += f" (default: {default_destination['title']} · {default_destination['currency']})"
-    await message.answer(
-        (
-            _build_user_info_text(
-            friend,
-            subscriptions,
-            include_telegram_id=False,
-            title="👤 Account:",
-            )
-            + f"\n\nTop-up methods: {escape_html(payment_label)}"
-        ),
-        reply_markup=public_account_keyboard(),
-    )
+async def send_public_account_detail(
+    target: Responder,
+    db: Database,
+    telegram_id: int,
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """👤 Account (WP10): a typed tap sends it, a callback edits the tapped message.
+
+    Not linked: a typed tap gets the not-set-up text with the guest menu; a
+    callback gets an alert and the message stays as it is.
+    """
+    screen = await account_screen(db, telegram_id, banner=banner)
+    if screen is None:
+        if isinstance(target, CallbackQuery):
+            await answer_callback_once(target, NOT_SET_UP_ALERT, alert=True)
+            return None
+        return await target.answer(NOT_SET_UP_TEXT, reply_markup=guest_reply_keyboard())
+    text, markup = screen
+    return await respond_with_markup(target, text, reply_markup=markup, toast=toast)
 
 
 async def send_reminder_settings(
@@ -1975,12 +1589,8 @@ async def send_reminder_send_menu(
 
 
 async def send_settings_tests_menu(target: Responder, db: Database) -> None:
-    text = "🧪 Tests:\nChoose a test action."
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=tests_menu_keyboard(),
-    )
+    """🧪 Send a test reminder: the one-action tests menu is gone, so this is the picker (WP11)."""
+    await send_test_user_list(target, db)
 
 
 async def send_test_user_list(
@@ -1988,41 +1598,13 @@ async def send_test_user_list(
     db: Database,
     *,
     page: int = 1,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
 ) -> None:
-    friends = [friend for friend in await db.list_friends() if friend.get("telegram_id") is not None]
-    if not friends:
-        await respond_with_markup(
-            target,
-            "🧪 Tests:\nNo linked users yet.",
-            reply_markup=settings_tests_keyboard([], page=1, total_pages=1, total_users=0),
-        )
-        return
+    """The test-reminder picker (WP11); see ``app.ui.admin_settings.send_test_picker``."""
+    from app.ui.admin_settings import send_test_picker  # admin_settings imports this module
 
-    sorted_friends = sorted(
-        friends,
-        key=lambda item: (str(item.get("full_name") or "").casefold(), int(item.get("id") or 0)),
-    )
-    per_page = 6
-    total_users = len(sorted_friends)
-    total_pages = max(1, (total_users + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-
-    start = (page - 1) * per_page
-    page_friends = sorted_friends[start : start + per_page]
-
-    lines = ["🧪 Tests:", "Choose a user to send the test message:"]
-    for idx, friend in enumerate(page_friends, start + 1):
-        lines.append(f"{idx}. <b>{escape_html(str(friend['full_name']))}</b>")
-    await respond_with_markup(
-        target,
-        "\n".join(lines),
-        reply_markup=settings_tests_keyboard(
-            page_friends,
-            page=page,
-            total_pages=total_pages,
-            total_users=total_users,
-        ),
-    )
+    await send_test_picker(target, db, page=page, banner=banner, toast=toast)
 
 
 # ------------------------------------------------- Pricing & schedule (WP4)

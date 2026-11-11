@@ -118,6 +118,35 @@ COMMON_TIMEZONES = (
     "America/Los_Angeles",
     "UTC",
 )
+# City-only button labels for the timezone presets; callbacks keep the full IANA id.
+TZ_SHORT = {
+    "Europe/Moscow": "Moscow",
+    "Europe/London": "London",
+    "Europe/Berlin": "Berlin",
+    "Asia/Dubai": "Dubai",
+    "Asia/Almaty": "Almaty",
+    "Asia/Tokyo": "Tokyo",
+    "America/New_York": "New York",
+    "America/Chicago": "Chicago",
+    "America/Denver": "Denver",
+    "America/Los_Angeles": "Los Angeles",
+    "UTC": "UTC",
+}
+
+
+def timezone_city(zone: str) -> str:
+    """``'Los Angeles'`` for ``America/Los_Angeles``; ``'UTC+3'`` for ``Etc/GMT-3``.
+
+    Presets use ``TZ_SHORT``; any other zone shows its last path part.
+    """
+    zone = (zone or "").strip()
+    if zone in TZ_SHORT:
+        return TZ_SHORT[zone]
+    if zone.startswith("Etc/"):
+        from app.ui.text import utc_offset_label
+
+        return utc_offset_label(zone)
+    return zone.rsplit("/", 1)[-1].replace("_", " ") or zone
 
 
 # ------------------------------------------------------------------ vocabulary
@@ -859,6 +888,18 @@ def topup_request_review_keyboard(request_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+# Member 👤 Account (WP10).
+TOP_UP_TEXT = "➕ Top up"
+ACCOUNT_RENAME_TEXT = "✏️ Rename"
+PUBLIC_ACCOUNT_RENAME_CALLBACK = "public_account:rename"
+# Edit the tapped message back into 👤 Account (the top-up picker's Back).
+PUBLIC_ACCOUNT_SHOW_CALLBACK = "public_account:show"
+# Open 👤 Account as a NEW message (buttons under pushes); it ends with [✖️ Close].
+PUBLIC_ACCOUNT_SHOW_NEW_CALLBACK = "public_account:show_new"
+# Own 📊 Reports: at most this many '🔴 Netflix' buttons under the report.
+OWN_REPORT_BUTTONS_MAX = 8
+
+
 def topup_destination_keyboard(
     destinations: Sequence[Dict[str, object]],
     default_destination_id: int | None,
@@ -879,20 +920,41 @@ def topup_destination_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def public_account_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✏️ Rename",
-        callback_data="public_account:rename",
-    )
-    builder.button(
-        text="➕ Top up",
-        callback_data=TopUpAction(action="start", request_id=0).pack(),
-        style="primary",
-    )
-    builder.adjust(1)
-    builder.row(InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"))
-    return builder.as_markup()
+def public_account_keyboard(*, close: bool = False) -> InlineKeyboardMarkup:
+    """[➕ Top up] (primary) / [✏️ Rename]; a top-level screen has no nav row.
+
+    ``close`` adds [✖️ Close] for the copy opened as a new message from a push.
+    """
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=TOP_UP_TEXT,
+                callback_data=TopUpAction(action="start", request_id=0).pack(),
+                style="primary",
+            )
+        ],
+        [InlineKeyboardButton(text=ACCOUNT_RENAME_TEXT, callback_data=PUBLIC_ACCOUNT_RENAME_CALLBACK)],
+    ]
+    if close:
+        rows.append([nav_button(CLOSE_CALLBACK)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def member_own_report_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup | None:
+    """One '🔴 Netflix' per subscription that needs attention; each opens its card as a NEW message.
+
+    The report is a top-level screen: no nav row. None when nothing needs attention.
+    """
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=fit_label(f"🔴 {' '.join(str(sub.get('name') or '').split())}", 1),
+                callback_data=SubscriptionAction(action="public_open_new", subscription_id=int(sub["id"])).pack(),
+            )
+        ]
+        for sub in list(subs)[:OWN_REPORT_BUTTONS_MAX]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 # One name per concept on every screen (same-name-everywhere): the display
@@ -901,17 +963,59 @@ def public_account_keyboard() -> InlineKeyboardMarkup:
 SHOWN_IN_TEXT = "🌐 Shown in"
 REMINDER_TIME_TEXT = "⏰ Reminder time"
 
+# Member subscriptions (WP9): list, card and the card's sub-screens.
+MEMBER_CURRENCY_TEXT = SHOWN_IN_TEXT
+MEMBER_REMINDER_TEXT = REMINDER_TIME_TEXT
+MEMBER_CYCLE_PAID_ACTION = "public_paid"
+MEMBER_REPORTS_TEXT = "📊 Reports"
+MEMBER_PAID_TEXT = "✅ Paid"
+UNPAID_MARK = "⚠️ "
+# Redraw the member card in place, keeping its [✖️ Close] (the card opened as a
+# new message from a report or push): the way back of its sub-screens.
+PUBLIC_CARD_CLOSE_ACTION = "public_card_close"
+
+
+def _short_date(due_value: object) -> str:
+    """``'20.11'`` for ``2026-11-20``; empty when the value is not a date."""
+    try:
+        return datetime.strptime(str(due_value), "%Y-%m-%d").strftime("%d.%m")
+    except (TypeError, ValueError):
+        return ""
+
+
+def member_subscription_list_label(row: Dict[str, object]) -> str:
+    """``'⚠️ Netflix · overdue'`` / ``'⚠️ Netflix · due today'`` / ``'Spotify · 20.11'``.
+
+    ``row['attention']`` is the unpaid state ('overdue' or 'due today') or
+    empty; ``row['due_value']`` the member's next charge. The name is cut to
+    the row; the tail is kept whole.
+    """
+    name = " ".join(str(row.get("name") or "").split())
+    attention = str(row.get("attention") or "")
+    if attention:
+        return fit_label(f"{UNPAID_MARK}{name}", 1, tail=f"{SEP}{attention}")
+    short = _short_date(row.get("due_value"))
+    return fit_label(name, 1, tail=f"{SEP}{short}") if short else fit_label(name, 1)
+
 
 def build_public_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for sub in subs:
-        label = str(sub["name"])
-        builder.button(
-            text=label,
-            callback_data=SubscriptionAction(action="open_public", subscription_id=sub["id"]).pack(),
-        )
-    builder.adjust(1)
-    return builder.as_markup()
+    """One full-width row per subscription (unpaid first, as given); a top-level screen, so no nav row."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=member_subscription_list_label(sub),
+                callback_data=SubscriptionAction(action="open_public", subscription_id=int(sub["id"])).pack(),
+            )
+        ]
+        for sub in subs
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def member_card_callback(subscription_id: int, *, close: bool = False) -> str:
+    """The way back to the member card: in place, keeping [✖️ Close] when it was opened as a new message."""
+    action = PUBLIC_CARD_CLOSE_ACTION if close else "open_public"
+    return SubscriptionAction(action=action, subscription_id=subscription_id).pack()
 
 
 def _sub_button(text: str, action: str, subscription_id: int, style: str | None = None) -> InlineKeyboardButton:
@@ -981,29 +1085,52 @@ def subscription_delete_confirm_keyboard(subscription_id: int) -> InlineKeyboard
     )
 
 
-def public_subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="💱 My currency",
-        callback_data=SubscriptionAction(action="public_currency", subscription_id=subscription_id).pack(),
+def public_subscription_detail_keyboard(
+    subscription_id: int,
+    *,
+    paid_due: str | None = None,
+    payment_details: str = "",
+    payment_link: str = "",
+    close: bool = False,
+) -> InlineKeyboardMarkup:
+    """The member card (at most 6 rows with nav).
+
+    [✅ Paid · 10.10] (primary) leads while ``paid_due`` (the oldest unpaid
+    cycle) is set; its callback carries that due date
+    (``cycle:public_paid:<id>:<due>``), so a stale card can only pay the
+    cycle its label names. Then the copy/link rows, [⏰ Reminder time],
+    [🌐 Shown in][📊 Reports] and the nav: [◀️ To list], or only
+    [✖️ Close] for the card opened as a new message (``close``).
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if paid_due:
+        short = _short_date(paid_due)
+        label = f"{MEMBER_PAID_TEXT}{SEP}{short}" if short else MEMBER_PAID_TEXT
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=CycleAction(
+                        action=MEMBER_CYCLE_PAID_ACTION, subscription_id=subscription_id, due_date=paid_due
+                    ).pack(),
+                    style="primary",
+                )
+            ]
+        )
+    rows.extend(payment_requisite_rows(payment_details, payment_link))
+    rows.append([_sub_button(MEMBER_REMINDER_TEXT, "public_remindertime", subscription_id)])
+    rows.append(
+        [
+            _sub_button(MEMBER_CURRENCY_TEXT, "public_currency", subscription_id),
+            _sub_button(MEMBER_REPORTS_TEXT, "public_report", subscription_id),
+        ]
     )
-    builder.button(
-        text="⏰ My reminder time",
-        callback_data=SubscriptionAction(action="public_remindertime", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
-        text="📊 Reports",
-        callback_data=SubscriptionAction(action="public_report", subscription_id=subscription_id).pack(),
-    )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="public_back", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+    if close:
+        rows.append([nav_button(CLOSE_CALLBACK)])
+    else:
+        back = SubscriptionAction(action="public_back", subscription_id=subscription_id).pack()
+        rows.append([nav_button(back, TO_LIST_TEXT)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # Reports and cycles (WP8): the subscription report, open cycles, cycle actions
@@ -1047,18 +1174,6 @@ def open_cycle_button_label(cycle: Dict[str, object] | str, today: date | None =
     short = cycle_short_date(str(cycle.get("due_value") or ""), today)
     words = cycle_progress_words(int(cycle.get("paid") or 0), int(cycle.get("total") or 0))  # type: ignore[call-overload]
     return f"📅 {short}{SEP}{words}"
-
-
-def build_back_keyboard(subscription_id: int, back_action: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action=back_action, subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
 
 
 def subscription_report_keyboard(
@@ -1181,8 +1296,11 @@ def admin_report_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMa
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-def public_subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    return build_back_keyboard(subscription_id, "open_public")
+def public_subscription_report_keyboard(subscription_id: int, *, close: bool = False) -> InlineKeyboardMarkup:
+    """[◀️ To card]: back to the member card (keeping its [✖️ Close] when it had one)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[nav_button(member_card_callback(subscription_id, close=close), TO_CARD_TEXT)]]
+    )
 
 
 # Reminders subtree (WP6): Reminders, Reminder time, the Days prompt and Send
@@ -1490,62 +1608,43 @@ def public_subscription_reminder_time_keyboard(
     subscription_id: int,
     current_time: str,
     default_time: str,
+    *,
+    has_override: bool | None = None,
+    close: bool = False,
 ) -> InlineKeyboardMarkup:
-    presets = ("09:00", "12:00", "16:00", "20:00")
-    normalized_current = current_time.strip()
-    normalized_default = default_time.strip()
-    default_active = normalized_current == normalized_default
-    rows: list[list[InlineKeyboardButton]] = []
-    preset_buttons: list[InlineKeyboardButton] = []
+    """[✅ Default (10:00)] / presets two per row / [✏️ Other time] / [◀️ Back] to the card.
 
-    for time_value in presets:
-        is_active = (time_value == normalized_current) and not default_active
-        if is_active:
-            preset_buttons.append(
-                InlineKeyboardButton(
-                    text=time_value,
-                    callback_data=f"public_sub_remindertime:{subscription_id}:{time_value}",
-                    style="success",
-                )
-            )
-        else:
-            preset_buttons.append(
-                InlineKeyboardButton(
-                    text=time_value,
-                    callback_data=f"public_sub_remindertime:{subscription_id}:{time_value}",
-                )
-            )
-    for index in range(0, len(preset_buttons), 2):
-        rows.append(preset_buttons[index : index + 2])
-
-    rows.append([InlineKeyboardButton(text="Other", callback_data=f"public_sub_remindertime_other:{subscription_id}")])
-    if default_active:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data=SubscriptionAction(
-                action="public_remindertime_default",
-                subscription_id=subscription_id,
-            ).pack(),
-            style="success",
-        )
-    else:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data=SubscriptionAction(
-                action="public_remindertime_default",
-                subscription_id=subscription_id,
-            ).pack(),
-        )
-    rows.append([default_button])
-    rows.append(
+    Default is a radio option, selected only while the member has no own time
+    for this subscription (``has_override`` False); a preset is selected when
+    it is that own time. ``has_override=None`` guesses from ``current != default``.
+    Callbacks are the existing ``public_sub_remindertime:*`` ones.
+    """
+    current = (current_time or "").strip()
+    default = (default_time or "").strip()
+    if has_override is None:
+        has_override = current != default
+    rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="open_public", subscription_id=subscription_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+            _sub_button(
+                radio_label(f"Default ({default})", not has_override),
+                "public_remindertime_default",
+                subscription_id,
+            )
         ]
+    ]
+    rows.extend(
+        pair_rows(
+            InlineKeyboardButton(
+                text=radio_label(value, has_override and value == current),
+                callback_data=f"public_sub_remindertime:{subscription_id}:{value}",
+            )
+            for value in TIME_PRESETS
+        )
     )
+    rows.append(
+        [InlineKeyboardButton(text=OTHER_TIME_TEXT, callback_data=f"public_sub_remindertime_other:{subscription_id}")]
+    )
+    rows.append([nav_button(member_card_callback(subscription_id, close=close))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1596,18 +1695,20 @@ def settings_tests_keyboard(
     total_pages: int = 1,
     total_users: int = 0,
 ) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
+    """🧪 Send a test reminder: one person per row / pagination_row / [◀️ Back] to ⚙️ Settings.
 
-    columns = 2 if total_users > 4 else 1
-    friend_buttons = [
-        InlineKeyboardButton(
-            text=str(friend.get("full_name") or "Unknown"),
-            callback_data=TestSendAction(telegram_id=int(friend["telegram_id"])).pack(),
-        )
+    Names are cut with ``fit_label``; callbacks stay ``testsend:<telegram id>``
+    and ``testlist:page:N``. ``total_users`` is kept for old call sites.
+    """
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=fit_label(str(friend.get("full_name") or "Unknown"), 1),
+                callback_data=TestSendAction(telegram_id=int(friend["telegram_id"])).pack(),
+            )
+        ]
         for friend in friends
     ]
-    for index in range(0, len(friend_buttons), columns):
-        rows.append(friend_buttons[index : index + columns])
 
     if total_pages > 1:
         rows.append(
@@ -1619,12 +1720,7 @@ def settings_tests_keyboard(
             )
         )
 
-    rows.append(
-        [
-            InlineKeyboardButton(text="⬅️ Back", callback_data="settings:tests"),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
-    )
+    rows.append([nav_button(SETTINGS_MENU_CALLBACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 OTHER_CURRENCY_TEXT = "✏️ Other currency"
@@ -1632,17 +1728,6 @@ SUBSCRIPTION_CURRENCY_OPTIONS = CURRENCY_OPTIONS
 SHOWN_IN_CURRENCY_OPTIONS = CURRENCY_OPTIONS
 MOVE_CYCLE_TEXT = "🔀 Move cycle"
 NEW_CYCLE_TEXT = "🆕 New cycle"
-
-
-def tests_menu_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📬 Send test reminders", callback_data="tests:send", style="primary")
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
 
 
 def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
@@ -1862,148 +1947,142 @@ def build_currency_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# Admin settings (WP11). ⚙️ Settings is top-level (no nav row); its pickers
+# return to it with [◀️ Back]. Labels are shared with texts and toasts.
+SETTINGS_MENU_CALLBACK = "settings:menu"
+ROUNDING_TEXT = "🔢 Rounding"
+NOTIFICATIONS_TEXT = "🔔 Notifications"
+SEND_TEST_TEXT = "🧪 Send a test reminder"
+# (mode, label): the button label; texts and toasts use it in lower case.
+ROUNDING_OPTIONS = (
+    ("precise", "With cents"),
+    ("floor", "Round down"),
+    ("round", "Round to nearest"),
+    ("ceil", "Round up"),
+)
+# (callback value, settings key, toggle label): one literal per notification.
+NOTIFY_OPTIONS = (
+    ("reminders", "notify_admin_reminders", "📬 Reminders sent"),
+    ("paid", "notify_admin_paid", "💸 Payment recorded"),
+    ("closed", "notify_admin_closed", "🔒 Cycle closed"),
+)
+
+
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⏰ Base time", callback_data="settings:time")
-    builder.button(text="🌍 Timezone", callback_data="settings:timezone")
-    builder.button(text="🔢 Rounding", callback_data="settings:rounding")
-    builder.button(text="🔔 Notifications", callback_data="settings:notifications")
-    builder.button(text="🧪 Tests", callback_data="settings:tests")
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    """[⏰ Reminder time] / [🌍 Timezone][🔢 Rounding] / [🔔 Notifications] / [🧪 Send a test reminder]."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=REMINDER_TIME_TEXT, callback_data="settings:time")],
+            [
+                InlineKeyboardButton(text=TIMEZONE_TEXT, callback_data="settings:timezone"),
+                InlineKeyboardButton(text=ROUNDING_TEXT, callback_data="settings:rounding"),
+            ],
+            [InlineKeyboardButton(text=NOTIFICATIONS_TEXT, callback_data="settings:notifications")],
+            [InlineKeyboardButton(text=SEND_TEST_TEXT, callback_data="settings:tests")],
+        ]
     )
-    return builder.as_markup()
 
 
 def settings_time_keyboard(current_time: str) -> InlineKeyboardMarkup:
-    presets = ("09:00", "12:00", "16:00", "20:00")
-    builder = InlineKeyboardBuilder()
-    for time_value in presets:
-        is_active = time_value == current_time
-        text = f"{'✅ ' if is_active else ''}{time_value}"
-        if is_active:
-            builder.button(text=text, callback_data=f"settings_time:{time_value}", style="success")
-        else:
-            builder.button(text=text, callback_data=f"settings_time:{time_value}")
-    builder.button(text="Other", callback_data="settings:time_other")
-    builder.adjust(2, 2, 1)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    """[✅ 09:00][12:00] / [16:00][20:00] / [✏️ Other time] / [◀️ Back]; the current time is ✅."""
+    current = (current_time or "").strip()
+    rows = pair_rows(
+        InlineKeyboardButton(
+            text=radio_label(value, value == current),
+            callback_data=f"settings_time:{value}",
+        )
+        for value in TIME_PRESETS
     )
-    return builder.as_markup()
-
-
-def settings_timezone_keyboard(current_timezone: str) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    zone_buttons: list[InlineKeyboardButton] = []
-    for zone in COMMON_TIMEZONES:
-        is_active = zone == current_timezone
-        text = f"{'✅ ' if is_active else ''}{zone}"
-        if is_active:
-            zone_buttons.append(
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=f"settings_timezone:{zone}",
-                    style="success",
-                )
-            )
-        else:
-            zone_buttons.append(
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=f"settings_timezone:{zone}",
-                )
-            )
-    for index in range(0, len(zone_buttons), 2):
-        rows.append(zone_buttons[index : index + 2])
-    rows.append([InlineKeyboardButton(text="Other", callback_data="settings:timezone_other")])
-    rows.append(
-        [
-            InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
-    )
+    rows.append([InlineKeyboardButton(text=OTHER_TIME_TEXT, callback_data="settings:time_other")])
+    rows.append([nav_button(SETTINGS_MENU_CALLBACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def settings_timezone_keyboard(current_timezone: str) -> InlineKeyboardMarkup:
+    """City presets two per row ([✅ Moscow][London] …) / [✏️ Other timezone] / [◀️ Back].
+
+    Labels are city names (``TZ_SHORT``); callbacks carry the full IANA id.
+    """
+    current = (current_timezone or "").strip()
+    rows = pair_rows(
+        InlineKeyboardButton(
+            text=radio_label(timezone_city(zone), zone == current),
+            callback_data=f"settings_timezone:{zone}",
+        )
+        for zone in COMMON_TIMEZONES
+    )
+    rows.append([InlineKeyboardButton(text=OTHER_TIMEZONE_TEXT, callback_data="settings:timezone_other")])
+    rows.append([nav_button(SETTINGS_MENU_CALLBACK)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# Member settings (WP12). The admin pickers (WP11) can reuse these labels.
+TIMEZONE_TEXT = "🌍 Timezone"
 OTHER_TIME_TEXT = "✏️ Other time"
+OTHER_TIMEZONE_TEXT = "✏️ Other timezone"
 USE_DEFAULT_TEXT = "↺ Use default"
 TIME_PRESETS = ("09:00", "12:00", "16:00", "20:00")
+PUBLIC_SETTINGS_MENU_CALLBACK = "public_settings:menu"
+PUBLIC_TIME_RESET_CALLBACK = "public_settings:time_reset"
+PUBLIC_TIMEZONE_RESET_CALLBACK = "public_settings:timezone_reset"
 
 
 def public_settings_keyboard(
-    current_time: str,
-    current_timezone: str,
+    current_time: str = "",
+    current_timezone: str = "",
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⏰ Base time", callback_data="public_settings:time")
-    builder.button(text="🌍 Timezone", callback_data="public_settings:timezone")
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+    """[⏰ Reminder time] / [🌍 Timezone]: a top-level screen, so no nav row."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=REMINDER_TIME_TEXT, callback_data="public_settings:time")],
+            [InlineKeyboardButton(text=TIMEZONE_TEXT, callback_data="public_settings:timezone")],
+        ]
     )
-    return builder.as_markup()
+
+
+def use_default_rows(reset_callback: str) -> list[list[InlineKeyboardButton]]:
+    """The quick-value row of a settings prompt: [↺ Use default] (above ✖️ Cancel)."""
+    return [[InlineKeyboardButton(text=USE_DEFAULT_TEXT, callback_data=reset_callback)]]
 
 
 def public_subscription_currency_keyboard(
     subscription_id: int,
     current_currency: str,
     default_currency: str,
+    *,
+    has_override: bool | None = None,
+    close: bool = False,
 ) -> InlineKeyboardMarkup:
-    options = ("USD", "EUR", "RUB")
-    normalized_current = current_currency.upper()
-    normalized_default = default_currency.upper()
-    default_active = normalized_current == normalized_default
-    rows: list[list[InlineKeyboardButton]] = []
-    option_buttons: list[InlineKeyboardButton] = []
-    for code in options:
-        is_active = (code == normalized_current) and not default_active
-        if is_active:
-            option_buttons.append(
-                InlineKeyboardButton(
-                    text=code,
-                    callback_data=f"public_sub_currency:{subscription_id}:{code}",
-                    style="success",
-                )
-            )
-        else:
-            option_buttons.append(
-                InlineKeyboardButton(
-                    text=code,
-                    callback_data=f"public_sub_currency:{subscription_id}:{code}",
-                )
-            )
-    rows.append(option_buttons)
-    rows.append([InlineKeyboardButton(text="Other", callback_data=f"public_sub_currency_other:{subscription_id}")])
-    if default_active:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data=SubscriptionAction(
-                action="public_currency_default",
-                subscription_id=subscription_id,
-            ).pack(),
-            style="success",
-        )
-    else:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data=SubscriptionAction(
-                action="public_currency_default",
-                subscription_id=subscription_id,
-            ).pack(),
-        )
-    rows.append([default_button])
-    rows.append(
+    """[✅ Default (EUR)] / [USD][EUR][RUB] / [✏️ Other currency] / [◀️ Back] to the card.
+
+    Default is selected only while the member has no own currency for this
+    subscription; a preset only when it is that own currency.
+    ``has_override=None`` guesses from ``current != default``.
+    """
+    current = (current_currency or "").strip().upper()
+    default = (default_currency or "").strip().upper()
+    if has_override is None:
+        has_override = current != default
+    rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="open_public", subscription_id=subscription_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
-    )
+            _sub_button(
+                radio_label(f"Default ({default})", not has_override),
+                "public_currency_default",
+                subscription_id,
+            )
+        ],
+        *currency_option_rows(
+            [
+                InlineKeyboardButton(
+                    text=radio_label(code, has_override and code == current),
+                    callback_data=f"public_sub_currency:{subscription_id}:{code}",
+                )
+                for code in SHOWN_IN_CURRENCY_OPTIONS
+            ]
+        ),
+        [InlineKeyboardButton(text=OTHER_CURRENCY_TEXT, callback_data=f"public_sub_currency_other:{subscription_id}")],
+        [nav_button(member_card_callback(subscription_id, close=close))],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2026,118 +2105,96 @@ def subscription_currency_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def public_settings_time_keyboard(current_time: str, default_time: str) -> InlineKeyboardMarkup:
-    presets = ("09:00", "12:00", "16:00", "20:00")
-    normalized_current = current_time.strip()
-    normalized_default = default_time.strip()
-    default_active = normalized_current == normalized_default
-    rows: list[list[InlineKeyboardButton]] = []
-    preset_buttons: list[InlineKeyboardButton] = []
-    for time_value in presets:
-        is_active = (time_value == normalized_current) and not default_active
-        text = f"{'✅ ' if is_active else ''}{time_value}"
-        if is_active:
-            preset_buttons.append(
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=f"public_settings_time:{time_value}",
-                    style="success",
-                )
-            )
-        else:
-            preset_buttons.append(
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=f"public_settings_time:{time_value}",
-                )
-            )
-    for index in range(0, len(preset_buttons), 2):
-        rows.append(preset_buttons[index : index + 2])
-    rows.append([InlineKeyboardButton(text="Other", callback_data="public_settings:time_other")])
-    if default_active:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data="public_settings:time_reset",
-            style="success",
-        )
-    else:
-        default_button = InlineKeyboardButton(text="Default", callback_data="public_settings:time_reset")
-    rows.append([default_button])
-    rows.append(
+def public_settings_time_keyboard(
+    current_time: str,
+    default_time: str,
+    *,
+    has_override: bool | None = None,
+) -> InlineKeyboardMarkup:
+    """[✅ Default (10:00)] / presets two per row / [✏️ Other time] / [◀️ Back].
+
+    Default is a radio option: it is selected only while no own time is
+    stored (``has_override`` False). A preset is selected when it is the
+    stored time. ``has_override=None`` guesses from ``current != default``.
+    """
+    current = (current_time or "").strip()
+    default = (default_time or "").strip()
+    if has_override is None:
+        has_override = current != default
+    rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+            InlineKeyboardButton(
+                text=radio_label(f"Default ({default})", not has_override),
+                callback_data=PUBLIC_TIME_RESET_CALLBACK,
+            )
         ]
+    ]
+    # A preset equal to the default would repeat [Default (…)]: it is left out
+    # unless it is the stored own time (then it shows the ✅).
+    rows.extend(
+        pair_rows(
+            InlineKeyboardButton(
+                text=radio_label(value, has_override and value == current),
+                callback_data=f"public_settings_time:{value}",
+            )
+            for value in TIME_PRESETS
+            if value != default or (has_override and value == current)
+        )
     )
+    rows.append([InlineKeyboardButton(text=OTHER_TIME_TEXT, callback_data="public_settings:time_other")])
+    rows.append([nav_button(PUBLIC_SETTINGS_MENU_CALLBACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def public_settings_timezone_keyboard(current_timezone: str, default_timezone: str) -> InlineKeyboardMarkup:
-    normalized_current = current_timezone.strip()
-    normalized_default = default_timezone.strip()
-    default_active = normalized_current == normalized_default
-    rows: list[list[InlineKeyboardButton]] = []
-    zone_buttons: list[InlineKeyboardButton] = []
-    for zone in COMMON_TIMEZONES:
-        is_active = (zone == normalized_current) and not default_active
-        text = f"{'✅ ' if is_active else ''}{zone}"
-        if is_active:
-            zone_buttons.append(
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=f"public_settings_timezone:{zone}",
-                    style="success",
-                )
+def public_settings_timezone_keyboard(
+    current_timezone: str,
+    default_timezone: str,
+    *,
+    has_override: bool | None = None,
+) -> InlineKeyboardMarkup:
+    """[✅ Default (Moscow)] / city presets two per row / [✏️ Other timezone] / [◀️ Back].
+
+    Labels are city names (``TZ_SHORT``); callbacks carry the full IANA id.
+    Default is selected only while no own timezone is stored.
+    """
+    current = (current_timezone or "").strip()
+    default = (default_timezone or "").strip()
+    if has_override is None:
+        has_override = current != default
+    default_label = fit_label(radio_label(f"Default ({timezone_city(default)}", not has_override), 1, tail=")")
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text=default_label, callback_data=PUBLIC_TIMEZONE_RESET_CALLBACK)]
+    ]
+    # The default zone is already [Default (Moscow)]: its city button is left
+    # out unless it is the stored own zone (then it shows the ✅).
+    rows.extend(
+        pair_rows(
+            InlineKeyboardButton(
+                text=radio_label(timezone_city(zone), has_override and zone == current),
+                callback_data=f"public_settings_timezone:{zone}",
             )
-        else:
-            zone_buttons.append(
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=f"public_settings_timezone:{zone}",
-                )
-            )
-    for index in range(0, len(zone_buttons), 2):
-        rows.append(zone_buttons[index : index + 2])
-    rows.append([InlineKeyboardButton(text="Other", callback_data="public_settings:timezone_other")])
-    if default_active:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data="public_settings:timezone_reset",
-            style="success",
+            for zone in COMMON_TIMEZONES
+            if zone != default or (has_override and zone == current)
         )
-    else:
-        default_button = InlineKeyboardButton(text="Default", callback_data="public_settings:timezone_reset")
-    rows.append([default_button])
-    rows.append(
-        [
-            InlineKeyboardButton(text="⬅️ Back", callback_data="public_settings:menu"),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
     )
+    rows.append([InlineKeyboardButton(text=OTHER_TIMEZONE_TEXT, callback_data="public_settings:timezone_other")])
+    rows.append([nav_button(PUBLIC_SETTINGS_MENU_CALLBACK)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def settings_rounding_keyboard(current_mode: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    options = (
-        ("precise", "With cents"),
-        ("floor", "Round down"),
-        ("round", "Round correctly"),
-        ("ceil", "Round up"),
-    )
-    for mode, label in options:
-        is_active = current_mode == mode
-        text = f"{'✅' if is_active else '☐'} {label}"
-        if is_active:
-            builder.button(text=text, callback_data=f"settings_rounding:{mode}", style="success")
-        else:
-            builder.button(text=text, callback_data=f"settings_rounding:{mode}")
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+    """[✅ With cents] / [Round down] / [Round to nearest] / [Round up] / [◀️ Back]."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=radio_label(label, mode == current_mode),
+                callback_data=f"settings_rounding:{mode}",
+            )
+        ]
+        for mode, label in ROUNDING_OPTIONS
+    ]
+    rows.append([nav_button(SETTINGS_MENU_CALLBACK)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def settings_notifications_keyboard(
@@ -2145,24 +2202,14 @@ def settings_notifications_keyboard(
     paid_enabled: bool,
     closed_enabled: bool,
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    options = (
-        (reminders_enabled, "Payment reminders", "settings_notify:reminders"),
-        (paid_enabled, "Payment recorded", "settings_notify:paid"),
-        (closed_enabled, "All paid (cycle closed)", "settings_notify:closed"),
-    )
-    for is_enabled, label, callback_data in options:
-        text = f"{'✅' if is_enabled else '☐'} {label}"
-        if is_enabled:
-            builder.button(text=text, callback_data=callback_data, style="success")
-        else:
-            builder.button(text=text, callback_data=callback_data)
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="settings:menu"),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+    """[📬 Reminders sent · 🟢] / [💸 Payment recorded · 🟢] / [🔒 Cycle closed · ⚪] / [◀️ Back]."""
+    states = (reminders_enabled, paid_enabled, closed_enabled)
+    rows = [
+        [InlineKeyboardButton(text=toggle_label(label, on), callback_data=f"settings_notify:{value}")]
+        for (value, _key, label), on in zip(NOTIFY_OPTIONS, states)
+    ]
+    rows.append([nav_button(SETTINGS_MENU_CALLBACK)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 PERIOD_PRESET_DAYS = (7, 14, 30, 90)
@@ -2313,6 +2360,16 @@ def build_test_payment_confirmation_keyboard(
         )
     )
     return builder.as_markup()
+
+
+OPEN_SUBSCRIPTION_TEXT = "📋 Open subscription"
+
+
+def subscription_push_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    """[📋 Open subscription] under an admin push: the card as a new message (``sub:open_new``)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[_sub_button(OPEN_SUBSCRIPTION_TEXT, "open_new", subscription_id)]]
+    )
 
 
 def comment_edit_keyboard(

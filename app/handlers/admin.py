@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import html
 import logging
 from datetime import datetime, timezone
 
@@ -13,13 +12,9 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup
 from app.ui.keyboards import (
     MENU_HELP,
     admin_reply_keyboard,
-    admin_settings_keyboard,
     build_test_payment_confirmation_keyboard,
     guest_reply_keyboard,
-    dialog_cancel_inline_keyboard,
     public_settings_keyboard,
-    public_subscription_currency_keyboard,
-    public_subscription_reminder_time_keyboard,
     public_settings_time_keyboard,
     public_settings_timezone_keyboard,
     public_reply_keyboard,
@@ -44,6 +39,7 @@ from app.ui.states import (
     PublicSubscriptionCurrencyForm,
     PublicSettingsForm,
     SettingsForm,
+    CycleAction,
     SubscriptionAction,
     TestListAction,
     TestSendAction,
@@ -53,9 +49,7 @@ from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
     normalize_time_string,
     normalize_timezone_name,
-    parse_time_string,
     parse_timezone,
-    tg_clock,
 )
 from app.storage.db import Database
 from app.services import (
@@ -68,13 +62,16 @@ from app.services import (
 from app.ui.text import validate_person_name
 # The shell (WP1): /start, sign-in links, Help, Close/Cancel and identity errors.
 from app.ui.helpers import answer_callback_once, delete_quietly
+from app.ui.keyboards import MENU_ACCOUNT, MENU_REPORTS, MENU_SETTINGS, MENU_SUBSCRIPTIONS
 from app.ui.prompts import PROMPT_MESSAGE_ID, cancel_prompt, reset_flow_state, wind_down
 from app.ui.shell import (
+    ADMIN_ACCOUNT_TEXT,
     FIRST_ADMIN_TEXT,
     JOIN_ALREADY_LINKED_TEXT,
     JOIN_FAILED_TEXT,
     JOIN_LINK_BROKEN_TEXT,
     JOIN_LINK_EXPIRED_TEXT,
+    MEMBERS_ONLY_ALERT,
     NO_IDENTITY_TEXT,
     STRANGER_START_TEXT,
     admin_start_snapshot,
@@ -83,6 +80,105 @@ from app.ui.shell import (
     member_start_snapshot,
     member_start_text,
 )
+# Member settings (WP12).
+from aiogram.types import InlineKeyboardMarkup
+from app.ui.helpers import edit_in_place, respond_with_markup
+from app.ui.keyboards import PUBLIC_TIME_RESET_CALLBACK, PUBLIC_TIMEZONE_RESET_CALLBACK, use_default_rows
+from app.ui.member_settings import (
+    SETTINGS_REOPEN_ALERT,
+    TIME_NOT_TEXT_HINT,
+    TIME_TYPO_HINT,
+    TIMEZONE_NOT_TEXT_HINT,
+    TIMEZONE_PROMPT,
+    TIMEZONE_TYPO_HINT,
+    member_settings_snapshot,
+    member_settings_text,
+    reminder_time_prompt,
+    reminder_time_text,
+    time_banner,
+    time_toast,
+    timezone_banner,
+    timezone_text,
+    timezone_toast,
+)
+from app.ui.prompts import ask, finish_prompt, note_typo, origin_of
+from app.ui.style import toast_from_html, with_banner
+from app.ui.text import is_default_word, parse_time_loose, parse_timezone_loose
+# Member account, rename and own reports (WP10).
+from app.ui.helpers import DEAD_BUTTON, SUBSCRIPTION_GONE
+from app.ui.keyboards import (
+    CLOSE_CALLBACK,
+    PUBLIC_ACCOUNT_RENAME_CALLBACK,
+    PUBLIC_ACCOUNT_SHOW_CALLBACK,
+    PUBLIC_ACCOUNT_SHOW_NEW_CALLBACK,
+)
+from app.ui.member_account import (
+    ACCOUNT_NEW_ORIGIN,
+    ACCOUNT_ORIGIN,
+    ACCOUNT_REOPEN_ALERT,
+    NOT_SET_UP_ALERT as ACCOUNT_NOT_SET_UP_ALERT,
+    NOT_SET_UP_TEXT as ACCOUNT_NOT_SET_UP_TEXT,
+    RENAME_NOT_TEXT_HINT,
+    SUBSCRIPTIONS_REOPEN_ALERT,
+    account_screen,
+    not_set_up_text,
+    rename_prompt,
+    renamed_banner,
+)
+from app.ui.prompts import ORIGIN_SCREEN
+# Member subscriptions (WP9).
+from aiogram.fsm.state import State
+from aiogram.types import InlineKeyboardButton
+from app.ui.guards import guarded, pay_cycle_key
+from app.ui.helpers import CYCLE_CLOSED, NO_ACCESS, PROMPT_OUT_OF_DATE_TEXT, SUBSCRIPTION_GONE_BANNER, stale_redirect
+from app.ui.keyboards import MEMBER_CYCLE_PAID_ACTION, PUBLIC_CARD_CLOSE_ACTION, USE_DEFAULT_TEXT
+from app.ui.member_subscriptions import (
+    ALREADY_PAID_TOAST,
+    CARD_UPDATED_TOAST,
+    CARD_NEW_ORIGIN as MEMBER_CARD_NEW_ORIGIN,
+    CARD_ORIGIN as MEMBER_CARD_ORIGIN,
+    CURRENCY_NOT_TEXT_HINT,
+    CURRENCY_TYPO_HINT,
+    currency_prompt as member_currency_prompt,
+    currency_screen as member_currency_screen,
+    default_shown_in as member_default_shown_in,
+    is_reset_word as member_is_reset_word,
+    member_access,
+    member_card_screen,
+    opened_as_new,
+    paid_banner,
+    reminder_prompt as member_reminder_prompt,
+    reminder_screen as member_reminder_screen,
+    reminder_times as member_reminder_times,
+    shown_in_banner,
+    shown_in_toast,
+    unpaid_dues,
+    viewer_timezone,
+)
+from app.ui.text import parse_currency
+# Admin settings and the test-reminder picker (WP11).
+from typing import Any
+from app.ui.admin_settings import (
+    NOTIFICATIONS_SCREEN_TEXT,
+    NOTIFY_KEYS as ADMIN_NOTIFY_KEYS,
+    ROUNDING_MODES,
+    TIMEZONE_PROMPT as ADMIN_TIMEZONE_PROMPT,
+    admin_settings_screen,
+    admin_settings_snapshot,
+    notification_toast,
+    reminder_time_text as admin_reminder_time_text,
+    rounding_text as admin_rounding_text,
+    rounding_banner,
+    rounding_toast,
+    shown_page as admin_tests_shown_page,
+    test_failed_alert as admin_test_failed_alert,
+    test_page_of as admin_test_page_of,
+    test_people as admin_test_people,
+    test_sent_banner as admin_test_sent_banner,
+    time_prompt as admin_time_prompt,
+    timezone_text as admin_timezone_text,
+)
+from app.ui.helpers import USER_GONE
 
 from . import admin_router, public_router
 
@@ -102,83 +198,94 @@ def _extract_start_payload(message: Message) -> str | None:
     return payload or None
 
 
-async def _public_settings_snapshot(
+# ------------------------------------------------- member settings (WP12)
+#
+# ⚙️ Settings is a top-level screen (no nav row). Its pickers edit the same
+# message and return to it with a toast; the ✏️ prompts edit the screen they
+# came from into ⚙️ Settings with a result banner.
+
+_PUBLIC_SETTINGS_PROMPT_STATES = frozenset(
+    {PublicSettingsForm.base_time.state, PublicSettingsForm.base_timezone.state}
+)
+PUBLIC_SETTINGS_ORIGIN = "public_settings"
+
+
+async def _public_settings_screen(
     db: Database,
     settings: Settings,
     telegram_id: int,
-) -> tuple[str, str, bool, str, str, bool]:
-    admin_time_raw = await db.get_setting("base_reminder_time")
-    admin_time = parse_time_string(admin_time_raw, settings.base_reminder_time).strftime("%H:%M")
-    user_time_raw = await db.get_user_setting(telegram_id, "base_reminder_time")
-    has_time_override = bool(normalize_time_string(user_time_raw))
-    current_time = parse_time_string(user_time_raw, admin_time).strftime("%H:%M")
-    admin_timezone_raw = await db.get_setting("base_timezone")
-    admin_timezone = normalize_timezone_name(admin_timezone_raw, settings.base_timezone) or DEFAULT_REMINDER_TIMEZONE
-    user_timezone_raw = await db.get_user_setting(telegram_id, "timezone")
-    has_timezone_override = bool(normalize_timezone_name(user_timezone_raw))
-    current_timezone = normalize_timezone_name(user_timezone_raw, admin_timezone) or admin_timezone
-    return (
-        current_time,
-        admin_time,
-        has_time_override,
-        current_timezone,
-        admin_timezone,
-        has_timezone_override,
-    )
-
-
-def _public_settings_text(
-    current_time: str,
-    admin_time: str,
-    has_time_override: bool,
-    current_timezone: str,
-    admin_timezone: str,
-    has_timezone_override: bool,
-) -> str:
-    time_value = current_time if has_time_override else f"Default ({admin_time})"
-    timezone_value = current_timezone if has_timezone_override else f"Default ({admin_timezone})"
-    return (
-        "⚙️ Settings:\n\n"
-        "⏰ Time:\n"
-        f"Base time: <code>{html.escape(time_value)}</code>\n"
-        f"Your local time: {tg_clock(current_time, current_timezone)}\n\n"
-        "🌍 Timezone:\n"
-        f"Timezone: <code>{html.escape(timezone_value)}</code>"
-    )
+    *,
+    banner: str | None = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    snapshot = await member_settings_snapshot(db, settings, telegram_id)
+    return with_banner(banner, member_settings_text(snapshot)), public_settings_keyboard()
 
 
 async def _show_public_settings_menu(
-    callback: CallbackQuery | Message,
+    target: CallbackQuery | Message,
     db: Database,
     settings: Settings,
     telegram_id: int,
+    *,
+    toast: str | None = None,
+    banner: str | None = None,
 ) -> None:
-    (
-        current_time,
-        admin_time,
-        has_time_override,
-        current_timezone,
-        admin_timezone,
-        has_timezone_override,
-    ) = await _public_settings_snapshot(db, settings, telegram_id)
-    text = _public_settings_text(
-        current_time,
-        admin_time,
-        has_time_override,
-        current_timezone,
-        admin_timezone,
-        has_timezone_override,
-    )
-    markup = public_settings_keyboard(
-        current_time,
-        current_timezone,
-    )
-    if isinstance(callback, CallbackQuery):
-        if callback.message:
-            await callback.message.edit_text(text, reply_markup=markup)
-        await callback.answer()
+    """Edit the tapped message into ⚙️ Settings (a typed tap sends it), answering once."""
+    text, markup = await _public_settings_screen(db, settings, telegram_id, banner=banner)
+    await respond_with_markup(target, text, reply_markup=markup, toast=toast)
+
+
+async def _show_public_settings_on_origin(
+    bot: Bot,
+    chat_id: int,
+    db: Database,
+    settings: Settings,
+    telegram_id: int,
+    flow_data: dict,
+    *,
+    banner: str,
+) -> None:
+    """A prompt finished: the screen it came from becomes ⚙️ Settings with ``banner``.
+
+    When that screen is gone (or unknown, e.g. after a restart), ⚙️ Settings
+    is sent as a new message instead.
+    """
+    text, markup = await _public_settings_screen(db, settings, telegram_id, banner=banner)
+    origin = origin_of(flow_data)
+    if origin is not None and await edit_in_place(bot, origin[0], origin[1], text, markup):
         return
-    await callback.answer(text, reply_markup=markup)
+    await bot.send_message(chat_id, text, reply_markup=markup)
+
+
+async def _public_settings_picked(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    settings: Settings,
+    *,
+    toast: str,
+    banner: str,
+) -> None:
+    """A preset or Default was saved: back to ⚙️ Settings with ``toast``.
+
+    A settings prompt still pending is wound down, so later text is not taken
+    as its answer. When the tap was [↺ Use default] on that prompt, the
+    prompt goes and the screen it came from shows ⚙️ Settings with ``banner``.
+    """
+    message = callback.message
+    bot = callback.bot
+    if bot is not None and message is not None and await state.get_state() in _PUBLIC_SETTINGS_PROMPT_STATES:
+        on_prompt = (await state.get_data()).get(PROMPT_MESSAGE_ID) == message.message_id
+        old_data = await reset_flow_state(state)
+        await wind_down(bot, message.chat.id, old_data)
+        if on_prompt:
+            await _show_public_settings_on_origin(
+                bot, message.chat.id, db, settings, callback.from_user.id, old_data, banner=banner
+            )
+            await answer_callback_once(callback, toast_from_html(banner))
+            return
+    # A preset from the picker: ⚙️ Settings with the same result banner as typed input.
+    await _show_public_settings_menu(callback, db, settings, callback.from_user.id, toast=toast, banner=banner)
 
 
 async def _start_reply(message: Message, text: str, markup: ReplyKeyboardMarkup) -> None:
@@ -357,77 +464,173 @@ async def _answer_no_identity(message: Message) -> None:
     await message.answer(NO_IDENTITY_TEXT, reply_markup=guest_reply_keyboard())
 
 
-@public_router.message(F.text == "📋 Subscriptions")
+async def _answered_stranger(message: Message, db: Database, emoji: str, section: str) -> bool:
+    """A member section tapped from an old menu by an unlinked account.
+
+    Says the profile is not set up and swaps the stale menu for the guest one.
+    Returns True when the tap was answered here.
+    """
+    if await db.get_friend_by_telegram(message.from_user.id if message.from_user else None):
+        return False
+    await message.answer(not_set_up_text(emoji, section), reply_markup=guest_reply_keyboard())
+    return True
+
+
+# The reply menu. public_router runs first and serves admins and members alike
+# (branching on db.is_admin), so the admin_router copies of these labels never
+# fire; they are kept only for reading. Never send public_reply_keyboard to an admin.
+@public_router.message(F.text == MENU_SUBSCRIPTIONS)
 async def handle_public_subscriptions(message: Message, db: Database) -> None:
     if not message.from_user:
-        await message.answer("Unable to identify your account.")
+        await _answer_no_identity(message)
         return
     if await db.is_admin(message.from_user.id):
         await send_subscription_list(message, db)
         return
+    if await _answered_stranger(message, db, "📋", "Subscriptions"):
+        return
     await send_user_subscription_list(message, db, message.from_user.id)
 
 
-@public_router.message(F.text == "👤 Account")
+@public_router.message(F.text == MENU_ACCOUNT)
 async def handle_public_account(message: Message, db: Database) -> None:
     if not message.from_user:
-        await message.answer("Unable to identify your account.")
+        await _answer_no_identity(message)
         return
     if await db.is_admin(message.from_user.id):
-        await message.answer("This shortcut is available in the user menu only.", reply_markup=admin_reply_keyboard())
+        # An admin with a stale member menu: point at the right menu and send it.
+        await message.answer(ADMIN_ACCOUNT_TEXT, reply_markup=admin_reply_keyboard())
         return
     await send_public_account_detail(message, db, message.from_user.id)
 
 
-@public_router.callback_query(F.data == "public_account:rename")
+@public_router.callback_query(F.data == PUBLIC_ACCOUNT_SHOW_CALLBACK)
+async def handle_public_account_show(callback: CallbackQuery, db: Database) -> None:
+    """Edit the tapped message back into 👤 Account (the top-up picker's Back)."""
+    if not callback.from_user:
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
+        return
+    if await db.is_admin(callback.from_user.id):
+        await answer_callback_once(callback, MEMBERS_ONLY_ALERT, alert=True)
+        return
+    await send_public_account_detail(callback, db, callback.from_user.id)
+
+
+@public_router.callback_query(F.data == PUBLIC_ACCOUNT_SHOW_NEW_CALLBACK)
+async def handle_public_account_show_new(callback: CallbackQuery, db: Database) -> None:
+    """[👤 Account] under a push: 👤 Account as a NEW message ending in [✖️ Close].
+
+    The push itself is left as it is.
+    """
+    if not callback.from_user:
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
+        return
+    if await db.is_admin(callback.from_user.id):
+        await answer_callback_once(callback, MEMBERS_ONLY_ALERT, alert=True)
+        return
+    screen = await account_screen(db, callback.from_user.id, close=True)
+    if screen is None:
+        await answer_callback_once(callback, ACCOUNT_NOT_SET_UP_ALERT, alert=True)
+        return
+    text, markup = screen
+    chat_id = callback.message.chat.id if callback.message is not None else callback.from_user.id
+    await callback.bot.send_message(chat_id, text, reply_markup=markup)
+    await answer_callback_once(callback)
+
+
+@public_router.callback_query(F.data == PUBLIC_ACCOUNT_RENAME_CALLBACK)
 async def handle_public_account_rename_start(
     callback: CallbackQuery,
     state: FSMContext,
     db: Database,
 ) -> None:
+    """✏️ Rename: a prompt; the account message it was tapped on is the screen to redraw."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
     if await db.is_admin(callback.from_user.id):
-        await callback.answer("This shortcut is available in the user menu only.", show_alert=True)
+        await answer_callback_once(callback, MEMBERS_ONLY_ALERT, alert=True)
         return
     friend = await db.get_friend_by_telegram(callback.from_user.id)
     if not friend:
-        await callback.answer("Your profile is not set up yet.", show_alert=True)
+        await answer_callback_once(callback, ACCOUNT_NOT_SET_UP_ALERT, alert=True)
         return
-    await state.clear()
-    await state.set_state(PublicAccountForm.full_name)
-    if callback.message:
-        await callback.message.answer(
-            "✏️ Rename account:\n"
-            "Send your new display name.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+    if not isinstance(callback.message, Message):
+        # Too old to answer under: the account has to be opened again.
+        await answer_callback_once(callback, ACCOUNT_REOPEN_ALERT, alert=True)
+        return
+    await ask(
+        callback,
+        state,
+        PublicAccountForm.full_name,
+        rename_prompt(str(friend.get("full_name") or "")),
+        origin_screen=ACCOUNT_NEW_ORIGIN if _has_close_button(callback.message) else ACCOUNT_ORIGIN,
+    )
 
 
-@public_router.message(F.text.in_({"📊 Reports", "📊 Payments report"}))
+def _has_close_button(message: Message) -> bool:
+    """True for the 👤 Account copy opened from a push (it ends with [✖️ Close])."""
+    markup = message.reply_markup
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return False
+    return any(button.callback_data == CLOSE_CALLBACK for row in markup.inline_keyboard for button in row)
+
+
+@public_router.message(F.text.in_({MENU_REPORTS, "📊 Payments report"}))
 async def handle_public_payments_report(message: Message, db: Database) -> None:
     if not message.from_user:
-        await message.answer("Unable to identify your account.")
+        await _answer_no_identity(message)
         return
     if await db.is_admin(message.from_user.id):
         await handle_payments_report(message, db)
         return
+    if await _answered_stranger(message, db, "📊", "Reports"):
+        return
     await send_public_user_payment_report(message, db, message.from_user.id)
 
 
-@public_router.message(F.text == "⚙️ Settings")
+# The '🔴 Netflix' buttons under the member's own report (WP10) and under pushes
+# open the member card (WP9) as a NEW message ending in [✖️ Close].
+@public_router.callback_query(SubscriptionAction.filter(F.action == "public_open_new"))
+async def handle_public_subscription_open_new(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    converter: CurrencyConverter,
+) -> None:
+    """The member card as a new message; the message the button sits on is left alone."""
+    if not callback.from_user:
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
+        return
+    viewer_id = callback.from_user.id
+    subscription_id = callback_data.subscription_id
+    subscription, problem = await member_access(db, subscription_id, viewer_id)
+    if subscription is None:
+        await answer_callback_once(callback, problem)
+        return
+    screen = await member_card_screen(db, subscription_id, viewer_id, close=True, converter=converter)
+    if screen is None or callback.bot is None:
+        await answer_callback_once(callback, SUBSCRIPTION_GONE)
+        return
+    text, markup = screen
+    chat_id = callback.message.chat.id if callback.message is not None else viewer_id
+    await callback.bot.send_message(chat_id, text, reply_markup=markup)
+    await answer_callback_once(callback)
+
+
+@public_router.message(F.text == MENU_SETTINGS)
 async def handle_public_settings(
     message: Message,
     db: Database,
     settings: Settings,
 ) -> None:
     if not message.from_user:
-        await message.answer("Unable to identify your account.")
+        await _answer_no_identity(message)
         return
     if await db.is_admin(message.from_user.id):
-        await message.answer(await _settings_menu_text(settings), reply_markup=admin_settings_keyboard())
+        await _show_admin_settings(message, db, settings)
+        return
+    if await _answered_stranger(message, db, "⚙️", "Settings"):
         return
     await _show_public_settings_menu(message, db, settings, message.from_user.id)
 
@@ -435,19 +638,20 @@ async def handle_public_settings(
 @public_router.callback_query(F.data == "public_settings:menu")
 async def handle_public_settings_menu_callback(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
     settings: Settings,
 ) -> None:
+    """[◀️ Back] from a picker: ⚙️ Settings again; a ✏️ prompt still open is wound down."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
+    message = callback.message
+    if await state.get_state() is not None and message is not None and callback.bot is not None:
+        old_data = await reset_flow_state(state)
+        await wind_down(callback.bot, message.chat.id, old_data, skip_message_id=message.message_id)
     if await db.is_admin(callback.from_user.id):
-        if callback.message:
-            await callback.message.edit_text(
-                await _settings_menu_text(settings),
-                reply_markup=admin_settings_keyboard(),
-            )
-        await callback.answer()
+        await _show_admin_settings(callback, db, settings)
         return
     await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
 
@@ -458,78 +662,89 @@ async def handle_public_settings_time(
     db: Database,
     settings: Settings,
 ) -> None:
+    """⏰ Reminder time: the picker, edited over ⚙️ Settings."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
-    (
-        current_time,
-        admin_time,
-        _,
-        current_timezone,
-        admin_timezone,
-        _,
-    ) = await _public_settings_snapshot(
-        db,
-        settings,
-        callback.from_user.id,
+    snapshot = await member_settings_snapshot(db, settings, callback.from_user.id)
+    await respond_with_markup(
+        callback,
+        reminder_time_text(snapshot),
+        reply_markup=public_settings_time_keyboard(
+            snapshot.time,
+            snapshot.default_time,
+            has_override=snapshot.has_time_override,
+        ),
     )
-    if callback.message:
-        await callback.message.edit_text(
-            "⏰ Base time:\n"
-            f"Current: <code>{current_time} ({current_timezone})</code>\n"
-            f"Default: <code>{admin_time} ({admin_timezone})</code>\n"
-            f"Your local time: {tg_clock(current_time, current_timezone)}\n"
-            "\n"
-            "Choose a value:",
-            reply_markup=public_settings_time_keyboard(current_time, admin_time),
-        )
-    await callback.answer()
 
 
 @public_router.callback_query(F.data == "public_settings:time_other")
-async def handle_public_settings_time_other(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(PublicSettingsForm.base_time)
-    if callback.message:
-        await callback.message.answer(
-            "⏰ Base time:\n"
-            "\n"
-            "Send time in <code>HH:MM</code>.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+async def handle_public_settings_time_other(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    settings: Settings,
+) -> None:
+    """✏️ Other time: a prompt with [↺ Use default]; the picker is the screen to redraw."""
+    if not callback.from_user:
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
+        return
+    if not isinstance(callback.message, Message):
+        await answer_callback_once(callback, SETTINGS_REOPEN_ALERT, alert=True)
+        return
+    snapshot = await member_settings_snapshot(db, settings, callback.from_user.id)
+    await ask(
+        callback,
+        state,
+        PublicSettingsForm.base_time,
+        reminder_time_prompt(snapshot.timezone),
+        origin_screen=PUBLIC_SETTINGS_ORIGIN,
+        extra_rows=use_default_rows(PUBLIC_TIME_RESET_CALLBACK),
+    )
 
 
 @public_router.callback_query(F.data.startswith("public_settings_time:"))
 async def handle_public_settings_time_select(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
     settings: Settings,
 ) -> None:
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
     raw_value = callback.data.split(":", 1)[1].strip()
     normalized = normalize_time_string(raw_value)
     if normalized is None:
-        await callback.answer("Time must be HH:MM.", show_alert=True)
+        await _show_public_settings_menu(callback, db, settings, callback.from_user.id, toast=DEAD_BUTTON)
         return
     await db.set_user_setting(callback.from_user.id, "base_reminder_time", normalized)
-    await callback.answer(f"Base time set to {normalized}")
-    await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
+    await _public_settings_picked(
+        callback, state, db, settings, toast=time_toast(normalized), banner=time_banner(normalized)
+    )
 
 
 @public_router.callback_query(F.data == "public_settings:time_reset")
 async def handle_public_settings_time_reset(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
     settings: Settings,
 ) -> None:
+    """Default (picker) or [↺ Use default] (prompt): drop the member's own time."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
     await db.delete_user_setting(callback.from_user.id, "base_reminder_time")
-    await callback.answer("Using admin default time now.")
-    await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
+    snapshot = await member_settings_snapshot(db, settings, callback.from_user.id)
+    await _public_settings_picked(
+        callback,
+        state,
+        db,
+        settings,
+        toast=time_toast(None),
+        banner=time_banner(snapshot.time, default=True),
+    )
 
 
 @public_router.callback_query(F.data == "public_settings:timezone")
@@ -538,81 +753,242 @@ async def handle_public_settings_timezone(
     db: Database,
     settings: Settings,
 ) -> None:
+    """🌍 Timezone: the picker, edited over ⚙️ Settings."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
-    (
-        _,
-        _,
-        _,
-        current_timezone,
-        admin_timezone,
-        _,
-    ) = await _public_settings_snapshot(
-        db,
-        settings,
-        callback.from_user.id,
+    snapshot = await member_settings_snapshot(db, settings, callback.from_user.id)
+    await respond_with_markup(
+        callback,
+        timezone_text(snapshot),
+        reply_markup=public_settings_timezone_keyboard(
+            snapshot.timezone,
+            snapshot.default_timezone,
+            has_override=snapshot.has_timezone_override,
+        ),
     )
-    if callback.message:
-        await callback.message.edit_text(
-            "🌍 Timezone:\n"
-            f"Current: <code>{current_timezone}</code>\n"
-            f"Default: <code>{admin_timezone}</code>\n"
-            "\n"
-            "Choose a value:",
-            reply_markup=public_settings_timezone_keyboard(
-                current_timezone,
-                admin_timezone,
-            ),
-        )
-    await callback.answer()
 
 
 @public_router.callback_query(F.data == "public_settings:timezone_other")
 async def handle_public_settings_timezone_other(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(PublicSettingsForm.base_timezone)
-    if callback.message:
-        await callback.message.answer(
-            "🌍 Timezone:\n"
-            "\n"
-            "Send an IANA timezone.\n"
-            "Examples: <code>Europe/Moscow</code>, <code>America/New_York</code>.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+    """✏️ Other timezone: a prompt with [↺ Use default]; the picker is the screen to redraw."""
+    if not callback.from_user:
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
+        return
+    if not isinstance(callback.message, Message):
+        await answer_callback_once(callback, SETTINGS_REOPEN_ALERT, alert=True)
+        return
+    await ask(
+        callback,
+        state,
+        PublicSettingsForm.base_timezone,
+        TIMEZONE_PROMPT,
+        origin_screen=PUBLIC_SETTINGS_ORIGIN,
+        extra_rows=use_default_rows(PUBLIC_TIMEZONE_RESET_CALLBACK),
+    )
 
 
 @public_router.callback_query(F.data.startswith("public_settings_timezone:"))
 async def handle_public_settings_timezone_select(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
     settings: Settings,
 ) -> None:
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
     raw_value = callback.data.split(":", 1)[1].strip()
     normalized = normalize_timezone_name(raw_value)
     if normalized is None:
-        await callback.answer("Unsupported timezone.", show_alert=True)
+        await _show_public_settings_menu(callback, db, settings, callback.from_user.id, toast=DEAD_BUTTON)
         return
     await db.set_user_setting(callback.from_user.id, "timezone", normalized)
-    await callback.answer(f"Timezone set to {normalized}")
-    await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
+    await _public_settings_picked(
+        callback, state, db, settings, toast=timezone_toast(normalized), banner=timezone_banner(normalized)
+    )
 
 
 @public_router.callback_query(F.data == "public_settings:timezone_reset")
 async def handle_public_settings_timezone_reset(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
     settings: Settings,
 ) -> None:
+    """Default (picker) or [↺ Use default] (prompt): drop the member's own timezone."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
     await db.delete_user_setting(callback.from_user.id, "timezone")
-    await callback.answer("Using admin default timezone now.")
-    await _show_public_settings_menu(callback, db, settings, callback.from_user.id)
+    snapshot = await member_settings_snapshot(db, settings, callback.from_user.id)
+    await _public_settings_picked(
+        callback,
+        state,
+        db,
+        settings,
+        toast=timezone_toast(None),
+        banner=timezone_banner(snapshot.timezone, default=True),
+    )
+
+
+# ------------------------------------------------- member subscriptions (WP9)
+#
+# 📋 Subscriptions (member) is top-level; the card returns to it with
+# [◀️ To list], or ends with [✖️ Close] when opened as a new message. The
+# pickers edit the card's message and return to it with a toast; the ✏️
+# prompts edit the screen they came from into the card with a banner.
+
+_MEMBER_CARD_PROMPT_STATES = frozenset(
+    {PublicReminderForm.reminder_time.state, PublicSubscriptionCurrencyForm.currency.state}
+)
+MEMBER_CARD_SUBSCRIPTION_ID = "subscription_id"
+
+
+async def _member_list_redraw(
+    target: CallbackQuery | Message,
+    db: Database,
+    viewer_id: int,
+    *,
+    banner: str | None = None,
+) -> None:
+    """The list the member card came from: the admin's own list for an admin, else the member's."""
+    if await db.is_admin(viewer_id):
+        await send_subscription_list(target, db, banner=SUBSCRIPTION_GONE_BANNER if banner else None)
+        return
+    await send_user_subscription_list(target, db, viewer_id, banner=banner)
+
+
+async def _member_gate(callback: CallbackQuery, db: Database, subscription_id: int) -> dict | None:
+    """The subscription behind a member-card button, or None after telling the viewer why not.
+
+    Deleted or left: the list is redrawn with the toast ('Subscription was
+    deleted' / 'You are no longer in this subscription'). On a copy opened
+    from a push or report (it has [✖️ Close]) only the toast is shown.
+    """
+    if not callback.from_user:
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
+        return None
+    viewer_id = callback.from_user.id
+    subscription, problem = await member_access(db, subscription_id, viewer_id)
+    if subscription is not None:
+        return subscription
+    if not isinstance(callback.message, Message) or opened_as_new(callback.message):
+        await answer_callback_once(callback, problem)
+        return None
+    await stale_redirect(callback, problem or NO_ACCESS, lambda: _member_list_redraw(callback, db, viewer_id))
+    return None
+
+
+def _subscription_id_from(data: str | None) -> int | None:
+    """``public_sub_currency_other:12`` / ``public_sub_currency:12:USD`` -> 12."""
+    parts = (data or "").split(":")
+    try:
+        return int(parts[1])
+    except (IndexError, ValueError):
+        return None
+
+
+async def _show_member_card_on_origin(
+    bot: Bot,
+    chat_id: int,
+    db: Database,
+    subscription_id: int,
+    viewer_id: int,
+    flow_data: dict,
+    *,
+    banner: str,
+    converter: CurrencyConverter | None,
+    fallback: Message | None = None,
+) -> None:
+    """A card prompt finished: the screen it came from becomes the card with ``banner``.
+
+    When that screen is gone (or unknown after a restart) the card is sent as
+    a new message; a deleted subscription sends the list instead.
+    """
+    close = flow_data.get(ORIGIN_SCREEN) == MEMBER_CARD_NEW_ORIGIN
+    screen = await member_card_screen(db, subscription_id, viewer_id, banner=banner, close=close, converter=converter)
+    if screen is None:
+        if fallback is not None:
+            await _member_list_redraw(fallback, db, viewer_id, banner=f"⚠️ {SUBSCRIPTION_GONE}")
+        return
+    text, markup = screen
+    origin = origin_of(flow_data)
+    if origin is not None and await edit_in_place(bot, origin[0], origin[1], text, markup):
+        return
+    await bot.send_message(chat_id, text, reply_markup=markup)
+
+
+async def _member_card_picked(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    subscription_id: int,
+    converter: CurrencyConverter | None,
+    *,
+    toast: str,
+    banner: str,
+) -> None:
+    """A preset or Default was saved: back to the card with ``toast``.
+
+    A card prompt still pending is wound down, so later text is not taken as
+    its answer. When the tap was [↺ Use default] on that prompt, the prompt
+    goes and the screen it came from becomes the card with ``banner``.
+    """
+    message = callback.message
+    bot = callback.bot
+    viewer_id = callback.from_user.id
+    if bot is not None and message is not None and await state.get_state() in _MEMBER_CARD_PROMPT_STATES:
+        on_prompt = (await state.get_data()).get(PROMPT_MESSAGE_ID) == message.message_id
+        old_data = await reset_flow_state(state)
+        await wind_down(bot, message.chat.id, old_data)
+        if on_prompt:
+            await _show_member_card_on_origin(
+                bot,
+                message.chat.id,
+                db,
+                subscription_id,
+                viewer_id,
+                old_data,
+                banner=banner,
+                converter=converter,
+                fallback=message if isinstance(message, Message) else None,
+            )
+            await answer_callback_once(callback, toast_from_html(banner))
+            return
+    # A preset from the picker: the card with the same result banner as typed input.
+    await send_public_subscription_detail(
+        callback,
+        db,
+        subscription_id,
+        banner=banner,
+        toast=toast,
+        close=opened_as_new(message),
+        converter=converter,
+    )
+
+
+async def _ask_for_member_card(
+    callback: CallbackQuery,
+    state: FSMContext,
+    new_state: State,
+    text: str,
+    subscription_id: int,
+    reset_callback: str,
+) -> None:
+    """A ✏️ prompt with [↺ Use default] above ✖️ Cancel; the tapped picker is the screen to redraw."""
+    if not isinstance(callback.message, Message):
+        await answer_callback_once(callback, SUBSCRIPTIONS_REOPEN_ALERT, alert=True)
+        return
+    await ask(
+        callback,
+        state,
+        new_state,
+        text,
+        origin_screen=MEMBER_CARD_NEW_ORIGIN if opened_as_new(callback.message) else MEMBER_CARD_ORIGIN,
+        extra_rows=[[InlineKeyboardButton(text=USE_DEFAULT_TEXT, callback_data=reset_callback)]],
+        data={MEMBER_CARD_SUBSCRIPTION_ID: subscription_id},
+    )
 
 
 @public_router.callback_query(SubscriptionAction.filter(F.action == "open_public"))
@@ -620,17 +996,27 @@ async def handle_public_subscription_open(
     callback: CallbackQuery,
     callback_data: SubscriptionAction,
     db: Database,
+    converter: CurrencyConverter,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.")
+    """The member card, edited over the list (or over its own sub-screen: the way back)."""
+    if await _member_gate(callback, db, callback_data.subscription_id) is None:
         return
-    subs = await db.list_subscriptions_for_user(callback.from_user.id)
-    if not any(sub["id"] == callback_data.subscription_id for sub in subs) and not await db.is_admin(
-        callback.from_user.id
-    ):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
+    await send_public_subscription_detail(callback, db, callback_data.subscription_id, converter=converter)
+
+
+@public_router.callback_query(SubscriptionAction.filter(F.action == PUBLIC_CARD_CLOSE_ACTION))
+async def handle_public_subscription_card_close(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    converter: CurrencyConverter,
+) -> None:
+    """The way back to a card opened as a new message: the card again, still ending in [✖️ Close]."""
+    if await _member_gate(callback, db, callback_data.subscription_id) is None:
         return
-    await send_public_subscription_detail(callback, db, callback_data.subscription_id)
+    await send_public_subscription_detail(
+        callback, db, callback_data.subscription_id, close=True, converter=converter
+    )
 
 
 @public_router.callback_query(SubscriptionAction.filter(F.action == "public_back"))
@@ -638,11 +1024,92 @@ async def handle_public_subscription_back(
     callback: CallbackQuery,
     db: Database,
 ) -> None:
+    """[◀️ To list]: edit the card back into the list (an admin gets the admin list)."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.")
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
-    await send_user_subscription_list(callback.message, db, callback.from_user.id)
-    await callback.answer()
+    await _member_list_redraw(callback, db, callback.from_user.id)
+
+
+@public_router.callback_query(SubscriptionAction.filter(F.action == "public_paid"))
+async def handle_public_subscription_paid_legacy(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+    converter: CurrencyConverter,
+) -> None:
+    """[✅ Paid] on a card sent before the button carried its due date.
+
+    That callback does not say which cycle the label meant, so it records
+    nothing: the card is redrawn with the current state (and, when a cycle is
+    unpaid, a fresh [✅ Paid · date] that names it).
+    """
+    subscription_id = callback_data.subscription_id
+    if await _member_gate(callback, db, subscription_id) is None:
+        return
+    await send_public_subscription_detail(
+        callback,
+        db,
+        subscription_id,
+        toast=CARD_UPDATED_TOAST,
+        close=opened_as_new(callback.message),
+        converter=converter,
+    )
+
+
+@public_router.callback_query(CycleAction.filter(F.action == MEMBER_CYCLE_PAID_ACTION))
+async def handle_public_subscription_paid(
+    callback: CallbackQuery,
+    callback_data: CycleAction,
+    db: Database,
+    converter: CurrencyConverter,
+) -> None:
+    """[✅ Paid · 10.10]: pay exactly the cycle on the label, redraw the card with '✅ Paid · Netflix <date>'.
+
+    Guarded by the same key as the reminder's ✅ Paid, so taps on both pay
+    once. Inside the guard the cycle is checked again: already paid or
+    closed meanwhile (an old card, a Paid from the reminder) only redraws
+    the card with 'Already paid' / 'This cycle is already closed'.
+    """
+    from app.handlers.reminders import notify_admins_about_payment, record_cycle_payment
+
+    subscription_id = callback_data.subscription_id
+    due_value = callback_data.due_date
+    subscription = await _member_gate(callback, db, subscription_id)
+    if subscription is None:
+        return
+    viewer_id = callback.from_user.id
+    close = opened_as_new(callback.message)
+    payment = None
+    async with guarded(callback, pay_cycle_key(subscription_id, due_value, viewer_id)) as acquired:
+        if not acquired:
+            return
+        tz_name = await viewer_timezone(db, viewer_id)
+        today = datetime.now(parse_timezone(tz_name)).date()
+        participants = await db.list_subscription_participants(subscription_id)
+        dues = await unpaid_dues(db, subscription, participants, viewer_id, today)
+        if due_value not in dues:
+            if due_value not in await db.list_open_cycles(subscription_id):
+                toast = CYCLE_CLOSED
+            else:
+                toast = ALREADY_PAID_TOAST
+            await send_public_subscription_detail(
+                callback, db, subscription_id, toast=toast, close=close, converter=converter
+            )
+            return
+        payment = await record_cycle_payment(db, subscription, due_value, viewer_id)
+        banner = paid_banner(str(subscription.get("name") or ""), due_value, tz_name)
+        await send_public_subscription_detail(
+            callback,
+            db,
+            subscription_id,
+            banner=banner,
+            toast=toast_from_html(banner),
+            close=close,
+            converter=converter,
+        )
+    if payment is not None and callback.bot is not None:
+        await notify_admins_about_payment(callback.bot, db, payment, viewer_id, callback.from_user.full_name)
 
 
 @public_router.callback_query(SubscriptionAction.filter(F.action == "public_report"))
@@ -651,14 +1118,15 @@ async def handle_public_subscription_report(
     callback_data: SubscriptionAction,
     db: Database,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.")
+    """'📊 <b>Reports · Netflix</b>' over the card, with [◀️ To card] (admins may open it too)."""
+    if await _member_gate(callback, db, callback_data.subscription_id) is None:
         return
     await send_public_subscription_payment_report(
         callback,
         db,
         callback_data.subscription_id,
         callback.from_user.id,
+        close=opened_as_new(callback.message),
     )
 
 
@@ -668,65 +1136,42 @@ async def handle_public_subscription_currency(
     callback_data: SubscriptionAction,
     db: Database,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.")
+    """🌐 Shown in: the currency picker, edited over the card."""
+    subscription = await _member_gate(callback, db, callback_data.subscription_id)
+    if subscription is None:
         return
-    subs = await db.list_subscriptions_for_user(callback.from_user.id)
-    if not any(sub["id"] == callback_data.subscription_id for sub in subs):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
-        return
-    subscription = await db.get_subscription(callback_data.subscription_id)
-    if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
-        return
-
-    default_currency = str(
-        subscription.get("base_currency") or subscription.get("currency") or "RUB"
-    ).strip().upper()
-    user_override_raw = str(
-        await db.get_user_subscription_setting(
-            callback.from_user.id,
-            callback_data.subscription_id,
-            "target_currency",
-        ) or ""
-    ).strip().upper()
-    current_currency = user_override_raw or default_currency
-    if callback.message:
-        await callback.message.edit_text(
-            "💱 Currency for this subscription:\n"
-            f"Current: <code>{html.escape(current_currency)}</code>\n"
-            f"Default: <code>{html.escape(default_currency)}</code>\n"
-            "\n"
-            "Choose a value:",
-            reply_markup=public_subscription_currency_keyboard(
-                callback_data.subscription_id,
-                current_currency,
-                default_currency,
-            ),
-        )
-    await callback.answer()
+    text, markup = await member_currency_screen(
+        db, subscription, callback.from_user.id, close=opened_as_new(callback.message)
+    )
+    await respond_with_markup(callback, text, reply_markup=markup)
 
 
 @public_router.callback_query(SubscriptionAction.filter(F.action == "public_currency_default"))
 async def handle_public_subscription_currency_default(
     callback: CallbackQuery,
     callback_data: SubscriptionAction,
+    state: FSMContext,
     db: Database,
+    converter: CurrencyConverter,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
-        return
-    subs = await db.list_subscriptions_for_user(callback.from_user.id)
-    if not any(sub["id"] == callback_data.subscription_id for sub in subs):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
+    """✅ Default (picker) or [↺ Use default] (prompt): drop the member's own currency."""
+    subscription = await _member_gate(callback, db, callback_data.subscription_id)
+    if subscription is None:
         return
     await db.delete_user_subscription_setting(
         callback.from_user.id,
         callback_data.subscription_id,
         "target_currency",
     )
-    await callback.answer("Using subscription default currency.")
-    await send_public_subscription_detail(callback, db, callback_data.subscription_id)
+    await _member_card_picked(
+        callback,
+        state,
+        db,
+        callback_data.subscription_id,
+        converter,
+        toast=shown_in_toast(None),
+        banner=shown_in_banner(member_default_shown_in(subscription), default=True),
+    )
 
 
 @public_router.callback_query(F.data.startswith("public_sub_currency_other:"))
@@ -735,70 +1180,50 @@ async def handle_public_subscription_currency_other(
     state: FSMContext,
     db: Database,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+    """✏️ Other currency: a prompt with [↺ Use default]."""
+    subscription_id = _subscription_id_from(callback.data)
+    if subscription_id is None:
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
-    try:
-        subscription_id = int(callback.data.split(":", 1)[1].strip())
-    except (TypeError, ValueError):
-        await callback.answer("Invalid subscription.", show_alert=True)
+    subscription = await _member_gate(callback, db, subscription_id)
+    if subscription is None:
         return
-
-    subs = await db.list_subscriptions_for_user(callback.from_user.id)
-    if not any(sub["id"] == subscription_id for sub in subs):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
-        return
-
-    await state.set_state(PublicSubscriptionCurrencyForm.currency)
-    await state.update_data(subscription_id=subscription_id)
-    if callback.message:
-        await callback.message.answer(
-            "💱 Currency for this subscription:\n"
-            "Send a 3-letter currency code.\n"
-            "\n"
-            "Example: <code>CHF</code>",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+    await _ask_for_member_card(
+        callback,
+        state,
+        PublicSubscriptionCurrencyForm.currency,
+        member_currency_prompt(str(subscription.get("name") or "")),
+        subscription_id,
+        SubscriptionAction(action="public_currency_default", subscription_id=subscription_id).pack(),
+    )
 
 
 @public_router.callback_query(F.data.startswith("public_sub_currency:"))
 async def handle_public_subscription_currency_select(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
+    converter: CurrencyConverter,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+    """A currency preset: save it, back to the card with 'Shown in: USD'."""
+    parts = (callback.data or "").split(":", 2)
+    subscription_id = _subscription_id_from(callback.data)
+    currency = parse_currency(parts[2]) if len(parts) == 3 else None
+    if subscription_id is None or currency is None:
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
+    if await _member_gate(callback, db, subscription_id) is None:
         return
-    _, subscription_id_raw, raw_currency = parts
-    try:
-        subscription_id = int(subscription_id_raw)
-    except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
-        return
-
-    currency = raw_currency.strip().upper()
-    if len(currency) != 3 or not currency.isalpha():
-        await callback.answer("Currency must contain 3 letters.", show_alert=True)
-        return
-
-    subs = await db.list_subscriptions_for_user(callback.from_user.id)
-    if not any(sub["id"] == subscription_id for sub in subs):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
-        return
-
-    await db.set_user_subscription_setting(
-        callback.from_user.id,
+    await db.set_user_subscription_setting(callback.from_user.id, subscription_id, "target_currency", currency)
+    await _member_card_picked(
+        callback,
+        state,
+        db,
         subscription_id,
-        "target_currency",
-        currency,
+        converter,
+        toast=shown_in_toast(currency),
+        banner=shown_in_banner(currency),
     )
-    await callback.answer(f"Currency set to {currency}")
-    await send_public_subscription_detail(callback, db, subscription_id)
 
 
 @public_router.callback_query(SubscriptionAction.filter(F.action == "public_remindertime"))
@@ -806,81 +1231,44 @@ async def handle_public_subscription_reminder_time(
     callback: CallbackQuery,
     callback_data: SubscriptionAction,
     db: Database,
-    settings: Settings,
-    state: FSMContext,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.")
+    """⏰ Reminder time: the picker, edited over the card."""
+    subscription = await _member_gate(callback, db, callback_data.subscription_id)
+    if subscription is None:
         return
-    subs = await db.list_subscriptions_for_user(callback.from_user.id)
-    if not any(sub["id"] == callback_data.subscription_id for sub in subs):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
-        return
-    subscription = await db.get_subscription(callback_data.subscription_id)
-    if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
-        return
-    subscription_time_raw = normalize_time_string(subscription.get("reminder_time"))
-    user_override_raw = await db.get_user_subscription_setting(
-        callback.from_user.id,
-        callback_data.subscription_id,
-        "reminder_time",
+    text, markup = await member_reminder_screen(
+        db, subscription, callback.from_user.id, close=opened_as_new(callback.message)
     )
-    user_override_time = normalize_time_string(user_override_raw)
-    user_base_time = parse_time_string(
-        await db.get_effective_user_base_reminder_time(
-            callback.from_user.id,
-            settings.base_reminder_time,
-        )
-    ).strftime("%H:%M")
-    user_timezone = normalize_timezone_name(
-        await db.get_effective_user_timezone(callback.from_user.id, settings.base_timezone),
-        settings.base_timezone,
-    ) or settings.base_timezone
-    default_time = subscription_time_raw or user_base_time
-    effective_time = user_override_time or default_time
-    await state.clear()
-    if callback.message:
-        await callback.message.edit_text(
-            "⏰ Reminder time:\n"
-            "\n"
-            f"Current: <code>{effective_time}</code>\n"
-            f"Default: <code>{default_time}</code>\n"
-            f"Timezone: <code>{user_timezone}</code>\n"
-            f"Your local time: {tg_clock(effective_time, user_timezone)}\n"
-            "\n"
-            "Choose a value:",
-            reply_markup=public_subscription_reminder_time_keyboard(
-                callback_data.subscription_id,
-                effective_time,
-                default_time,
-            ),
-        )
-    await callback.answer()
+    await respond_with_markup(callback, text, reply_markup=markup)
 
 
 @public_router.callback_query(SubscriptionAction.filter(F.action == "public_remindertime_default"))
 async def handle_public_subscription_reminder_time_default(
     callback: CallbackQuery,
     callback_data: SubscriptionAction,
-    db: Database,
     state: FSMContext,
+    db: Database,
+    converter: CurrencyConverter,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
-        return
-    subs = await db.list_subscriptions_for_user(callback.from_user.id)
-    if not any(sub["id"] == callback_data.subscription_id for sub in subs):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
+    """✅ Default (picker) or [↺ Use default] (prompt): drop the member's own time."""
+    subscription = await _member_gate(callback, db, callback_data.subscription_id)
+    if subscription is None:
         return
     await db.delete_user_subscription_setting(
         callback.from_user.id,
         callback_data.subscription_id,
         "reminder_time",
     )
-    await state.clear()
-    await callback.answer("Using default reminder time.")
-    await send_public_subscription_detail(callback, db, callback_data.subscription_id)
+    _, default_time, _ = await member_reminder_times(db, subscription, callback.from_user.id)
+    await _member_card_picked(
+        callback,
+        state,
+        db,
+        callback_data.subscription_id,
+        converter,
+        toast=time_toast(None),
+        banner=time_banner(default_time, default=True),
+    )
 
 
 @public_router.callback_query(F.data.startswith("public_sub_remindertime_other:"))
@@ -889,70 +1277,67 @@ async def handle_public_subscription_reminder_time_other(
     state: FSMContext,
     db: Database,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+    """✏️ Other time: a prompt with [↺ Use default]."""
+    subscription_id = _subscription_id_from(callback.data)
+    if subscription_id is None:
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
-    try:
-        subscription_id = int(callback.data.split(":", 1)[1].strip())
-    except (TypeError, ValueError):
-        await callback.answer("Invalid subscription.", show_alert=True)
+    subscription = await _member_gate(callback, db, subscription_id)
+    if subscription is None:
         return
-
-    subs = await db.list_subscriptions_for_user(callback.from_user.id)
-    if not any(sub["id"] == subscription_id for sub in subs):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
-        return
-
-    await state.set_state(PublicReminderForm.reminder_time)
-    await state.update_data(subscription_id=subscription_id)
-    if callback.message:
-        await callback.message.answer(
-            "⏰ Reminder time for this subscription:\n"
-            "Send time in <code>HH:MM</code>\n"
-            "\n"
-            "Example: <code>16:00</code>",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+    await _ask_for_member_card(
+        callback,
+        state,
+        PublicReminderForm.reminder_time,
+        member_reminder_prompt(
+            str(subscription.get("name") or ""), await viewer_timezone(db, callback.from_user.id)
+        ),
+        subscription_id,
+        SubscriptionAction(action="public_remindertime_default", subscription_id=subscription_id).pack(),
+    )
 
 
 @public_router.callback_query(F.data.startswith("public_sub_remindertime:"))
 async def handle_public_subscription_reminder_time_select(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
+    converter: CurrencyConverter,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+    """A time preset: save it, back to the card with 'Reminder time: 12:00'."""
+    parts = (callback.data or "").split(":", 2)
+    subscription_id = _subscription_id_from(callback.data)
+    normalized = normalize_time_string(parts[2]) if len(parts) == 3 else None
+    if subscription_id is None or normalized is None:
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
+    if await _member_gate(callback, db, subscription_id) is None:
         return
-    _, subscription_id_raw, raw_time = parts
-    try:
-        subscription_id = int(subscription_id_raw)
-    except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
-        return
-
-    normalized = normalize_time_string(raw_time)
-    if normalized is None:
-        await callback.answer("Time must be HH:MM.", show_alert=True)
-        return
-
-    subs = await db.list_subscriptions_for_user(callback.from_user.id)
-    if not any(sub["id"] == subscription_id for sub in subs):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
-        return
-
-    await db.set_user_subscription_setting(
-        callback.from_user.id,
+    await db.set_user_subscription_setting(callback.from_user.id, subscription_id, "reminder_time", normalized)
+    await _member_card_picked(
+        callback,
+        state,
+        db,
         subscription_id,
-        "reminder_time",
-        normalized,
+        converter,
+        toast=time_toast(normalized),
+        banner=time_banner(normalized),
     )
-    await callback.answer(f"Reminder time set to {normalized}")
-    await send_public_subscription_detail(callback, db, subscription_id)
+
+
+async def _member_prompt_subscription(message: Message, state: FSMContext, db: Database) -> dict | None:
+    """The subscription a card prompt is about, or None after ending the prompt and saying why."""
+    subscription_id = (await state.get_data()).get(MEMBER_CARD_SUBSCRIPTION_ID)
+    if not subscription_id:
+        await finish_prompt(message, state)
+        await message.answer(PROMPT_OUT_OF_DATE_TEXT)
+        return None
+    subscription, problem = await member_access(db, int(subscription_id), message.from_user.id)
+    if subscription is None:
+        await finish_prompt(message, state)
+        await _member_list_redraw(message, db, message.from_user.id, banner=f"⚠️ {problem}")
+        return None
+    return subscription
 
 
 @public_router.message(PublicReminderForm.reminder_time)
@@ -960,42 +1345,49 @@ async def handle_public_reminder_time_input(
     message: Message,
     state: FSMContext,
     db: Database,
+    converter: CurrencyConverter,
 ) -> None:
-    data = await state.get_data()
-    subscription_id = data.get("subscription_id")
-    if not subscription_id or not message.from_user:
-        await state.clear()
-        await message.answer("Session expired. Reopen the subscription.")
+    """The typed reminder time ('9', '09.30', '1630'; 'default' resets it).
+
+    A typo keeps the prompt and gets a one-line hint. Success edits the
+    screen the prompt came from into the card with a banner, then removes the
+    prompt, the hints and the typed messages.
+    """
+    if not message.from_user:
+        await reset_flow_state(state)
+        await _answer_no_identity(message)
         return
-
-    raw_time = (message.text or "").strip()
-
-    subs = await db.list_subscriptions_for_user(message.from_user.id)
-    if not any(sub["id"] == subscription_id for sub in subs):
-        await state.clear()
-        await message.answer("You don't have access to this subscription.")
+    if message.text is None:
+        await note_typo(message, state, TIME_NOT_TEXT_HINT)
         return
-
-    lowered = raw_time.lower()
-    if lowered in {"default", "base", "admin", "-"}:
-        await db.delete_user_subscription_setting(message.from_user.id, int(subscription_id), "reminder_time")
-        await state.clear()
-        await send_public_subscription_detail(message, db, int(subscription_id))
+    subscription = await _member_prompt_subscription(message, state, db)
+    if subscription is None:
         return
-
-    normalized = normalize_time_string(raw_time)
-    if normalized is None:
-        await message.answer("Time must be in HH:MM format (24-hour clock).")
-        return
-
-    await db.set_user_subscription_setting(
-        message.from_user.id,
-        int(subscription_id),
-        "reminder_time",
-        normalized,
+    subscription_id = int(subscription["id"])
+    telegram_id = message.from_user.id
+    if member_is_reset_word(message.text):
+        await db.delete_user_subscription_setting(telegram_id, subscription_id, "reminder_time")
+        _, default_time, _ = await member_reminder_times(db, subscription, telegram_id)
+        banner = time_banner(default_time, default=True)
+    else:
+        normalized = parse_time_loose(message.text)
+        if normalized is None:
+            await note_typo(message, state, TIME_TYPO_HINT)
+            return
+        await db.set_user_subscription_setting(telegram_id, subscription_id, "reminder_time", normalized)
+        banner = time_banner(normalized)
+    flow_data = await finish_prompt(message, state)
+    await _show_member_card_on_origin(
+        message.bot,
+        message.chat.id,
+        db,
+        subscription_id,
+        telegram_id,
+        flow_data,
+        banner=banner,
+        converter=converter,
+        fallback=message,
     )
-    await state.clear()
-    await send_public_subscription_detail(message, db, int(subscription_id))
 
 
 @public_router.message(PublicSubscriptionCurrencyForm.currency)
@@ -1003,44 +1395,43 @@ async def handle_public_subscription_currency_input(
     message: Message,
     state: FSMContext,
     db: Database,
+    converter: CurrencyConverter,
 ) -> None:
-    data = await state.get_data()
-    subscription_id = data.get("subscription_id")
-    if not subscription_id or not message.from_user:
-        await state.clear()
-        await message.answer("Session expired. Reopen the subscription.")
+    """The typed currency ('chf'; 'default' resets it); see the time input."""
+    if not message.from_user:
+        await reset_flow_state(state)
+        await _answer_no_identity(message)
         return
-
-    subs = await db.list_subscriptions_for_user(message.from_user.id)
-    if not any(sub["id"] == subscription_id for sub in subs):
-        await state.clear()
-        await message.answer("You don't have access to this subscription.")
+    if message.text is None:
+        await note_typo(message, state, CURRENCY_NOT_TEXT_HINT)
         return
-
-    raw_value = (message.text or "").strip().upper()
-    lowered = raw_value.lower()
-    if lowered in {"default", "base", "admin", "-"}:
-        await db.delete_user_subscription_setting(
-            message.from_user.id,
-            int(subscription_id),
-            "target_currency",
-        )
-        await state.clear()
-        await send_public_subscription_detail(message, db, int(subscription_id))
+    subscription = await _member_prompt_subscription(message, state, db)
+    if subscription is None:
         return
-
-    if len(raw_value) != 3 or not raw_value.isalpha():
-        await message.answer("Currency must contain 3 letters, for example USD.")
-        return
-
-    await db.set_user_subscription_setting(
-        message.from_user.id,
-        int(subscription_id),
-        "target_currency",
-        raw_value,
+    subscription_id = int(subscription["id"])
+    telegram_id = message.from_user.id
+    if member_is_reset_word(message.text):
+        await db.delete_user_subscription_setting(telegram_id, subscription_id, "target_currency")
+        banner = shown_in_banner(member_default_shown_in(subscription), default=True)
+    else:
+        currency = parse_currency(message.text)
+        if currency is None:
+            await note_typo(message, state, CURRENCY_TYPO_HINT)
+            return
+        await db.set_user_subscription_setting(telegram_id, subscription_id, "target_currency", currency)
+        banner = shown_in_banner(currency)
+    flow_data = await finish_prompt(message, state)
+    await _show_member_card_on_origin(
+        message.bot,
+        message.chat.id,
+        db,
+        subscription_id,
+        telegram_id,
+        flow_data,
+        banner=banner,
+        converter=converter,
+        fallback=message,
     )
-    await state.clear()
-    await send_public_subscription_detail(message, db, int(subscription_id))
 
 
 @public_router.message(PublicSettingsForm.base_time)
@@ -1050,19 +1441,35 @@ async def handle_public_settings_time_input(
     db: Database,
     settings: Settings,
 ) -> None:
+    """The typed reminder time ('9', '09.30', '1630'; 'default' resets it).
+
+    A typo keeps the prompt and gets a one-line hint. Success edits the
+    screen the prompt came from into ⚙️ Settings with a banner, then removes
+    the prompt, the hints and the typed messages.
+    """
     if not message.from_user:
-        await state.clear()
-        await message.answer("Unable to identify your account.")
+        await reset_flow_state(state)
+        await _answer_no_identity(message)
         return
-    raw_value = (message.text or "").strip()
-    normalized = normalize_time_string(raw_value)
-    if normalized is None:
-        await message.answer("Time must be in HH:MM format, for example 16:00.")
+    if message.text is None:
+        await note_typo(message, state, TIME_NOT_TEXT_HINT)
         return
-    await db.set_user_setting(message.from_user.id, "base_reminder_time", normalized)
-    await state.clear()
-    await message.answer("Base time updated.", reply_markup=public_reply_keyboard())
-    await _show_public_settings_menu(message, db, settings, message.from_user.id)
+    telegram_id = message.from_user.id
+    if is_default_word(message.text):
+        await db.delete_user_setting(telegram_id, "base_reminder_time")
+        snapshot = await member_settings_snapshot(db, settings, telegram_id)
+        banner = time_banner(snapshot.time, default=True)
+    else:
+        normalized = parse_time_loose(message.text)
+        if normalized is None:
+            await note_typo(message, state, TIME_TYPO_HINT)
+            return
+        await db.set_user_setting(telegram_id, "base_reminder_time", normalized)
+        banner = time_banner(normalized)
+    flow_data = await finish_prompt(message, state)
+    await _show_public_settings_on_origin(
+        message.bot, message.chat.id, db, settings, telegram_id, flow_data, banner=banner
+    )
 
 
 @public_router.message(PublicSettingsForm.base_timezone)
@@ -1072,19 +1479,30 @@ async def handle_public_settings_timezone_input(
     db: Database,
     settings: Settings,
 ) -> None:
+    """The typed timezone ('asia/dubai', 'UTC+3'; 'default' resets it); see the time input."""
     if not message.from_user:
-        await state.clear()
-        await message.answer("Unable to identify your account.")
+        await reset_flow_state(state)
+        await _answer_no_identity(message)
         return
-    raw_value = (message.text or "").strip()
-    normalized = normalize_timezone_name(raw_value)
-    if normalized is None:
-        await message.answer("Unsupported timezone. Example: Europe/Moscow.")
+    if message.text is None:
+        await note_typo(message, state, TIMEZONE_NOT_TEXT_HINT)
         return
-    await db.set_user_setting(message.from_user.id, "timezone", normalized)
-    await state.clear()
-    await message.answer("Timezone updated.", reply_markup=public_reply_keyboard())
-    await _show_public_settings_menu(message, db, settings, message.from_user.id)
+    telegram_id = message.from_user.id
+    if is_default_word(message.text):
+        await db.delete_user_setting(telegram_id, "timezone")
+        snapshot = await member_settings_snapshot(db, settings, telegram_id)
+        banner = timezone_banner(snapshot.timezone, default=True)
+    else:
+        normalized = parse_timezone_loose(message.text)
+        if normalized is None:
+            await note_typo(message, state, TIMEZONE_TYPO_HINT)
+            return
+        await db.set_user_setting(telegram_id, "timezone", normalized)
+        banner = timezone_banner(normalized)
+    flow_data = await finish_prompt(message, state)
+    await _show_public_settings_on_origin(
+        message.bot, message.chat.id, db, settings, telegram_id, flow_data, banner=banner
+    )
 
 
 @public_router.message(PublicAccountForm.full_name)
@@ -1093,42 +1511,40 @@ async def handle_public_account_rename_input(
     state: FSMContext,
     db: Database,
 ) -> None:
+    """The typed display name. A typo keeps the prompt and gets a one-line hint.
+
+    Success edits the account message the prompt came from with the banner
+    '✅ Renamed · <b>Name</b>' (a new account message when that one is gone),
+    then removes the prompt, the hints and the typed messages.
+    """
     if not message.from_user:
-        await state.clear()
-        await message.answer("Unable to identify your account.")
+        await reset_flow_state(state)
+        await _answer_no_identity(message)
+        return
+    if message.text is None:
+        await note_typo(message, state, RENAME_NOT_TEXT_HINT)
         return
     normalized_name, error_message = validate_person_name(message.text)
-    if error_message:
-        await message.answer(error_message)
+    if error_message or not normalized_name:
+        await note_typo(message, state, error_message or RENAME_NOT_TEXT_HINT)
         return
-    friend = await db.get_friend_by_telegram(message.from_user.id)
+    telegram_id = message.from_user.id
+    friend = await db.get_friend_by_telegram(telegram_id)
     if not friend:
-        await state.clear()
-        await message.answer(
-            "Your profile is not set up yet. Ask an admin to add you to the users list.",
-            reply_markup=public_reply_keyboard(),
-        )
+        await finish_prompt(message, state)
+        await message.answer(ACCOUNT_NOT_SET_UP_TEXT, reply_markup=guest_reply_keyboard())
         return
     await db.update_friend_name(int(friend["id"]), normalized_name)
-    await state.clear()
-    await message.answer("Name updated.", reply_markup=public_reply_keyboard())
-    await send_public_account_detail(message, db, message.from_user.id)
-
-
-async def send_admin_help(message: Message) -> None:
-    text = (
-        "ℹ️ PingSubs helps you manage shared subscriptions, users, and payment reminders.\n\n"
-        "Buttons:\n"
-        "👥 Users — add, edit, and remove users.\n"
-        "📋 Subscriptions — manage plans and reminders.\n"
-        "📊 Reports — payment summaries.\n"
-        "💳 Payment — top-up routes and manual approvals.\n"
-        "⚙️ Settings — bot configuration.\n\n"
-        "Commands:\n"
-        "/start — start the bot.\n"
-        "/help — show this help."
-    )
-    await message.answer(text, reply_markup=admin_reply_keyboard())
+    flow_data = await finish_prompt(message, state)
+    from_push = flow_data.get(ORIGIN_SCREEN) == ACCOUNT_NEW_ORIGIN
+    screen = await account_screen(db, telegram_id, banner=renamed_banner(normalized_name), close=from_push)
+    if screen is None:
+        return
+    text, markup = screen
+    origin = origin_of(flow_data)
+    if origin is not None and await edit_in_place(message.bot, origin[0], origin[1], text, markup):
+        return
+    await message.answer(text, reply_markup=markup)
 
 
 # Close and Cancel are registered on public_router only: it runs first and
@@ -1172,209 +1588,240 @@ async def handle_payments_report(message: Message, db: Database) -> None:
     await send_admin_report(message, db)
 
 
-async def _settings_menu_text(settings: Settings) -> str:
-    return (
-        "⚙️ Settings:\n\n"
-        "⏰ Time:\n"
-        f"Base time: <code>{html.escape(settings.base_reminder_time)}</code>\n\n"
-        "🌍 Timezone:\n"
-        f"Timezone: <code>{html.escape(settings.base_timezone)}</code>\n\n"
-        "🔢 Rounding:\n"
-        f"Rounding: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>"
-    )
+# ------------------------------------------------------ admin settings (WP11)
+#
+# ⚙️ Settings is a top-level screen (no nav row). Its pickers edit the same
+# message and return to it with a toast; the ✏️ prompts edit the screen they
+# came from into ⚙️ Settings with a result banner. The defaults live in the
+# database and in the shared in-memory ``settings`` (the reminder worker and
+# the converter read the latter), so a change writes both.
+
+_ADMIN_SETTINGS_PROMPT_STATES = frozenset({SettingsForm.base_time.state, SettingsForm.base_timezone.state})
+ADMIN_SETTINGS_ORIGIN = "admin_settings"
 
 
-@admin_router.message(F.text == "⚙️ Settings")
-async def handle_settings_menu(message: Message, settings: Settings) -> None:
-    await message.answer(await _settings_menu_text(settings), reply_markup=admin_settings_keyboard())
+async def _show_admin_settings(
+    target: CallbackQuery | Message,
+    db: Database,
+    settings: Settings,
+    *,
+    toast: str | None = None,
+    banner: str | None = None,
+) -> None:
+    """Edit the tapped message into ⚙️ Settings (a typed tap sends it), answering once."""
+    text, markup = await admin_settings_screen(db, settings, banner=banner)
+    await respond_with_markup(target, text, reply_markup=markup, toast=toast)
+
+
+async def _show_admin_settings_on_origin(
+    bot: Bot,
+    chat_id: int,
+    db: Database,
+    settings: Settings,
+    flow_data: dict,
+    *,
+    banner: str,
+) -> None:
+    """A prompt finished: the screen it came from becomes ⚙️ Settings with ``banner``.
+
+    When that screen is gone (or unknown after a restart), it is sent anew.
+    """
+    text, markup = await admin_settings_screen(db, settings, banner=banner)
+    origin = origin_of(flow_data)
+    if origin is not None and await edit_in_place(bot, origin[0], origin[1], text, markup):
+        return
+    await bot.send_message(chat_id, text, reply_markup=markup)
+
+
+async def _admin_settings_picked(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    settings: Settings,
+    *,
+    toast: str,
+    banner: str | None = None,
+) -> None:
+    """A preset was saved: back to ⚙️ Settings with ``banner`` and ``toast``; a pending ✏️ prompt goes."""
+    message = callback.message
+    if (
+        callback.bot is not None
+        and message is not None
+        and await state.get_state() in _ADMIN_SETTINGS_PROMPT_STATES
+    ):
+        await wind_down(callback.bot, message.chat.id, await reset_flow_state(state))
+    await _show_admin_settings(callback, db, settings, toast=toast, banner=banner)
+
+
+async def _save_admin_time(db: Database, settings: Settings, value: str) -> None:
+    settings.base_reminder_time = value
+    await db.set_setting("base_reminder_time", value)
+
+
+async def _save_admin_timezone(db: Database, settings: Settings, zone: str) -> None:
+    settings.base_timezone = zone
+    await db.set_setting("base_timezone", zone)
 
 
 @admin_router.callback_query(F.data == "settings:menu")
-async def handle_settings_menu_callback(callback: CallbackQuery, settings: Settings) -> None:
-    if callback.message:
-        await callback.message.edit_text(
-            await _settings_menu_text(settings),
-            reply_markup=admin_settings_keyboard(),
-        )
-    await callback.answer()
+async def handle_settings_menu_callback(callback: CallbackQuery, db: Database, settings: Settings) -> None:
+    await _show_admin_settings(callback, db, settings)
 
 
 @admin_router.callback_query(F.data == "settings:time")
-async def handle_settings_time(callback: CallbackQuery, settings: Settings) -> None:
-    text = (
-        "⏰ Base time:\n"
-        "\n"
-        f"Current: <code>{html.escape(settings.base_reminder_time)} ({html.escape(settings.base_timezone)})</code>\n"
-        f"Your local time: {tg_clock(settings.base_reminder_time, settings.base_timezone)}\n"
-        "\n"
-        "Choose a value:"
+async def handle_settings_time(callback: CallbackQuery, db: Database, settings: Settings) -> None:
+    """⏰ Reminder time: the picker, edited over ⚙️ Settings."""
+    snapshot = await admin_settings_snapshot(db, settings)
+    await respond_with_markup(
+        callback,
+        admin_reminder_time_text(snapshot),
+        reply_markup=settings_time_keyboard(snapshot.time),
     )
-    if callback.message:
-        await callback.message.edit_text(
-            text,
-            reply_markup=settings_time_keyboard(settings.base_reminder_time),
-        )
-    await callback.answer()
 
 
 @admin_router.callback_query(F.data == "settings:time_other")
-async def handle_settings_time_other(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(SettingsForm.base_time)
-    if callback.message:
-        await callback.message.answer(
-            "⏰ Base time:\n"
-            "\n"
-            "Send time in <code>HH:MM</code>.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+async def handle_settings_time_other(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    settings: Settings,
+) -> None:
+    """✏️ Other time: a prompt; the picker is the screen to redraw."""
+    if not isinstance(callback.message, Message):
+        await answer_callback_once(callback, SETTINGS_REOPEN_ALERT, alert=True)
+        return
+    snapshot = await admin_settings_snapshot(db, settings)
+    await ask(
+        callback,
+        state,
+        SettingsForm.base_time,
+        admin_time_prompt(snapshot.timezone),
+        origin_screen=ADMIN_SETTINGS_ORIGIN,
+    )
 
 
 @admin_router.callback_query(F.data == "settings:timezone")
-async def handle_settings_timezone(callback: CallbackQuery, settings: Settings) -> None:
-    text = (
-        "🌍 Timezone:\n"
-        "\n"
-        f"Current: <code>{html.escape(settings.base_timezone)}</code>\n"
-        "\n"
-        "Choose a value:"
+async def handle_settings_timezone(callback: CallbackQuery, db: Database, settings: Settings) -> None:
+    """🌍 Timezone: city presets, edited over ⚙️ Settings."""
+    snapshot = await admin_settings_snapshot(db, settings)
+    await respond_with_markup(
+        callback,
+        admin_timezone_text(snapshot),
+        reply_markup=settings_timezone_keyboard(snapshot.timezone),
     )
-    if callback.message:
-        await callback.message.edit_text(
-            text,
-            reply_markup=settings_timezone_keyboard(settings.base_timezone),
-        )
-    await callback.answer()
 
 
 @admin_router.callback_query(F.data == "settings:timezone_other")
 async def handle_settings_timezone_other(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(SettingsForm.base_timezone)
-    if callback.message:
-        await callback.message.answer(
-            "🌍 Timezone:\n"
-            "\n"
-            "Send an IANA timezone.\n"
-            "Examples: <code>Europe/Moscow</code>, <code>America/New_York</code>.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+    """✏️ Other timezone: a prompt; the picker is the screen to redraw."""
+    if not isinstance(callback.message, Message):
+        await answer_callback_once(callback, SETTINGS_REOPEN_ALERT, alert=True)
+        return
+    await ask(
+        callback,
+        state,
+        SettingsForm.base_timezone,
+        ADMIN_TIMEZONE_PROMPT,
+        origin_screen=ADMIN_SETTINGS_ORIGIN,
+    )
 
 
 @admin_router.callback_query(F.data.startswith("settings_timezone:"))
 async def handle_settings_timezone_select(
     callback: CallbackQuery,
+    state: FSMContext,
     settings: Settings,
     db: Database,
 ) -> None:
     raw_value = callback.data.split(":", 1)[1].strip()
     normalized = normalize_timezone_name(raw_value)
     if normalized is None:
-        await callback.answer("Unsupported timezone.", show_alert=True)
+        await _show_admin_settings(callback, db, settings, toast=DEAD_BUTTON)
         return
-    settings.base_timezone = normalized
-    await db.set_setting("base_timezone", normalized)
-    await callback.answer(f"Timezone set to {normalized}")
-    if callback.message:
-        await callback.message.edit_text(
-            await _settings_menu_text(settings),
-            reply_markup=admin_settings_keyboard(),
-        )
+    await _save_admin_timezone(db, settings, normalized)
+    await _admin_settings_picked(
+        callback, state, db, settings, toast=timezone_toast(normalized), banner=timezone_banner(normalized)
+    )
 
 
 @admin_router.callback_query(F.data.startswith("settings_time:"))
 async def handle_settings_time_select(
     callback: CallbackQuery,
+    state: FSMContext,
     settings: Settings,
     db: Database,
 ) -> None:
     raw_value = callback.data.split(":", 1)[1].strip()
     normalized = normalize_time_string(raw_value)
     if normalized is None:
-        await callback.answer("Time must be HH:MM.", show_alert=True)
+        await _show_admin_settings(callback, db, settings, toast=DEAD_BUTTON)
         return
-    settings.base_reminder_time = normalized
-    await db.set_setting("base_reminder_time", normalized)
-    await callback.answer(f"Base time set to {normalized}")
-    if callback.message:
-        await callback.message.edit_text(
-            await _settings_menu_text(settings),
-            reply_markup=admin_settings_keyboard(),
-        )
-
-
-def _rounding_label(mode: str) -> str:
-    labels = {
-        "precise": "With cents",
-        "floor": "Round down",
-        "round": "Round correctly",
-        "ceil": "Round up",
-    }
-    return labels.get(mode, "With cents")
+    await _save_admin_time(db, settings, normalized)
+    await _admin_settings_picked(
+        callback, state, db, settings, toast=time_toast(normalized), banner=time_banner(normalized)
+    )
 
 
 @admin_router.callback_query(F.data == "settings:rounding")
-async def handle_settings_rounding(callback: CallbackQuery, settings: Settings) -> None:
-    text = (
-        "🔢 Rounding:\n"
-        "\n"
-        f"Current: <code>{html.escape(_rounding_label(settings.currency_rounding))}</code>\n"
-        "\n"
-        "Choose a mode:"
+async def handle_settings_rounding(callback: CallbackQuery, db: Database, settings: Settings) -> None:
+    """🔢 Rounding: four radio options, edited over ⚙️ Settings."""
+    snapshot = await admin_settings_snapshot(db, settings)
+    await respond_with_markup(
+        callback,
+        admin_rounding_text(snapshot),
+        reply_markup=settings_rounding_keyboard(snapshot.rounding),
     )
-    if callback.message:
-        await callback.message.edit_text(
-            text,
-            reply_markup=settings_rounding_keyboard(settings.currency_rounding),
-        )
-    await callback.answer()
 
 
 @admin_router.callback_query(F.data.startswith("settings_rounding:"))
 async def handle_settings_rounding_select(
     callback: CallbackQuery,
+    state: FSMContext,
     settings: Settings,
     db: Database,
 ) -> None:
     raw_value = callback.data.split(":", 1)[1].strip().lower()
-    if raw_value not in {"precise", "floor", "round", "ceil"}:
-        await callback.answer("Unsupported rounding mode.", show_alert=True)
+    if raw_value not in ROUNDING_MODES:
+        await _show_admin_settings(callback, db, settings, toast=DEAD_BUTTON)
         return
     settings.currency_rounding = raw_value
     await db.set_setting("currency_rounding", raw_value)
-    await callback.answer(f"Rounding set to {_rounding_label(raw_value)}")
-    if callback.message:
-        await callback.message.edit_text(
-            await _settings_menu_text(settings),
-            reply_markup=admin_settings_keyboard(),
-        )
+    await _admin_settings_picked(
+        callback, state, db, settings, toast=rounding_toast(raw_value), banner=rounding_banner(raw_value)
+    )
+
+
+async def _show_admin_notifications(
+    callback: CallbackQuery,
+    db: Database,
+    settings: Settings,
+    *,
+    toast: str | None = None,
+) -> None:
+    snapshot = await admin_settings_snapshot(db, settings)
+    await respond_with_markup(
+        callback,
+        NOTIFICATIONS_SCREEN_TEXT,
+        reply_markup=settings_notifications_keyboard(*snapshot.notifications),
+        toast=toast,
+    )
 
 
 @admin_router.callback_query(F.data == "settings:notifications")
-async def handle_settings_notifications(callback: CallbackQuery, db: Database) -> None:
-    reminders_enabled = await db.get_setting_bool("notify_admin_reminders", True)
-    paid_enabled = await db.get_setting_bool("notify_admin_paid", True)
-    closed_enabled = await db.get_setting_bool("notify_admin_closed", True)
-    text = "Notifications:\nChoose admin notification events:"
-    if callback.message:
-        await callback.message.edit_text(
-            text,
-            reply_markup=settings_notifications_keyboard(
-                reminders_enabled,
-                paid_enabled,
-                closed_enabled,
-            ),
-        )
-    await callback.answer()
+async def handle_settings_notifications(callback: CallbackQuery, db: Database, settings: Settings) -> None:
+    """🔔 Admin notifications: one toggle per event, each saves at once."""
+    await _show_admin_notifications(callback, db, settings)
 
 
 @admin_router.callback_query(F.data == "settings:tests")
 async def handle_settings_tests(callback: CallbackQuery, db: Database) -> None:
+    """🧪 Send a test reminder: straight to the person picker (the one-action menu is gone)."""
     await send_settings_tests_menu(callback, db)
 
 
 @admin_router.callback_query(F.data == "tests:send")
 async def handle_test_send_menu(callback: CallbackQuery, db: Database) -> None:
+    """The old tests menu's only button (kept for old messages): the same picker."""
     await send_test_user_list(callback, db)
 
 
@@ -1388,26 +1835,36 @@ async def handle_test_list_page(
 
 
 @admin_router.callback_query(TestSendAction.filter())
-async def handle_test_reminder_send(
+async def handle_test_reminder_send(callback: CallbackQuery, **data: Any) -> None:
+    """🧪 A test reminder to one person, guarded against double taps.
+
+    The picker stays on the page that was tapped and is redrawn inside the
+    guard. All handler data is passed on, so ``_send_test_reminder`` may ask
+    for any of it (``settings`` for the rounding, for example).
+    """
+    callback_data: TestSendAction = data["callback_data"]
+    async with guarded(callback, ("testsend", callback_data.telegram_id)) as acquired:
+        if not acquired:
+            return
+        await _send_test_reminder(callback, **data)
+
+
+async def _send_test_reminder(
     callback: CallbackQuery,
     callback_data: TestSendAction,
     bot: Bot,
     db: Database,
     converter: CurrencyConverter,
+    **_unused: Any,
 ) -> None:
-    friends = await db.list_friends()
+    people = admin_test_people(await db.list_friends())
     person = next(
-        (
-            friend
-            for friend in friends
-            if friend.get("telegram_id") is not None
-            and int(friend["telegram_id"]) == callback_data.telegram_id
-        ),
+        (friend for friend in people if int(friend["telegram_id"]) == callback_data.telegram_id),
         None,
     )
     if person is None:
-        await callback.answer("This user no longer exists.", show_alert=True)
-        await send_test_user_list(callback, db)
+        page = admin_tests_shown_page(callback.message)
+        await stale_redirect(callback, USER_GONE, lambda: send_test_user_list(callback, db, page=page))
         return
 
     full_name = str(person.get("full_name") or "Unknown")
@@ -1502,43 +1959,33 @@ async def handle_test_reminder_send(
         logger=logger,
     )
     if sent_message_id is None:
-        await callback.answer("Could not deliver the test message. Try again.", show_alert=True)
+        await answer_callback_once(callback, admin_test_failed_alert(full_name), alert=True)
         return
-    await callback.answer("Test message sent.")
-    await send_test_user_list(callback, db)
+    banner = admin_test_sent_banner(full_name)
+    await send_test_user_list(
+        callback,
+        db,
+        page=admin_test_page_of(people, callback_data.telegram_id) or 1,
+        banner=banner,
+        toast=toast_from_html(banner),
+    )
 
 
 @admin_router.callback_query(F.data.startswith("settings_notify:"))
 async def handle_settings_notifications_toggle(
     callback: CallbackQuery,
     db: Database,
+    settings: Settings,
 ) -> None:
+    """A toggle saves at once, redraws the same screen and toasts 'Payment recorded: on'."""
     raw_value = callback.data.split(":", 1)[1].strip().lower()
-    key_map = {
-        "reminders": "notify_admin_reminders",
-        "paid": "notify_admin_paid",
-        "closed": "notify_admin_closed",
-    }
-    setting_key = key_map.get(raw_value)
+    setting_key = ADMIN_NOTIFY_KEYS.get(raw_value)
     if setting_key is None:
-        await callback.answer("Unsupported option.", show_alert=True)
+        await _show_admin_notifications(callback, db, settings, toast=DEAD_BUTTON)
         return
-    current = await db.get_setting_bool(setting_key, True)
-    await db.set_setting(setting_key, "false" if current else "true")
-
-    reminders_enabled = await db.get_setting_bool("notify_admin_reminders", True)
-    paid_enabled = await db.get_setting_bool("notify_admin_paid", True)
-    closed_enabled = await db.get_setting_bool("notify_admin_closed", True)
-    if callback.message:
-        await callback.message.edit_text(
-            "Notifications:\nChoose admin notification events:",
-            reply_markup=settings_notifications_keyboard(
-                reminders_enabled,
-                paid_enabled,
-                closed_enabled,
-            ),
-        )
-    await callback.answer()
+    enabled = not await db.get_setting_bool(setting_key, True)
+    await db.set_setting(setting_key, "true" if enabled else "false")
+    await _show_admin_notifications(callback, db, settings, toast=notification_toast(raw_value, enabled))
 
 
 @admin_router.message(SettingsForm.base_time)
@@ -1548,17 +1995,23 @@ async def handle_settings_time_input(
     settings: Settings,
     db: Database,
 ) -> None:
-    raw_value = (message.text or "").strip()
-    normalized = normalize_time_string(raw_value)
-    if normalized is None:
-        await message.answer("Time must be in HH:MM format, for example 16:00.")
+    """The typed default time ('9', '09.30', '1630').
+
+    A typo keeps the prompt and gets a one-line hint. Success edits the
+    screen the prompt came from into ⚙️ Settings with a banner, then removes
+    the prompt, the hints and the typed messages.
+    """
+    if message.text is None:
+        await note_typo(message, state, TIME_NOT_TEXT_HINT)
         return
-    settings.base_reminder_time = normalized
-    await db.set_setting("base_reminder_time", normalized)
-    await state.clear()
-    await message.answer(
-        f"Base time set to {normalized}.",
-        reply_markup=admin_reply_keyboard(),
+    normalized = parse_time_loose(message.text)
+    if normalized is None:
+        await note_typo(message, state, TIME_TYPO_HINT)
+        return
+    await _save_admin_time(db, settings, normalized)
+    flow_data = await finish_prompt(message, state)
+    await _show_admin_settings_on_origin(
+        message.bot, message.chat.id, db, settings, flow_data, banner=time_banner(normalized)
     )
 
 
@@ -1569,15 +2022,16 @@ async def handle_settings_timezone_input(
     settings: Settings,
     db: Database,
 ) -> None:
-    raw_value = (message.text or "").strip()
-    normalized = normalize_timezone_name(raw_value)
-    if normalized is None:
-        await message.answer("Unsupported timezone. Example: Europe/Moscow.")
+    """The typed timezone ('asia/dubai', 'UTC+3'); see the time input."""
+    if message.text is None:
+        await note_typo(message, state, TIMEZONE_NOT_TEXT_HINT)
         return
-    settings.base_timezone = normalized
-    await db.set_setting("base_timezone", normalized)
-    await state.clear()
-    await message.answer(
-        f"Timezone set to {normalized}.",
-        reply_markup=admin_reply_keyboard(),
+    normalized = parse_timezone_loose(message.text)
+    if normalized is None:
+        await note_typo(message, state, TIMEZONE_TYPO_HINT)
+        return
+    await _save_admin_timezone(db, settings, normalized)
+    flow_data = await finish_prompt(message, state)
+    await _show_admin_settings_on_origin(
+        message.bot, message.chat.id, db, settings, flow_data, banner=timezone_banner(normalized)
     )

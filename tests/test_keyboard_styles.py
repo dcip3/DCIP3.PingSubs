@@ -22,7 +22,6 @@ from app.ui.keyboards import (
     reminder_settings_keyboard,
     settings_tests_keyboard,
     subscription_user_amounts_keyboard,
-    tests_menu_keyboard,
     user_amount_clear_keyboard,
 )
 from keyboard_guard import install_keyboard_guard
@@ -111,8 +110,10 @@ class PrimaryActionTests(unittest.TestCase):
         paid = reminder_send_targets_keyboard(3, [{"full_name": "Anna", "telegram_id": 42, "status": "paid"}])
         self.assertEqual([button for button in _buttons(paid) if button.get("style")], [])
 
-    def test_send_test_reminders_is_the_primary_action(self):
-        self._assert_single_primary(tests_menu_keyboard(), "📬 Send test reminders")
+    def test_test_reminder_picker_has_no_styled_button(self):
+        # The one-action tests menu is gone (WP11): ⚙️ Settings opens the person picker directly.
+        markup = settings_tests_keyboard([{"full_name": "Anna", "telegram_id": 42}], page=1, total_pages=2)
+        self.assertEqual([button for button in _buttons(markup) if button.get("style")], [])
 
 
 class DeleteConfirmationTests(unittest.TestCase):
@@ -251,8 +252,7 @@ class PaginationRowTests(unittest.TestCase):
         self.assertEqual(
             rows[-1],
             [
-                {"text": "⬅️ Back", "callback_data": "settings:tests"},
-                {"text": "✖️ Close", "callback_data": "menu:close"},
+                {"text": "◀️ Back", "callback_data": "settings:menu"},
             ],
         )
 

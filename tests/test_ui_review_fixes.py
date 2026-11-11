@@ -21,20 +21,47 @@ from aiogram.types import Chat, InaccessibleMessage, InlineKeyboardButton, Inlin
 from app.core.reminders import tg_due
 from app.handlers.subscriptions import PAST_DATE_HINT
 from app.services import CurrencyConverter
+from app.ui import guards, member_subscriptions
 from app.ui import helpers
-from app.ui.helpers import build_subscription_card, edit_in_place, split_text_chunks
-from app.ui.keyboards import CLOSE_CALLBACK, guest_reply_keyboard, public_reply_keyboard
+from app.ui.helpers import (
+    CYCLE_CLOSED,
+    _format_report_distance,
+    build_subscription_card,
+    edit_in_place,
+    split_text_chunks,
+)
+from app.ui.keyboards import (
+    CLOSE_CALLBACK,
+    CURRENCY_OPTIONS,
+    guest_reply_keyboard,
+    member_balance_currency_keyboard,
+    new_subscription_keyboard,
+    payment_wizard_keyboard,
+    public_reply_keyboard,
+    subscription_base_currency_keyboard,
+    subscription_currency_keyboard,
+)
+from app.ui.member_screens import member_list_screen
+from app.ui.member_subscriptions import (
+    ALREADY_PAID_TOAST,
+    CARD_UPDATED_TOAST,
+    member_card_snapshot,
+    member_card_text,
+)
 from app.ui.prompts import REOPEN_SCREEN_ALERT
+from app.ui.report_screens import close_confirm_text, recreate_confirm_text
 from app.ui.shell import JOIN_ALREADY_LINKED_TEXT
-from app.ui.style import expandable, visible_len
+from app.ui.style import NBSP, expandable, visible_len
 from app.ui.text import escape_html, parse_amount, parse_date_loose
 from dispatcher_harness import RealDispatcherTestCase
 from keyboard_guard import install_keyboard_guard
-from telegram_fakes import CHAT_ID, FakeBot, make_callback, make_message
+from telegram_fakes import CHAT_ID, USER_ID, FakeBot, make_callback, make_message
+from test_keyboards_fit import assert_fits
 
 install_keyboard_guard()
 
 OTHER_ADMIN = 9001
+BOB_ID = 5002
 TZ = "Europe/Moscow"
 
 
@@ -148,6 +175,100 @@ class OldCardReportsTests(_Case):
         self.assertTrue(self.bot.of(EditMessageText)[-1].text.startswith("🏷️ <b>Netflix</b>"))
 
 
+# ============================================================ card Paid
+
+
+class CardPaidTests(_Case):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        await self.make_admin(OTHER_ADMIN)
+        self.anna = await self._friend("Anna Petrova", USER_ID)
+        self.bob = await self._friend("Bob", BOB_ID)
+        self.old = self.today - timedelta(days=10)
+        self.new = self.today - timedelta(days=3)
+        self.netflix = await self.db.create_subscription("Netflix", 30.0, "USD", self.today + timedelta(days=20), 30, None)
+        for friend_id in (self.anna, self.bob):
+            await self.db.set_participant(self.netflix, friend_id, True)
+        await self.db.ensure_cycle(self.netflix, self.old)
+        await self.db.ensure_cycle(self.netflix, self.new)
+
+    async def _paid_ids(self, due: date) -> set[int]:
+        rows = await self.db.list_payments_for_cycles(self.netflix, [due.isoformat()])
+        return {int(row["paid_by_telegram_id"]) for row in rows if row.get("paid_by_telegram_id") is not None}
+
+    def _admin_pushes(self) -> list[SendMessage]:
+        return [call for call in self.bot.of(SendMessage) if int(call.chat_id) == OTHER_ADMIN]
+
+    async def test_a_stale_paid_never_pays_a_newer_cycle(self):
+        # The card said [✅ Paid · <old>]; the old cycle was paid from the reminder meanwhile.
+        await self.db.log_payment(self.netflix, self.old, USER_ID)
+        await self.feed(self.callback(f"cycle:public_paid:{self.netflix}:{self.old.isoformat()}", self._screen()))
+        self.assertEqual(await self._paid_ids(self.new), set(), "the newer cycle stays unpaid")
+        self.assertEqual(self._answers()[-1], ALREADY_PAID_TOAST)
+        self.assertEqual(self._admin_pushes(), [])
+        # The redrawn card offers the cycle that is really due now.
+        edit = self.bot.of(EditMessageText)[-1]
+        self.assertEqual(
+            edit.reply_markup.inline_keyboard[0][0].callback_data,
+            f"cycle:public_paid:{self.netflix}:{self.new.isoformat()}",
+        )
+
+    async def test_paid_on_a_closed_cycle_records_nothing(self):
+        gone = self.today - timedelta(days=40)
+        await self.feed(self.callback(f"cycle:public_paid:{self.netflix}:{gone.isoformat()}", self._screen()))
+        self.assertEqual(self._answers()[-1], CYCLE_CLOSED)
+        self.assertEqual(await self._paid_ids(self.old), set())
+        self.assertEqual(await self._paid_ids(self.new), set())
+
+    async def test_paid_pays_exactly_the_cycle_on_the_button(self):
+        await self.feed(self.callback(f"cycle:public_paid:{self.netflix}:{self.new.isoformat()}", self._screen()))
+        self.assertEqual(await self._paid_ids(self.new), {USER_ID})
+        self.assertEqual(await self._paid_ids(self.old), set())
+        self.assertEqual(len(self._admin_pushes()), 1)
+
+    async def test_the_undated_legacy_paid_only_redraws_the_card(self):
+        await self.feed(self.callback(f"sub:public_paid:{self.netflix}", self._screen()))
+        self.assertEqual(self._answers()[-1], CARD_UPDATED_TOAST)
+        self.assertEqual(await self._paid_ids(self.old), set())
+        self.assertEqual(await self._paid_ids(self.new), set())
+        self.assertTrue(self.bot.of(EditMessageText)[-1].text.startswith("🏷️ <b>Netflix</b>"))
+
+    async def test_reminder_and_card_share_one_guard_key(self):
+        key = guards.pay_cycle_key(self.netflix, self.old.isoformat(), USER_ID)
+        guards._in_progress.add(key)
+        try:
+            await self.feed(self.callback(f"remind:{self.netflix}:{self.old.isoformat()}", self._screen()))
+            await self.feed(self.callback(f"cycle:public_paid:{self.netflix}:{self.old.isoformat()}", self._screen()))
+        finally:
+            guards._in_progress.discard(key)
+        self.assertEqual(self._answers(), [guards.ALREADY_RUNNING_TEXT, guards.ALREADY_RUNNING_TEXT])
+        self.assertEqual(await self._paid_ids(self.old), set())
+
+    async def test_card_shows_what_the_balance_left_to_pay(self):
+        # A reminder spent part of the balance and stored the share left to pay.
+        await self.db.record_reminder_message(
+            subscription_id=self.netflix,
+            due_date=self.old.isoformat(),
+            telegram_id=USER_ID,
+            message_id=8001,
+            share_amount=5.0,
+            share_currency="USD",
+            converted_amount=None,
+            converted_currency=None,
+            converted_display=None,
+        )
+        card = await member_card_snapshot(self.db, self.netflix, USER_ID)
+        self.assertEqual((card.left_to_pay, card.from_balance), (5.0, 10.0))
+        text = member_card_text(card)
+        self.assertIn(f"Amount: <b>15.00{NBSP}USD</b>", text)
+        self.assertIn(f"Left to pay: <b>5.00{NBSP}USD</b> (10.00{NBSP}USD from balance)", text)
+        # Paying it from the card tells the admins the amount actually paid.
+        await self.feed(self.callback(f"cycle:public_paid:{self.netflix}:{self.old.isoformat()}", self._screen()))
+        (push,) = self._admin_pushes()
+        self.assertIn(f"5.00{NBSP}USD", push.text)
+        self.assertNotIn(f"15.00{NBSP}USD", push.text)
+
+
 # ======================================================= not-modified edits
 
 
@@ -259,6 +380,41 @@ class SpawnedCardTests(_Case):
         self.assertEqual(_texts(redrawn.reply_markup)[-1], ["✖️ Close"])
 
 
+# ======================================================= member reports' tz
+
+
+class MemberReportTimezoneTests(_Case):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        await self.make_admin(OTHER_ADMIN)
+        self.anna = await self._friend("Anna Petrova", USER_ID)
+        await self.db.set_user_setting(USER_ID, "timezone", "America/Los_Angeles")
+        self.netflix = await self.db.create_subscription("Netflix", 30.0, "USD", self.today + timedelta(days=5), 30, None)
+        await self.db.set_participant(self.netflix, self.anna, True)
+
+    async def test_subscription_report_uses_the_viewer_timezone(self):
+        builder = mock.AsyncMock(return_value="body")
+        with mock.patch.object(member_subscriptions, "_build_subscription_payment_report_text", builder):
+            await member_subscriptions.send_member_report(self._screen(), self.db, self.netflix, USER_ID)
+        self.assertEqual(builder.await_args.kwargs["tz_name"], "America/Los_Angeles")
+
+    async def test_own_reports_use_the_viewer_timezone(self):
+        items = mock.AsyncMock(return_value=[])
+        with mock.patch.object(helpers, "_build_user_payment_items", items):
+            await helpers.send_public_user_payment_report(make_message(self.bot, 50, "📊 Reports"), self.db, USER_ID)
+        self.assertEqual(items.await_args.args[2], "America/Los_Angeles")
+
+    def test_tomorrow_is_a_plain_word_in_reports(self):
+        today = date(2026, 11, 11)
+        tomorrow = today + timedelta(days=1)
+        self.assertEqual(_format_report_distance(tomorrow.isoformat(), tomorrow, today, TZ), "tomorrow")
+        self.assertEqual(_format_report_distance(today.isoformat(), today, today, TZ), "today")
+        later = today + timedelta(days=3)
+        self.assertEqual(
+            _format_report_distance(later.isoformat(), later, today, TZ), tg_due(later.isoformat(), TZ, "r", "in 3 days")
+        )
+
+
 # ================================================= inaccessible messages
 
 
@@ -318,6 +474,45 @@ class AdminCardBudgetTests(_Case):
         text, _ = await build_subscription_card(self.db, sub_id)
         self.assertLessEqual(visible_len(text), 4096)
         self.assertIn("(more in “💳 Payment”)", text)
+
+
+# =================================================== consistency and texts
+
+
+class ConsistencyTests(_Case):
+    def test_every_currency_picker_offers_the_same_codes_two_per_row(self):
+        expected = [list(CURRENCY_OPTIONS[:2]), list(CURRENCY_OPTIONS[2:])]
+        self.assertEqual(_texts(subscription_currency_keyboard(7, "CHF"))[:2], expected)
+        self.assertEqual(_texts(subscription_base_currency_keyboard(7, "CHF"))[:2], expected)
+        self.assertEqual(_texts(member_balance_currency_keyboard(7, "CHF"))[:2], expected)
+        self.assertEqual(_texts(payment_wizard_keyboard(2))[:2], expected)
+
+    def test_empty_reports_offer_a_new_subscription(self):
+        markup = new_subscription_keyboard()
+        assert_fits(markup)
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data, "sub:create:0")
+
+    def test_cycle_questions_for_a_cycle_without_participants(self):
+        self.assertTrue(close_confirm_text("2026-10-01", "UTC", [], participants=0).endswith("Nobody is in this cycle; it is just closed."))
+        self.assertTrue(close_confirm_text("2026-10-01", "UTC", [], participants=2).endswith("Everyone has paid; nobody is marked."))
+        recreate = recreate_confirm_text("2026-10-01", "UTC", 1, 0)
+        self.assertTrue(recreate.endswith("Its 1 payment mark is cleared; it takes the current settings and will have no participants."))
+        self.assertNotIn("0 people", recreate)
+
+    async def test_users_list_leads_with_unpaid_people(self):
+        await self.make_admin(OTHER_ADMIN)
+        anna = await self._friend("Anna", 5001)
+        zed = await self._friend("Zed", 5002)
+        sub_id = await self.db.create_subscription("Netflix", 10.0, "USD", self.today + timedelta(days=5), 30, None)
+        for friend_id in (anna, zed):
+            await self.db.set_participant(sub_id, friend_id, True)
+        overdue = self.today - timedelta(days=2)
+        await self.db.ensure_cycle(sub_id, overdue)
+        await self.db.log_payment(sub_id, overdue, 5001)
+        text, markup = await member_list_screen(self.db)
+        self.assertIn("⚠️ Unpaid: <b>1</b>", text)
+        self.assertEqual(_texts(markup)[1:3], [["⚠️ Zed · unpaid"], ["Anna"]])
+        assert_fits(markup)
 
 
 if __name__ == "__main__":

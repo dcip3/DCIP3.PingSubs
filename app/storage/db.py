@@ -1071,6 +1071,15 @@ class Database:
         rows = await cursor.fetchall()
         return [row[0] for row in rows]
 
+    async def get_admin_name(self, telegram_id: int) -> Optional[str]:
+        assert self._conn is not None, "Database is not connected"
+        cursor = await self._conn.execute(
+            "SELECT full_name FROM admins WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = await cursor.fetchone()
+        return str(row[0]) if row and row[0] else None
+
     async def is_admin(self, telegram_id: int) -> bool:
         assert self._conn is not None, "Database is not connected"
         cursor = await self._conn.execute(
@@ -1192,6 +1201,33 @@ class Database:
             ),
         )
         await self._conn.commit()
+
+    async def get_reminder_share_left(
+        self,
+        subscription_id: int,
+        due_date: date | str,
+        telegram_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """The smallest share any reminder of this cycle asked this person to pay.
+
+        Reminders store the share left after the balance covered part of it,
+        so this is what is still to pay by card (the balance is spent once).
+        ``None`` when no reminder for that cycle was recorded.
+        """
+        assert self._conn is not None, "Database is not connected"
+        due_value = due_date.isoformat() if isinstance(due_date, date) else str(due_date)
+        cursor = await self._conn.execute(
+            """
+            SELECT share_amount, share_currency
+            FROM reminder_messages
+            WHERE subscription_id = ? AND due_date = ? AND telegram_id = ?
+            ORDER BY share_amount ASC
+            LIMIT 1
+            """,
+            (subscription_id, due_value, telegram_id),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     async def get_reminder_message(
         self,

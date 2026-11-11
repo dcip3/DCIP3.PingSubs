@@ -54,3 +54,13 @@ async def guarded(callback: CallbackQuery | None, key: tuple[str, Hashable]) -> 
         yield True
     finally:
         _in_progress.discard(key)
+
+
+def pay_cycle_key(subscription_id: int, due_value: str, telegram_id: int) -> tuple[str, Hashable]:
+    """The one guard key for "this person pays this cycle".
+
+    The reminder's ✅ Paid and the member card's ✅ Paid record the same
+    payment, so they share this key: two near-simultaneous taps on both run
+    the payment (and the admin push) once.
+    """
+    return ("pay", (int(subscription_id), str(due_value), int(telegram_id)))
