@@ -9,6 +9,9 @@ from unittest.mock import AsyncMock
 
 from app.services import CurrencyConverter, _run_reminder_pass
 from app.storage.db import Database
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 
 class ReminderTests(unittest.IsolatedAsyncioTestCase):

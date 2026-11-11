@@ -20,6 +20,9 @@ from app.ui.helpers import (
     payments_report_header,
     split_text_chunks,
 )
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 TZ = "UTC"
 TODAY = date(2026, 9, 17)

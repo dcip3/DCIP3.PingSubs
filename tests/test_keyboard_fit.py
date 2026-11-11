@@ -21,6 +21,9 @@ from app.ui.keyboard_fit import (
     misplaced_back_buttons,
     row_budget,
 )
+from keyboard_guard import install_keyboard_guard, misplaced_back_ok
+
+install_keyboard_guard()
 
 
 def _button(text: str) -> InlineKeyboardButton:
@@ -140,6 +143,7 @@ class WayBackTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(is_back_button(text))
 
+    @misplaced_back_ok
     def test_misplaced_back_buttons_flags_a_way_back_right_of_an_action(self):
         markup = _inline(
             _row("✏️ Rename", "🗑 Delete"),

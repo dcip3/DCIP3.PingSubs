@@ -5,6 +5,9 @@ import unittest
 from zoneinfo import ZoneInfo
 
 from app.core.reminders import due_status_html, tg_clock, tg_due, tg_time
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 
 class TgTimeTests(unittest.TestCase):

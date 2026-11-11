@@ -33,6 +33,9 @@ from app.ui.helpers import (
     send_test_user_list,
     send_user_subscription_list,
 )
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 TZ = "UTC"
 MONEY_IN_CODE = re.compile(r"<code>[^<]*\d+\.\d{2} [A-Z]{3}[^<]*</code>")

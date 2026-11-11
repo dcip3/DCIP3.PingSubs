@@ -14,6 +14,9 @@ from datetime import date
 
 from app.ui.style import expandable
 from app.ui.text import escape_html, parse_amount, parse_date_loose
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 
 # ================================================================ input

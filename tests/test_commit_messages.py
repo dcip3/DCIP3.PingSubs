@@ -1,6 +1,9 @@
 import unittest
 
 from scripts.check_commit_messages import validate
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 
 class CommitMessageTests(unittest.TestCase):

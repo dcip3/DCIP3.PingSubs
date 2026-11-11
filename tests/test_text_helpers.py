@@ -50,6 +50,9 @@ from app.ui.text import (
     utc_offset_label,
     validate_person_name,
 )
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 
 class StyleTests(unittest.TestCase):

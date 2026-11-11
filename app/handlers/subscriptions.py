@@ -1542,16 +1542,16 @@ async def handle_subscription_delete_prompt(
 ) -> None:
     builder = InlineKeyboardBuilder()
     builder.button(
+        text="⬅️ Back",
+        callback_data=SubscriptionAction(action="more", subscription_id=callback_data.subscription_id).pack(),
+    )
+    builder.button(
         text="🗑 Yes, delete",
         callback_data=SubscriptionAction(
             action="confirm_delete",
             subscription_id=callback_data.subscription_id,
         ).pack(),
         style="danger",
-    )
-    builder.button(
-        text="⬅️ Back",
-        callback_data=SubscriptionAction(action="more", subscription_id=callback_data.subscription_id).pack(),
     )
     await callback.message.edit_text(
         "Are you sure you want to delete this subscription?",

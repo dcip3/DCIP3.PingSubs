@@ -13,6 +13,9 @@ from app.ui.keyboards import (
     is_openable_payment_link,
     topup_request_submit_keyboard,
 )
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 CARD_DETAILS = "Sber card 2202 2032 1234 5678\nAnna K."
 IBAN_DETAILS = "IBAN DE89370400440532013000 BIC COBADEFFXXX"

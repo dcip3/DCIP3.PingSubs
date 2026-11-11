@@ -6,6 +6,9 @@ import tempfile
 import unittest
 
 from app.storage.db import Database
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 
 class ImportTests(unittest.TestCase):

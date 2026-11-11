@@ -25,6 +25,9 @@ from app.ui.keyboards import (
     tests_menu_keyboard,
     user_amount_clear_keyboard,
 )
+from keyboard_guard import install_keyboard_guard
+
+install_keyboard_guard()
 
 NAV_TEXTS = {"⬅️ Back", "✖️ Close", "Next ▶️", "◀️", "▶️"}
 
