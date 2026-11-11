@@ -24,6 +24,7 @@ from app.core.config import Settings
 from app.error_handler import USER_ERROR_ALERT, USER_ERROR_TEXT
 from app.services import CurrencyConverter
 from app.storage.db import Database
+from app.ui.helpers import _SPAWNED_SCREENS
 from telegram_fakes import CHAT_ID, USER_ID, FakeBot, make_callback, make_message
 
 ADMIN_ID = USER_ID
@@ -80,6 +81,9 @@ class RealDispatcherTestCase(unittest.IsolatedAsyncioTestCase):
         _DB_PROXY.target = self.db
         self.dp = real_dispatcher()
         self.dp.fsm.storage.storage.clear()  # type: ignore[attr-defined]
+        # Card copies opened from pushes are remembered per (chat, message id);
+        # every FakeBot numbers its messages from 1000, so start each test afresh.
+        _SPAWNED_SCREENS.clear()
         self.bot = FakeBot()
 
     async def asyncTearDown(self) -> None:

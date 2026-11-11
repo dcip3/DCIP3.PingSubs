@@ -8,10 +8,8 @@ from aiogram import F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram import Bot
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.core.constants import (
-    DATE_INPUT_FORMAT,
     MONTHLY_PERIOD_SENTINEL,
     PAYMENT_MODE_FIXED,
     PAYMENT_MODE_SPLIT,
@@ -23,75 +21,117 @@ from app.ui.helpers import (
     payment_mode_prompt,
     period_prompt,
     require_edit_subscription_id,
-    send_participants_settings,
     send_pricing_settings,
     send_subscription_cycle_actions,
+    remember_spawned,
     send_subscription_more,
     send_subscription_open_cycles,
     send_subscription_payment_report,
-    send_subscription_user_amounts,
-    send_reminder_send_menu,
-    send_reminder_settings,
     send_subscription_detail,
     send_subscription_list,
-    send_subscription_payment_info,
     share_limit_prompt,
     start_subscription_edit_flow,
 )
 from app.ui.keyboards import (
-    admin_reply_keyboard,
     build_due_date_change_keyboard,
-    comment_edit_keyboard,
-    dialog_cancel_inline_keyboard,
-    subscription_payment_destination_keyboard,
     subscription_currency_keyboard,
     subscription_base_currency_keyboard,
-    subscription_reminder_time_keyboard,
-    user_amount_clear_keyboard,
 )
 from app.ui.states import (
     CycleAction,
     DueDateChangeAction,
-    ReminderSendAction,
     Responder,
     SubscriptionAction,
     SubscriptionEditForm,
     SubscriptionForm,
 )
 from app.core.reminders import (
-    DEFAULT_REMINDER_OFFSETS,
     calculate_next_charge_date,
-    format_due_date,
-    format_offsets_for_display,
     normalize_monthly_anchor_day,
-    normalize_time_string,
-    parse_offsets,
-    parse_time_string,
-    serialize_offsets,
 )
-from app.core.config import Settings
-from app.services import CurrencyConverter, send_reminders_now
 from app.ui.text import escape_html
 
 from . import admin_router
+
+# Admin subscription list, creation wizard, card, rename and delete (WP3).
+from collections import OrderedDict  # noqa: E402
+from datetime import date  # noqa: E402
+
+from aiogram.types import InlineKeyboardMarkup  # noqa: E402
+
+from app.core.reminders import parse_timezone, tg_due  # noqa: E402
+from app.ui.guards import guarded  # noqa: E402
+from app.ui.helpers import (  # noqa: E402
+    DEAD_BUTTON,
+    SUBSCRIPTION_GONE,
+    SUBSCRIPTION_GONE_BANNER,
+    answer_callback_once,
+    build_subscription_card,
+    delete_quietly,
+    edit_in_place,
+    resolve_report_timezone,
+    respond_with_markup,
+    show_card_after_prompt,
+    show_subscription_gone,
+)
+from app.ui.keyboards import (  # noqa: E402
+    SUBSCRIPTION_LIST_PAGE_PREFIX,
+    cancel_button,
+    subscription_delete_confirm_keyboard,
+)
+from app.ui.prompts import (  # noqa: E402
+    advance_wizard,
+    cancel_prompt,
+    finish_prompt,
+    finish_wizard,
+    note_typo,
+    reset_flow_state,
+    start_wizard,
+    wind_down,
+    wizard_of,
+)
+from app.ui.style import join_blocks, sub_line, title as screen_title, toast_from_html  # noqa: E402
+# Reports and cycles (WP8).
+from app.ui.keyboards import CYCLE_FORCE_CLOSE_YES, CYCLE_RECREATE_YES  # noqa: E402
+from app.ui.report_screens import (  # noqa: E402
+    CYCLE_RECREATED_BANNER,
+    cycle_closed_banner,
+    send_cycle_confirm,
+    show_cycle_closed,
+)
+# Pricing & schedule (WP4).
+from app.ui.helpers import (  # noqa: E402
+    build_pricing_screen,
+    show_pricing_after_prompt,
+    stale_redirect,
+    subscription_currency_of,
+    subscription_shown_in_of,
+)
+from app.ui.keyboards import build_period_keyboard  # noqa: E402
+from app.ui.prompts import origin_of  # noqa: E402
+from app.ui.text import format_payments, plural_word  # noqa: E402
+from app.ui.text import (  # noqa: E402
+    format_days,
+    format_money,
+    format_number,
+    parse_amount,
+    parse_currency,
+    parse_date_loose,
+    plural,
+)
 
 
 def _response_target(responder: Responder) -> Message:
     return responder.message if isinstance(responder, CallbackQuery) else responder
 
 
-def _parse_offset_input(text: str) -> Optional[List[int]]:
-    cleaned = text.replace(";", " ").replace(",", " ")
-    parts = [part for part in cleaned.split() if part]
-    if not parts:
-        return None
-    values: List[int] = []
-    for part in parts:
-        try:
-            values.append(int(part))
-        except ValueError:
-            return None
-    return values
+async def _drop_flow(callback: CallbackQuery, state: FSMContext) -> None:
+    """Leaving for another screen: wind the pending prompt or wizard down (never a bare clear)."""
+    old_data = await reset_flow_state(state)
+    message = callback.message
+    bot = callback.bot or (message.bot if message is not None else None)
+    if old_data and message is not None and bot is not None:
+        await wind_down(bot, message.chat.id, old_data, skip_message_id=message.message_id)
 
 
 async def _load_subscription(
@@ -99,9 +139,10 @@ async def _load_subscription(
     db: Database,
     subscription_id: int,
 ) -> Optional[Dict[str, object]]:
+    """The subscription, or ``None`` after redrawing the list with 'Subscription was deleted'."""
     subscription = await db.get_subscription(subscription_id)
     if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
+        await show_subscription_gone(callback, db)
         return None
     return subscription
 
@@ -117,7 +158,8 @@ async def _load_open_cycle(
         return None
     open_cycles = await db.list_open_cycles(subscription_id)
     if due_value not in open_cycles:
-        await callback.answer("This cycle is already closed.", show_alert=True)
+        # Stale, not an error: redraw the open cycles with 'This cycle is already closed'.
+        await show_cycle_closed(callback, db, subscription_id)
         return None
     return subscription
 
@@ -150,112 +192,345 @@ async def _advance_subscription_after_cycle_close(
     await db.update_subscription_fields(int(subscription["id"]), next_charge_at=next_due)
 
 
-async def _show_reminder_time_menu(
-    callback: CallbackQuery,
-    db: Database,
-    subscription_id: int,
-) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription or not callback.message:
-        return
-    base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
-    current_override = normalize_time_string(subscription.get("reminder_time"))
-    current_time = current_override or base_time
-    current_label = current_override or f"default ({base_time})"
-    await callback.message.edit_text(
-        "⏰ Reminder time:\n"
-        f"Current: <code>{escape_html(current_label)}</code>\n"
-        "\n"
-        "🌍 Applied in each recipient timezone.\n"
-        "Choose a value:",
-        reply_markup=subscription_reminder_time_keyboard(
-            subscription_id,
-            current_time,
-            base_time,
-        ),
-    )
-
-
-async def _show_subscription_currency_menu(
-    callback: CallbackQuery,
-    db: Database,
-    subscription_id: int,
-) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription or not callback.message:
-        return
-    current_currency = str(subscription.get("currency") or "RUB").strip().upper()
-    await callback.message.edit_text(
-        "💱 Currency:\n"
-        f"Current: <code>{escape_html(current_currency)}</code>\n"
-        "\n"
-        "Choose a value:",
-        reply_markup=subscription_currency_keyboard(
-            subscription_id,
-            current_currency,
-        ),
-    )
-
-
-async def _show_subscription_payment_destination_menu(
-    callback: CallbackQuery,
-    db: Database,
-    subscription_id: int,
-) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription or not callback.message:
-        return
-    destinations = await db.list_payment_destinations()
-    if not destinations:
-        await callback.message.edit_text(
-            "💳 Payment method:\nNo payment methods configured yet.",
-            reply_markup=subscription_payment_destination_keyboard(
-                subscription_id,
-                [],
-                None,
-                await db.get_default_payment_destination_id(),
-            ),
-        )
-        return
-    default_destination_id = await db.get_default_payment_destination_id()
+def currency_menu_text(subscription: Dict[str, object]) -> str:
+    """'💱 <b>Currency · Netflix</b>', the current code and the no-conversion warning."""
+    currency = subscription_currency_of(subscription)
     try:
-        selected_destination_id = (
-            int(subscription.get("payment_destination_id"))
-            if subscription.get("payment_destination_id") is not None
-            else None
-        )
+        amount = format_number(float(subscription.get("amount")))  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        selected_destination_id = None
-    current_destination = await db.get_effective_subscription_payment_destination(subscription_id)
-    current_label = "not set"
-    if current_destination:
-        if selected_destination_id is None:
-            current_label = f"Default ({current_destination['title']} · {current_destination['currency']})"
-        else:
-            current_label = f"{current_destination['title']} ({current_destination['currency']})"
-    await callback.message.edit_text(
-        "💳 Payment method:\n"
-        f"Current: <code>{escape_html(current_label)}</code>\n\n"
-        "Choose the payment method for this subscription.",
-        reply_markup=subscription_payment_destination_keyboard(
-            subscription_id,
-            destinations,
-            selected_destination_id,
-            default_destination_id,
-        ),
+        amount = "?"
+    return join_blocks(
+        screen_title("💱", f"Currency · {escape_html(subscription.get('name') or '')}"),
+        [
+            f"Now: {escape_html(currency)}",
+            f"⚠️ Changing the currency does not convert the amount ({amount}).",
+        ],
     )
+
+
+def shown_in_menu_text(subscription: Dict[str, object]) -> str:
+    """'🌐 <b>Shown in · Netflix</b>', the current code and what it is for."""
+    return join_blocks(
+        screen_title("🌐", f"Shown in · {escape_html(subscription.get('name') or '')}"),
+        [
+            f"Now: {escape_html(subscription_shown_in_of(subscription))}",
+            "Members see their share converted to this currency in reminders "
+            "(they can pick their own on their card).",
+        ],
+    )
+
+
+# ------------------------------------------------ Pricing & schedule (WP4)
+#
+# Every Pricing sub-screen returns to Pricing with a result banner: picker
+# presets edit the tapped message, typed prompts edit the screen they were
+# opened from (origin 'pricing:<id>') and delete the prompt and the answers.
+
+CYCLE_MOVED_BANNER = "✅ Cycle moved · payments kept"
+CYCLE_GONE_TOAST = "This cycle no longer exists"
+MOVE_BLOCKED_ALERT = "Could not move the cycle: the new date already has payments."
+CURRENCY_OTHER_HINT = "⚠️ Need three letters, for example <code>CHF</code>."
+PERIOD_EDIT_HINT = "⚠️ Need a number of days, for example <code>30</code>, or tap “Monthly”."
+NEXT_CHARGE_HINT = "⚠️ Need a date, for example <code>15.11.2026</code>, <code>15.11</code> or <code>tomorrow</code>."
+MAX_LISTED_DROPPED_CYCLES = 3
+
+
+def _pricing_origin(subscription_id: int) -> str:
+    return f"pricing:{int(subscription_id)}"
+
+
+def _subscription_period(subscription: Dict[str, object]) -> int:
+    try:
+        return int(subscription.get("period_days") or 30)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 30
+
+
+def period_phrase(period: int) -> str:
+    """``'monthly'`` or ``'every 30 days'``."""
+    return "monthly" if period == MONTHLY_PERIOD_SENTINEL else f"every {format_days(period)}"
+
+
+def _short_date(due_value: str) -> str:
+    """``'2026-10-01'`` -> ``'01.10'`` (the short form used inside a sentence)."""
+    try:
+        return datetime.strptime(due_value, "%Y-%m-%d").strftime("%d.%m")
+    except (TypeError, ValueError):
+        return escape_html(due_value)
+
+
+def _sub_name(subscription: Dict[str, object]) -> str:
+    return escape_html(str(subscription.get("name") or ""))
+
+
+def amount_prompt_text(subscription: Dict[str, object], frozen_cycle_due: Optional[str] = None) -> str:
+    """'✏️ New amount for Netflix, USD? Now 15.99.' + example (+ the open-cycle warning)."""
+    try:
+        now = format_number(float(subscription.get("amount")))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        now = "?"
+    currency = escape_html(subscription_currency_of(subscription))
+    lines = [f"✏️ New amount for {_sub_name(subscription)}, {currency}? Now {now}.", "Example: <code>149.99</code>"]
+    if frozen_cycle_due:
+        lines.append(f"⚠️ The open cycle ({_short_date(frozen_cycle_due)}) keeps its old amount.")
+    return "\n".join(lines)
+
+
+def currency_other_prompt_text(subscription: Dict[str, object]) -> str:
+    return f"✏️ Currency for {_sub_name(subscription)}? Three letters, for example <code>CHF</code>."
+
+
+def shown_in_other_prompt_text(subscription: Dict[str, object]) -> str:
+    now = escape_html(subscription_shown_in_of(subscription))
+    return (
+        f"✏️ Show {_sub_name(subscription)} to members in which currency? Now {now}. "
+        "Three letters, for example <code>EUR</code>."
+    )
+
+
+def dropped_cycles_warning(dropped: List[str]) -> Optional[str]:
+    """'⚠️ The unpaid 01.10 cycle will be dropped.' (open cycles nobody has paid yet)."""
+    if not dropped:
+        return None
+    if len(dropped) > MAX_LISTED_DROPPED_CYCLES:
+        return f"⚠️ {len(dropped)} unpaid cycles will be dropped."
+    dates = [_short_date(value) for value in dropped]
+    listed = dates[0] if len(dates) == 1 else f"{', '.join(dates[:-1])} and {dates[-1]}"
+    return f"⚠️ The unpaid {listed} {plural_word(len(dates), 'cycle')} will be dropped."
+
+
+def due_date_prompt_text(subscription: Dict[str, object], tz_name: str, dropped: List[str]) -> str:
+    """'✏️ Next charge date for Netflix? Now <date>.' + accepted forms (+ what gets dropped)."""
+    now = tg_due(str(subscription.get("next_charge_at")), tz_name, "wD")
+    lines = [
+        f"✏️ Next charge date for {_sub_name(subscription)}? Now {now}.",
+        "<code>DD.MM.YYYY</code>, <code>DD.MM</code>, <code>today</code> or <code>tomorrow</code>.",
+        dropped_cycles_warning(dropped),
+    ]
+    return "\n".join(line for line in lines if line)
+
+
+def period_edit_prompt_text(subscription: Dict[str, object]) -> str:
+    return f"✏️ How often does {_sub_name(subscription)} repeat? Now {period_phrase(_subscription_period(subscription))}."
+
+
+def due_date_conflict_text(conflict: Dict[str, object], new_due: str, tz_name: str) -> str:
+    """The question when the new date touches a cycle with payments: Move or New cycle."""
+    payments = int(conflict.get("payments") or 0)  # type: ignore[arg-type]
+    facts = [tg_due(str(conflict["due_date"]), tz_name, "wD")]
+    if conflict.get("closed"):
+        facts.append("closed")
+    facts.append(f"{format_payments(payments)} recorded")
+    return join_blocks(
+        "📅 <b>Change the next charge?</b>",
+        [f"Current cycle: {' · '.join(facts)}", f"New date: {tg_due(new_due, tz_name, 'wD')}"],
+        [
+            "🔀 Move cycle — same period, payments carry over.",
+            "🆕 New cycle — keep the old cycle, ask for payment on the new date.",
+        ],
+    )
+
+
+def amount_banner(amount: float, currency: str) -> str:
+    return f"✅ Amount · <b>{format_money(amount, currency)}</b>"
+
+
+def currency_banner(currency: str) -> str:
+    return f"✅ Currency · <b>{escape_html(currency)}</b>"
+
+
+def shown_in_banner(currency: str) -> str:
+    return f"✅ Shown in · <b>{escape_html(currency)}</b>"
+
+
+def next_charge_banner(due_value: str, tz_name: str) -> str:
+    return f"✅ Next charge · <b>{tg_due(due_value, tz_name, 'wD')}</b>"
+
+
+def new_cycle_banner(due_value: str, tz_name: str) -> str:
+    return f"✅ New cycle on {tg_due(due_value, tz_name, 'wD')}"
+
+
+def period_banner(period: int) -> str:
+    return f"✅ Period · <b>{period_phrase(period)}</b>"
+
+
+async def _open_cycle_with_frozen_amount(db: Database, subscription_id: int) -> Optional[str]:
+    """The first open cycle whose settings (amount included) are already frozen, if any."""
+    open_cycles = await db.list_open_cycles(subscription_id)
+    if not open_cycles:
+        return None
+    states = await db.list_cycle_participants_for_due_dates(subscription_id, open_cycles)
+    for due_value in open_cycles:
+        if states.get(due_value, {}).get("settings_snapshot_ready"):
+            return due_value
+    return None
+
+
+async def _cycles_without_payments(db: Database, subscription_id: int) -> List[str]:
+    """Open cycles nobody has paid: a new next-charge date drops them."""
+    return [
+        due_value
+        for due_value in await db.list_open_cycles(subscription_id)
+        if await db.count_cycle_payments(subscription_id, due_value) == 0
+    ]
+
+
+async def _pricing_prompt_gone(message: Message, state: FSMContext, db: Database) -> None:
+    """A Pricing prompt answered after the subscription was deleted: the list with a banner."""
+    await finish_prompt(message, state)
+    await send_subscription_list(message, db, banner=SUBSCRIPTION_GONE_BANNER)
+
+
+# ------------------------------------------------- the creation wizard (one message)
+#
+# Every step edits the same message: the title with the step, the answers so
+# far, then the question and an optional '⚠️' hint for the last typo. Typed
+# answers and typos are deleted as the wizard moves on, so it stays the last
+# message in the chat. The finish edits the wizard into the new card.
+
+WIZARD_CANCEL_CALLBACK = SubscriptionAction(action="create_cancel", subscription_id=0).pack()
+WIZARD_STEPS = 6  # 7 when "Split by shares" asks how many people share it
+STALE_STEP_TOAST = "This step is out of date"
+SUBSCRIPTION_NAME_MAX_LEN = 64
+MAX_PERIOD_DAYS = 3650
+MAX_SHARE_LIMIT = 1000
+
+NAME_QUESTION = "✏️ Name? For example <code>Netflix</code>."
+AMOUNT_QUESTION = "✏️ Amount? For example <code>149.99</code>."
+DATE_QUESTION = "✏️ Next charge date? <code>DD.MM.YYYY</code>, <code>DD.MM</code> or <code>today</code>."
+
+TEXT_ONLY_HINT = "⚠️ Send text, for example <code>Netflix</code>."
+NAME_TOO_LONG_HINT = f"⚠️ Keep the name under {SUBSCRIPTION_NAME_MAX_LEN} characters, for example <code>Netflix</code>."
+AMOUNT_HINT = "⚠️ Need a number, for example <code>149.99</code>."
+AMOUNT_ZERO_HINT = "⚠️ The amount must be more than 0, for example <code>149.99</code>."
+CURRENCY_HINT = "⚠️ Need three letters, for example <code>EUR</code>."
+DATE_HINT = "⚠️ Need a date, for example <code>15.11.2026</code>, <code>15.11</code> or <code>today</code>."
+PAST_DATE_HINT = "⚠️ That date is in the past — send it again to keep it."
+PERIOD_HINT = "⚠️ Need a number of days, for example <code>30</code>, or tap a button."
+PAYMENT_MODE_HINT = "⚠️ Tap a button, or send <code>split</code> or <code>fixed</code>."
+SHARE_LIMIT_HINT = "⚠️ Need a whole number, for example <code>4</code>, or tap “Everyone”."
+SUBSCRIPTION_SAVED_TOAST = "Subscription saved"
+
+# Wizards that became a card: a late duplicate tap on their old step buttons
+# must not delete the new card as a "stale step".
+_FINISHED_WIZARDS: "OrderedDict[tuple[int, int], None]" = OrderedDict()
+_FINISHED_WIZARDS_LIMIT = 256
+
+_WIZARD_STATES = {
+    1: SubscriptionForm.name,
+    2: SubscriptionForm.amount,
+    3: SubscriptionForm.currency,
+    4: SubscriptionForm.due_date,
+    5: SubscriptionForm.period,
+    6: SubscriptionForm.payment_mode,
+    7: SubscriptionForm.share_limit,
+}
+
+
+def _wizard_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[cancel_button(WIZARD_CANCEL_CALLBACK)]],
+    )
+
+
+def _wizard_step_view(step: int) -> tuple[str, InlineKeyboardMarkup]:
+    """The question and keyboard of a wizard step (presets reuse the shared prompt builders)."""
+    if step == 3:
+        return currency_prompt(cancel_callback=WIZARD_CANCEL_CALLBACK)
+    if step == 5:
+        return period_prompt(
+            suggested=MONTHLY_PERIOD_SENTINEL,
+            cancel_callback=WIZARD_CANCEL_CALLBACK,
+        )
+    if step == 6:
+        return payment_mode_prompt(cancel_callback=WIZARD_CANCEL_CALLBACK)
+    if step == 7:
+        return share_limit_prompt(cancel_callback=WIZARD_CANCEL_CALLBACK)
+    question = {1: NAME_QUESTION, 2: AMOUNT_QUESTION, 4: DATE_QUESTION}[step]
+    return question, _wizard_markup()
+
+
+def _period_text(period: int) -> str:
+    return "every month" if period == MONTHLY_PERIOD_SENTINEL else f"every {format_days(period)}"
+
+
+def wizard_answer_lines(data: Dict[str, object], tz_name: str) -> list[str]:
+    """The answers given so far, as indented 'Label: value' lines."""
+    lines: list[str] = []
+    if data.get("subscription_name"):
+        lines.append(f"Name: {escape_html(data['subscription_name'])}")
+    if data.get("amount") is not None:
+        amount = float(data["amount"])  # type: ignore[arg-type]
+        currency = str(data.get("currency") or "")
+        lines.append(f"Amount: {format_money(amount, currency) if currency else format_number(amount)}")
+    if data.get("due_date"):
+        lines.append(f"Next charge: {tg_due(str(data['due_date']), tz_name, 'wD')}")
+    if data.get("period_days") is not None:
+        lines.append(f"Repeats: {_period_text(int(data['period_days']))}")  # type: ignore[arg-type]
+    if data.get("payment_mode"):
+        mode = "split by shares" if data["payment_mode"] == PAYMENT_MODE_SPLIT else "fixed per user"
+        lines.append(f"Amounts: {mode}")
+    return [sub_line(line) for line in lines]
+
+
+def wizard_text(data: Dict[str, object], tz_name: str, step: int, hint: Optional[str] = None) -> str:
+    """'➕ <b>New subscription</b> · step 2 of 6', the answers, then '✏️ question' (+ '⚠️ hint')."""
+    total = 7 if step >= 7 else WIZARD_STEPS
+    question, _ = _wizard_step_view(step)
+    if hint:
+        question = f"{question}\n{hint}"
+    return join_blocks(
+        screen_title("➕", "New subscription", f"step {step} of {total}"),
+        wizard_answer_lines(data, tz_name),
+        question,
+    )
+
+
+async def _show_wizard_step(
+    bot: Bot,
+    state: FSMContext,
+    db: Database,
+    chat_id: int,
+    step: int,
+    *,
+    answer: Optional[Message] = None,
+    hint: Optional[str] = None,
+    data: Optional[Dict[str, object]] = None,
+) -> None:
+    """Edit the wizard into ``step``; the user's answer (or typo) is deleted."""
+    update = dict(data or {})
+    merged = {**await state.get_data(), **update}
+    text = wizard_text(merged, await resolve_report_timezone(db), step, hint)
+    _, markup = _wizard_step_view(step)
+    wizard_id = await advance_wizard(
+        bot,
+        state,
+        text,
+        markup,
+        answer=answer,
+        new_state=_WIZARD_STATES[step],
+        data=update,
+    )
+    if wizard_id is None:
+        # The state outlived the wizard message ids: show the step as a new wizard.
+        sent = await bot.send_message(chat_id, text, reply_markup=markup)
+        await state.set_state(_WIZARD_STATES[step])
+        await state.update_data(**update, wizard_message_id=sent.message_id, wizard_chat_id=chat_id, cleanup_ids=[])
+        if answer is not None:
+            await delete_quietly(bot, chat_id, answer.message_id)
 
 
 async def start_subscription_creation(responder: Responder, state: FSMContext) -> None:
-    target = _response_target(responder)
-    await state.clear()
-    await state.set_state(SubscriptionForm.name)
-    await target.answer(
-        "New Subscription:\n"
-        "Name: send subscription name.\n"
-        "Example: <code>Netflix</code>.",
-        reply_markup=dialog_cancel_inline_keyboard(),
-    )
+    """Step 1 as ONE new message; the previous flow is wound down."""
+    question, markup = _wizard_step_view(1)
+    text = join_blocks(screen_title("➕", "New subscription", f"step 1 of {WIZARD_STEPS}"), question)
+    await start_wizard(responder, state, SubscriptionForm.name, text, markup)
+
+
+def _creation_data_complete(data: Dict[str, object]) -> bool:
+    keys = ("subscription_name", "amount", "currency", "due_date", "period_days")
+    return all(data.get(key) is not None for key in keys)
 
 
 async def _finalize_new_subscription(
@@ -264,30 +539,75 @@ async def _finalize_new_subscription(
     db: Database,
     share_limit: Optional[int],
 ) -> None:
-    data = await state.get_data()
-    payment_mode = str(data.get("payment_mode") or PAYMENT_MODE_SPLIT).strip().lower()
-    if payment_mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
-        payment_mode = PAYMENT_MODE_SPLIT
-    sub_id = await db.create_subscription(
-        name=data["subscription_name"],
-        amount=float(data["amount"]),
-        currency=data["currency"],
-        due_date=data["due_date"],
-        period_days=int(data["period_days"]),
-        share_limit=share_limit,
-        payment_mode=payment_mode,
-    )
-    await state.clear()
+    """Create the subscription once (guarded) and edit the wizard into its card."""
+    callback = responder if isinstance(responder, CallbackQuery) else None
+    message = _response_target(responder)
+    bot = responder.bot or message.bot
+    async with guarded(callback, ("sub_create", message.chat.id)) as acquired:
+        if not acquired:
+            return
+        current_state = await state.get_state()
+        data = await state.get_data()
+        finishing = current_state in (SubscriptionForm.payment_mode.state, SubscriptionForm.share_limit.state)
+        if not finishing or not _creation_data_complete(data):
+            if callback is not None:
+                await answer_callback_once(callback, STALE_STEP_TOAST)
+            return
+        payment_mode = str(data.get("payment_mode") or PAYMENT_MODE_SPLIT).strip().lower()
+        if payment_mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
+            payment_mode = PAYMENT_MODE_SPLIT
+        name = str(data["subscription_name"])
+        sub_id = await db.create_subscription(
+            name=name,
+            amount=float(data["amount"]),  # type: ignore[arg-type]
+            currency=str(data["currency"]),
+            due_date=date.fromisoformat(str(data["due_date"])),
+            period_days=int(data["period_days"]),  # type: ignore[arg-type]
+            share_limit=share_limit,
+            payment_mode=payment_mode,
+        )
+        flow = await finish_wizard(state, answer=None if callback is not None else message, bot=bot)
+        finished = wizard_of(flow)
+        if finished is not None:
+            _FINISHED_WIZARDS[finished] = None
+            while len(_FINISHED_WIZARDS) > _FINISHED_WIZARDS_LIMIT:
+                _FINISHED_WIZARDS.popitem(last=False)
+        card = await build_subscription_card(db, sub_id, banner=f"✅ <b>{escape_html(name)} created</b>")
+        if card is None:  # deleted by another admin in the meantime
+            await show_subscription_gone(responder, db)
+            return
+        text, markup = card
+        if callback is not None:
+            await respond_with_markup(callback, text, reply_markup=markup, toast=SUBSCRIPTION_SAVED_TOAST)
+            return
+        wizard = wizard_of(flow)
+        if wizard is not None and bot is not None and await edit_in_place(bot, wizard[0], wizard[1], text, markup):
+            return
+        await message.answer(text, reply_markup=markup)
 
-    target = _response_target(responder)
 
-    await target.answer(
-        "Subscription saved.",
-        reply_markup=admin_reply_keyboard(),
-    )
-    await send_subscription_detail(target, db, sub_id)
-    if isinstance(responder, CallbackQuery):
-        await responder.answer("Subscription saved")
+async def _stale_wizard_button(callback: CallbackQuery, state: FSMContext) -> None:
+    """A wizard-step button from a finished or abandoned flow: say so and remove that message.
+
+    A repeated tap on the running wizard itself (a double tap that already
+    moved it on) is only answered.
+    """
+    message = callback.message
+    wizard = wizard_of(await state.get_data())
+    here = (message.chat.id, message.message_id) if message is not None else None
+    if here is not None and (here == wizard or here in _FINISHED_WIZARDS):
+        # A late double tap on the running wizard, or on the card it just became.
+        await answer_callback_once(callback)
+        return
+    if message is not None and callback.bot is not None:
+        await delete_quietly(callback.bot, message.chat.id, message.message_id)
+    await answer_callback_once(callback, STALE_STEP_TOAST)
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "create_cancel"))
+async def handle_subscription_create_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    """[✖️ Cancel] on the wizard: delete it and what it left behind, toast 'Cancelled'."""
+    await cancel_prompt(callback, state)
 
 
 @admin_router.message(F.text == "➕ Add subscription")
@@ -295,59 +615,47 @@ async def subscription_button(message: Message, state: FSMContext) -> None:
     await start_subscription_creation(message, state)
 
 
-@admin_router.message(F.text == "📋 Subscriptions")
-async def subs_button(message: Message, db: Database) -> None:
-    await send_subscription_list(message, db)
-
-
 @admin_router.message(SubscriptionForm.name)
-async def subscription_form_title(message: Message, state: FSMContext) -> None:
-    title = (message.text or "").strip()
-    if not title:
-        await message.answer("Name cannot be empty.")
+async def subscription_form_title(message: Message, state: FSMContext, db: Database, bot: Bot) -> None:
+    chat_id = message.chat.id
+    name = " ".join((message.text or "").split())
+    if not name:
+        await _show_wizard_step(bot, state, db, chat_id, 1, answer=message, hint=TEXT_ONLY_HINT)
         return
-
-    await state.update_data(subscription_name=title)
-    await state.set_state(SubscriptionForm.amount)
-    await message.answer(
-        "Amount:\n"
-        "Send charge amount.\n"
-        "Example: <code>149.99</code>.",
-        reply_markup=dialog_cancel_inline_keyboard(),
+    if len(name) > SUBSCRIPTION_NAME_MAX_LEN:
+        await _show_wizard_step(bot, state, db, chat_id, 1, answer=message, hint=NAME_TOO_LONG_HINT)
+        return
+    data = await state.get_data()
+    existing = {str(sub.get("name") or "").strip().lower() for sub in await db.list_subscriptions()}
+    if name.lower() in existing and data.get("pending_name") != name:
+        # Warn once; sending the same name again keeps it.
+        hint = f"⚠️ You already have {escape_html(name)}. Send it again to keep it."
+        await _show_wizard_step(bot, state, db, chat_id, 1, answer=message, hint=hint, data={"pending_name": name})
+        return
+    await _show_wizard_step(
+        bot, state, db, chat_id, 2, answer=message, data={"subscription_name": name, "pending_name": None}
     )
 
 
 @admin_router.message(SubscriptionForm.amount)
-async def subscription_form_amount(message: Message, state: FSMContext) -> None:
-    try:
-        raw = (message.text or "").strip().replace(",", ".")
-        amount = float(raw)
-        if not math.isfinite(amount) or amount <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("Amount must be a positive number. Try again.")
+async def subscription_form_amount(message: Message, state: FSMContext, db: Database, bot: Bot) -> None:
+    parsed = parse_amount(message.text)
+    if parsed is None or not math.isfinite(parsed[0]):
+        await _show_wizard_step(bot, state, db, message.chat.id, 2, answer=message, hint=AMOUNT_HINT)
         return
-
-    await state.update_data(amount=amount)
-    await state.set_state(SubscriptionForm.currency)
-    text, markup = currency_prompt()
-    await message.answer(text, reply_markup=markup)
+    if parsed[0] <= 0:
+        await _show_wizard_step(bot, state, db, message.chat.id, 2, answer=message, hint=AMOUNT_ZERO_HINT)
+        return
+    await _show_wizard_step(bot, state, db, message.chat.id, 3, answer=message, data={"amount": parsed[0]})
 
 
 @admin_router.message(SubscriptionForm.currency)
-async def subscription_form_currency(message: Message, state: FSMContext) -> None:
-    currency = (message.text or "").strip().upper()
-    if len(currency) != 3:
-        await message.answer("Currency must contain 3 letters, e.g. TRY.")
+async def subscription_form_currency(message: Message, state: FSMContext, db: Database, bot: Bot) -> None:
+    currency = parse_currency(message.text)
+    if currency is None:
+        await _show_wizard_step(bot, state, db, message.chat.id, 3, answer=message, hint=CURRENCY_HINT)
         return
-
-    await state.update_data(currency=currency)
-    await state.set_state(SubscriptionForm.due_date)
-    await message.answer(
-        "Next Charge Date:\n"
-        "Send date in <code>DD.MM.YYYY</code>.",
-        reply_markup=dialog_cancel_inline_keyboard(),
-    )
+    await _show_wizard_step(bot, state, db, message.chat.id, 4, answer=message, data={"currency": currency})
 
 
 @admin_router.callback_query(F.data.startswith("currency:"))
@@ -359,28 +667,17 @@ async def handle_currency_quick_select(
     raw_value = callback.data.split(":", 1)[1].upper()
     current_state = await state.get_state()
     if current_state == SubscriptionForm.currency.state:
-        await state.update_data(currency=raw_value)
-        await state.set_state(SubscriptionForm.due_date)
-        await callback.message.answer(
-            "Next Charge Date:\n"
-            "Send date in <code>DD.MM.YYYY</code>.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-        await callback.answer(f"Currency set to {raw_value}")
-        return
-
-    if current_state == SubscriptionEditForm.currency.state:
-        sub_id = await get_edit_subscription_id(state)
-        if sub_id is None:
-            await callback.answer("Session expired. Reopen the subscription.", show_alert=True)
+        currency = parse_currency(raw_value)
+        if currency is None or callback.message is None or callback.bot is None:
+            await _stale_wizard_button(callback, state)
             return
-        await db.update_subscription_fields(sub_id, currency=raw_value)
-        await state.clear()
-        await callback.answer(f"Currency set to {raw_value}")
-        await send_subscription_detail(callback, db, sub_id)
+        await _show_wizard_step(callback.bot, state, db, callback.message.chat.id, 4, data={"currency": currency})
+        await answer_callback_once(callback, f"Currency: {currency}")
         return
 
-    await callback.answer()
+    # The subscription currency is edited through 'sub_currency:*'; a 'currency:'
+    # button outside the wizard is a stale step.
+    await _stale_wizard_button(callback, state)
 
 
 @admin_router.callback_query(F.data.startswith("sub_base_currency:"))
@@ -391,64 +688,70 @@ async def handle_subscription_base_currency_quick_select(
 ) -> None:
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
     _, subscription_id_raw, raw_value = parts
     try:
         subscription_id = int(subscription_id_raw)
     except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
 
-    currency = raw_value.strip().upper()
-    if len(currency) != 3 or not currency.isalpha():
-        await callback.answer("Currency must contain 3 letters.", show_alert=True)
+    currency = parse_currency(raw_value)
+    await _drop_flow(callback, state)
+    if not await _load_subscription(callback, db, subscription_id):
         return
-
+    if currency is None:
+        await send_pricing_settings(callback, db, subscription_id, toast=DEAD_BUTTON)
+        return
     await db.update_subscription_fields(subscription_id, base_currency=currency)
-    await state.clear()
-    await callback.answer(f"Convert currency set to {currency}")
-    await send_pricing_settings(callback, db, subscription_id)
+    await send_pricing_settings(
+        callback, db, subscription_id, banner=shown_in_banner(currency), toast=f"Shown in: {currency}"
+    )
 
 
 @admin_router.message(SubscriptionForm.due_date)
-async def subscription_form_due(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    normalized = raw.replace("-", ".")
-    try:
-        due = datetime.strptime(normalized, DATE_INPUT_FORMAT).date()
-    except ValueError:
-        await message.answer("Date must be in DD.MM.YYYY format. Try again.")
+async def subscription_form_due(message: Message, state: FSMContext, db: Database, bot: Bot) -> None:
+    chat_id = message.chat.id
+    today = datetime.now(parse_timezone(await resolve_report_timezone(db))).date()
+    due = parse_date_loose(message.text, today)
+    if due is None:
+        await _show_wizard_step(bot, state, db, chat_id, 4, answer=message, hint=DATE_HINT)
         return
+    data = await state.get_data()
+    if due < today and data.get("pending_due") != due.isoformat():
+        # Warn once; sending the same past date again keeps it.
+        await _show_wizard_step(
+            bot, state, db, chat_id, 4, answer=message, hint=PAST_DATE_HINT, data={"pending_due": due.isoformat()}
+        )
+        return
+    await _show_wizard_step(
+        bot, state, db, chat_id, 5, answer=message, data={"due_date": due.isoformat(), "pending_due": None}
+    )
 
-    await state.update_data(due_date=due)
-    await state.set_state(SubscriptionForm.period)
-    text_prompt, markup_prompt = period_prompt()
-    await message.answer(text_prompt, reply_markup=markup_prompt)
+
+def parse_period_input(text: Optional[str]) -> Optional[int]:
+    """'monthly' / 'month' -> MONTHLY_PERIOD_SENTINEL; '30', '30 days', '30d' -> 30; else None."""
+    raw = " ".join((text or "").strip().lower().split())
+    if raw in {"month", "monthly", "every month"}:
+        return MONTHLY_PERIOD_SENTINEL
+    for suffix in (" days", " day", "days", "day", "d"):
+        if raw.endswith(suffix):
+            raw = raw[: -len(suffix)].strip()
+            break
+    if not raw.isdigit():
+        return None
+    days = int(raw)
+    return days if 0 < days <= MAX_PERIOD_DAYS else None
 
 
 @admin_router.message(SubscriptionForm.period)
-async def subscription_form_period(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    if text:
-        lowered = text.lower()
-        if lowered in {"month", "monthly"}:
-            period = MONTHLY_PERIOD_SENTINEL
-        else:
-            try:
-                period = int(text)
-                if period <= 0:
-                    raise ValueError
-            except ValueError:
-                await message.answer("Period must be a positive integer or 'monthly'. Try again.")
-                return
-    else:
-        period = 30
-
-    await state.update_data(period_days=period)
-    await state.set_state(SubscriptionForm.payment_mode)
-    text_prompt, markup_prompt = payment_mode_prompt()
-    await message.answer(text_prompt, reply_markup=markup_prompt)
+async def subscription_form_period(message: Message, state: FSMContext, db: Database, bot: Bot) -> None:
+    period = parse_period_input(message.text)
+    if period is None:
+        await _show_wizard_step(bot, state, db, message.chat.id, 5, answer=message, hint=PERIOD_HINT)
+        return
+    await _show_wizard_step(bot, state, db, message.chat.id, 6, answer=message, data={"period_days": period})
 
 
 @admin_router.callback_query(F.data.startswith("sharelimit:"))
@@ -461,7 +764,7 @@ async def handle_share_limit_quick_select(
     if value == "all":
         share_limit: Optional[int] = None
     else:
-        await callback.answer("Unsupported option.", show_alert=True)
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
     current_state = await state.get_state()
     if current_state == SubscriptionForm.share_limit.state:
@@ -471,15 +774,14 @@ async def handle_share_limit_quick_select(
     if current_state == SubscriptionEditForm.share_limit.state:
         sub_id = await get_edit_subscription_id(state)
         if sub_id is None:
-            await callback.answer("Session expired. Reopen the subscription.", show_alert=True)
+            await _stale_wizard_button(callback, state)
             return
-        await db.update_subscription_fields(sub_id, share_limit=share_limit)
-        await state.clear()
-        await callback.answer("Split limit updated.")
-        await send_subscription_detail(callback, db, sub_id)
+        from .participants import finish_share_count_button  # participants imports this module
+
+        await finish_share_count_button(callback, state, db, sub_id, share_limit)
         return
 
-    await callback.answer()
+    await _stale_wizard_button(callback, state)
 
 
 @admin_router.callback_query(F.data.startswith("period:"))
@@ -497,50 +799,27 @@ async def handle_period_quick_select(
             if days <= 0:
                 raise ValueError
         except ValueError:
-            await callback.answer("Invalid period value.", show_alert=True)
+            await answer_callback_once(callback, DEAD_BUTTON)
             return
 
     current_state = await state.get_state()
     if current_state == SubscriptionForm.period.state:
-        await state.update_data(period_days=days)
-        await state.set_state(SubscriptionForm.payment_mode)
-        text_prompt, markup_prompt = payment_mode_prompt()
-        await callback.message.answer(text_prompt, reply_markup=markup_prompt)
-        label = "monthly" if days == MONTHLY_PERIOD_SENTINEL else f"{days} day(s)"
-        await callback.answer(f"Period set to {label}")
+        if callback.message is None or callback.bot is None:
+            await _stale_wizard_button(callback, state)
+            return
+        await _show_wizard_step(callback.bot, state, db, callback.message.chat.id, 6, data={"period_days": days})
+        await answer_callback_once(callback, f"Repeats: {_period_text(days)}")
         return
 
     if current_state == SubscriptionEditForm.period.state:
         sub_id = await get_edit_subscription_id(state)
-        if sub_id is None:
-            await callback.answer("Session expired. Reopen the subscription.", show_alert=True)
+        if sub_id is None or callback.message is None:
+            await _stale_wizard_button(callback, state)
             return
-        subscription = await db.get_subscription(sub_id)
-        monthly_anchor_day: Optional[int] = None
-        if days == MONTHLY_PERIOD_SENTINEL:
-            monthly_anchor_day = normalize_monthly_anchor_day(
-                subscription.get("monthly_anchor_day") if subscription else None
-            )
-            if monthly_anchor_day is None and subscription:
-                try:
-                    monthly_anchor_day = datetime.strptime(
-                        str(subscription["next_charge_at"]),
-                        "%Y-%m-%d",
-                    ).date().day
-                except (KeyError, TypeError, ValueError):
-                    monthly_anchor_day = None
-        await db.update_subscription_fields(
-            sub_id,
-            period_days=days,
-            monthly_anchor_day=monthly_anchor_day,
-        )
-        await state.clear()
-        label = "monthly" if days == MONTHLY_PERIOD_SENTINEL else f"{days} day(s)"
-        await callback.answer(f"Period set to {label}")
-        await send_subscription_detail(callback, db, sub_id)
+        await _finish_period_edit(callback, state, db, sub_id, days)
         return
 
-    await callback.answer()
+    await _stale_wizard_button(callback, state)
 
 
 @admin_router.callback_query(F.data.startswith("create_payment_mode:"))
@@ -551,12 +830,12 @@ async def handle_create_payment_mode_quick_select(
 ) -> None:
     current_state = await state.get_state()
     if current_state != SubscriptionForm.payment_mode.state:
-        await callback.answer()
+        await _stale_wizard_button(callback, state)
         return
 
     mode = callback.data.split(":", 1)[1].strip().lower()
     if mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
-        await callback.answer("Unsupported mode.", show_alert=True)
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
     await state.update_data(payment_mode=mode)
 
@@ -564,53 +843,54 @@ async def handle_create_payment_mode_quick_select(
         await _finalize_new_subscription(callback, state, db, share_limit=None)
         return
 
-    await state.set_state(SubscriptionForm.share_limit)
-    text_prompt, markup_prompt = share_limit_prompt()
-    await callback.message.answer(text_prompt, reply_markup=markup_prompt)
-    await callback.answer("Payment mode set to split")
+    if callback.message is None or callback.bot is None:
+        await _stale_wizard_button(callback, state)
+        return
+    await _show_wizard_step(callback.bot, state, db, callback.message.chat.id, 7)
+    await answer_callback_once(callback, "Payment mode: split")
+
+
+PAYMENT_MODE_WORDS = {
+    "split": PAYMENT_MODE_SPLIT,
+    "shares": PAYMENT_MODE_SPLIT,
+    "share": PAYMENT_MODE_SPLIT,
+    "split by shares": PAYMENT_MODE_SPLIT,
+    "fixed": PAYMENT_MODE_FIXED,
+    "amount": PAYMENT_MODE_FIXED,
+    "fixed per user": PAYMENT_MODE_FIXED,
+}
 
 
 @admin_router.message(SubscriptionForm.payment_mode)
-async def subscription_form_payment_mode(message: Message, state: FSMContext, db: Database) -> None:
-    raw_value = (message.text or "").strip().lower()
-    if raw_value in {"split", "shares", "share"}:
-        mode = PAYMENT_MODE_SPLIT
-    elif raw_value in {"fixed", "amount", "fixed per user"}:
-        mode = PAYMENT_MODE_FIXED
-    else:
-        text_prompt, markup_prompt = payment_mode_prompt()
-        await message.answer(
-            "Choose a valid payment mode: split or fixed.\n"
-            "You can tap a button below.",
-            reply_markup=markup_prompt,
-        )
+async def subscription_form_payment_mode(message: Message, state: FSMContext, db: Database, bot: Bot) -> None:
+    mode = PAYMENT_MODE_WORDS.get(" ".join((message.text or "").strip().lower().split()))
+    if mode is None:
+        await _show_wizard_step(bot, state, db, message.chat.id, 6, answer=message, hint=PAYMENT_MODE_HINT)
         return
 
     await state.update_data(payment_mode=mode)
     if mode == PAYMENT_MODE_FIXED:
         await _finalize_new_subscription(message, state, db, share_limit=None)
         return
+    await _show_wizard_step(bot, state, db, message.chat.id, 7, answer=message)
 
-    await state.set_state(SubscriptionForm.share_limit)
-    text_prompt, markup_prompt = share_limit_prompt()
-    await message.answer(text_prompt, reply_markup=markup_prompt)
+
+def parse_share_limit_input(text: Optional[str]) -> tuple[bool, Optional[int]]:
+    """``(True, None)`` for 'everyone' / 'all', ``(True, 4)`` for '4', ``(False, None)`` otherwise."""
+    raw = (text or "").strip().lower()
+    if raw in {"everyone", "all"}:
+        return True, None
+    if raw.isdigit() and 0 < int(raw) <= MAX_SHARE_LIMIT:
+        return True, int(raw)
+    return False, None
 
 
 @admin_router.message(SubscriptionForm.share_limit)
-async def subscription_form_share_limit(message: Message, state: FSMContext, db: Database) -> None:
-    text = (message.text or "").strip()
-    share_limit: Optional[int]
-    if text:
-        try:
-            share_limit = int(text)
-            if share_limit <= 0:
-                raise ValueError
-        except ValueError:
-            await message.answer("Share count must be a positive integer or empty. Try again.")
-            return
-    else:
-        share_limit = None
-
+async def subscription_form_share_limit(message: Message, state: FSMContext, db: Database, bot: Bot) -> None:
+    valid, share_limit = parse_share_limit_input(message.text)
+    if not valid:
+        await _show_wizard_step(bot, state, db, message.chat.id, 7, answer=message, hint=SHARE_LIMIT_HINT)
+        return
     await _finalize_new_subscription(message, state, db, share_limit)
 
 
@@ -621,8 +901,30 @@ async def handle_subscription_open(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
+    await _drop_flow(callback, state)
     await send_subscription_detail(callback, db, callback_data.subscription_id)
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "open_new"))
+async def handle_subscription_open_new(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+) -> None:
+    """The card as a NEW message from a push, alert or report; the push itself is left alone."""
+    card = await build_subscription_card(db, callback_data.subscription_id, close=True)
+    if card is None:
+        await answer_callback_once(callback, SUBSCRIPTION_GONE)
+        return
+    text, markup = card
+    sent = None
+    if callback.message is not None:
+        sent = await callback.message.answer(text, reply_markup=markup)
+    elif callback.bot is not None:
+        sent = await callback.bot.send_message(callback.from_user.id, text, reply_markup=markup)
+    # Its sub-screens come back through plain sub:open; remembered, it keeps [✖️ Close].
+    remember_spawned(sent)
+    await answer_callback_once(callback)
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "create"))
@@ -636,11 +938,20 @@ async def handle_subscription_create(
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "back"))
 async def handle_subscription_back(
     callback: CallbackQuery,
+    callback_data: SubscriptionAction,
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
-    await send_subscription_list(callback, db)
+    """[◀️ To list]: the list page that holds this subscription."""
+    await _drop_flow(callback, state)
+    await send_subscription_list(callback, db, focus_subscription_id=callback_data.subscription_id)
+
+
+@admin_router.callback_query(F.data.startswith(SUBSCRIPTION_LIST_PAGE_PREFIX))
+async def handle_subscription_list_page(callback: CallbackQuery, db: Database) -> None:
+    raw_page = (callback.data or "")[len(SUBSCRIPTION_LIST_PAGE_PREFIX):]
+    page = int(raw_page) if raw_page.isdigit() else 1
+    await send_subscription_list(callback, db, page=page)
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "rename"))
@@ -653,18 +964,13 @@ async def handle_subscription_rename_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    prompt = (
-        "✏️ Rename:\n"
-        f"Current: <code>{escape_html(subscription['name'])}</code>\n"
-        "\n"
-        "Send new subscription name."
-    )
     await start_subscription_edit_flow(
         callback,
         state,
         callback_data.subscription_id,
         SubscriptionEditForm.rename,
-        prompt,
+        f"✏️ New name for {escape_html(subscription['name'])}?",
+        origin_screen=f"card:{callback_data.subscription_id}",
     )
 
 
@@ -675,7 +981,8 @@ async def handle_subscription_pricing_callback(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
+    """[💰 Pricing] on the card, [◀️ Back] from its pickers and [✖️ Cancel] on the conflict question."""
+    await _drop_flow(callback, state)
     await send_pricing_settings(callback, db, callback_data.subscription_id)
 
 
@@ -689,18 +996,14 @@ async def handle_subscription_amount_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    prompt = (
-        "💰 Amount:\n"
-        f"Current: <code>{subscription['amount']:.2f} {escape_html(subscription['currency'])}</code>\n"
-        "\n"
-        "Send new value (example: <code>149.99</code>)."
-    )
+    snapshot_due = await _open_cycle_with_frozen_amount(db, callback_data.subscription_id)
     await start_subscription_edit_flow(
         callback,
         state,
         callback_data.subscription_id,
         SubscriptionEditForm.amount,
-        prompt,
+        amount_prompt_text(subscription, snapshot_due),
+        origin_screen=_pricing_origin(callback_data.subscription_id),
     )
 
 
@@ -714,9 +1017,12 @@ async def handle_subscription_currency_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    await state.clear()
-    await _show_subscription_currency_menu(callback, db, callback_data.subscription_id)
-    await callback.answer()
+    await _drop_flow(callback, state)
+    await respond_with_markup(
+        callback,
+        currency_menu_text(subscription),
+        reply_markup=subscription_currency_keyboard(callback_data.subscription_id, subscription_currency_of(subscription)),
+    )
 
 
 @admin_router.callback_query(F.data.startswith("sub_currency:"))
@@ -727,22 +1033,25 @@ async def handle_subscription_currency_select(
 ) -> None:
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
     _, subscription_id_raw, raw_currency = parts
     try:
         subscription_id = int(subscription_id_raw)
     except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
-    currency = raw_currency.strip().upper()
-    if len(currency) != 3 or not currency.isalpha():
-        await callback.answer("Currency must contain 3 letters.", show_alert=True)
+    currency = parse_currency(raw_currency)
+    await _drop_flow(callback, state)
+    if not await _load_subscription(callback, db, subscription_id):
+        return
+    if currency is None:
+        await send_pricing_settings(callback, db, subscription_id, toast=DEAD_BUTTON)
         return
     await db.update_subscription_fields(subscription_id, currency=currency)
-    await state.clear()
-    await callback.answer(f"Currency set to {currency}")
-    await _show_subscription_currency_menu(callback, db, subscription_id)
+    await send_pricing_settings(
+        callback, db, subscription_id, banner=currency_banner(currency), toast=f"Currency: {currency}"
+    )
 
 
 @admin_router.callback_query(F.data.startswith("sub_currency_other:"))
@@ -753,30 +1062,25 @@ async def handle_subscription_currency_other(
 ) -> None:
     parts = callback.data.split(":", 1)
     if len(parts) != 2:
-        await callback.answer("Invalid action.", show_alert=True)
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
     _, subscription_id_raw = parts
     try:
         subscription_id = int(subscription_id_raw)
     except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
+        await answer_callback_once(callback, DEAD_BUTTON)
         return
-    subscription = await db.get_subscription(subscription_id)
+    subscription = await _load_subscription(callback, db, subscription_id)
     if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
         return
-
-    await state.set_state(SubscriptionEditForm.currency)
-    await state.update_data(edit_subscription_id=subscription_id)
-    if callback.message:
-        await callback.message.answer(
-            "💱 Currency:\n"
-            "Send a 3-letter currency code.\n"
-            "\n"
-            "Example: <code>CHF</code>",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+    await start_subscription_edit_flow(
+        callback,
+        state,
+        subscription_id,
+        SubscriptionEditForm.currency,
+        currency_other_prompt_text(subscription),
+        origin_screen=_pricing_origin(subscription_id),
+    )
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "basecurrency"))
@@ -789,215 +1093,35 @@ async def handle_subscription_base_currency_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    await state.clear()
-    current_currency = str(subscription.get("base_currency") or subscription.get("currency") or "RUB").upper()
-    text = (
-        "🌐 Convert currency:\n"
-        f"Current: <code>{escape_html(current_currency)}</code>\n"
-        "\n"
-        "This is the default target currency for this subscription."
+    await _drop_flow(callback, state)
+    await respond_with_markup(
+        callback,
+        shown_in_menu_text(subscription),
+        reply_markup=subscription_base_currency_keyboard(
+            callback_data.subscription_id,
+            subscription_shown_in_of(subscription),
+        ),
     )
-    if callback.message:
-        await callback.message.edit_text(
-            text,
-            reply_markup=subscription_base_currency_keyboard(
-                callback_data.subscription_id,
-                current_currency,
-            ),
-        )
-    await callback.answer()
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "basecurrency_other"))
 async def handle_subscription_base_currency_other(
     callback: CallbackQuery,
     callback_data: SubscriptionAction,
+    db: Database,
     state: FSMContext,
 ) -> None:
+    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
+    if not subscription:
+        return
     await start_subscription_edit_flow(
         callback,
         state,
         callback_data.subscription_id,
         SubscriptionEditForm.base_currency,
-        "🌐 Convert currency:\nSend a 3-letter currency code.\nExample: <code>EUR</code>.",
+        shown_in_other_prompt_text(subscription),
+        origin_screen=_pricing_origin(callback_data.subscription_id),
     )
-
-
-@admin_router.callback_query(F.data.startswith("sub_payment_mode:"))
-async def handle_subscription_payment_mode_select(
-    callback: CallbackQuery,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
-        return
-    _, subscription_id_raw, raw_mode = parts
-    try:
-        subscription_id = int(subscription_id_raw)
-    except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
-        return
-    mode = raw_mode.strip().lower()
-    if mode not in {PAYMENT_MODE_SPLIT, PAYMENT_MODE_FIXED}:
-        await callback.answer("Unsupported mode.", show_alert=True)
-        return
-    await db.update_subscription_fields(subscription_id, payment_mode=mode)
-    await state.clear()
-    await callback.answer(f"Payment mode set to {'fixed' if mode == PAYMENT_MODE_FIXED else 'split'}.")
-    await send_participants_settings(callback, db, subscription_id)
-
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "useramounts"))
-async def handle_subscription_user_amounts_callback(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    await state.clear()
-    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
-    if not subscription:
-        return
-    current_mode = str(subscription.get("payment_mode") or PAYMENT_MODE_SPLIT).strip().lower()
-    if current_mode != PAYMENT_MODE_FIXED:
-        await callback.answer("Switch Payment mode to Fixed first.", show_alert=True)
-        await send_participants_settings(callback, db, callback_data.subscription_id)
-        return
-    await send_subscription_user_amounts(callback, db, callback_data.subscription_id)
-
-
-@admin_router.callback_query(F.data.startswith("sub_user_amount:"))
-async def handle_subscription_user_amount_edit_callback(
-    callback: CallbackQuery,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
-        return
-    _, subscription_id_raw, friend_id_raw = parts
-    try:
-        subscription_id = int(subscription_id_raw)
-        friend_id = int(friend_id_raw)
-    except ValueError:
-        await callback.answer("Invalid user.", show_alert=True)
-        return
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
-        return
-    default_amount = float(subscription.get("amount") or 0.0)
-    participants = await db.list_subscription_participants(subscription_id)
-    target_person = next((person for person in participants if int(person["id"]) == friend_id), None)
-    if target_person is None:
-        await callback.answer("User is not in this subscription.", show_alert=True)
-        return
-
-    current_value = target_person.get("fixed_amount")
-    has_current_value = False
-    if current_value is None:
-        current_text = f"{default_amount:.2f}"
-    else:
-        try:
-            current_text = f"{float(current_value):.2f}"
-            has_current_value = True
-        except (TypeError, ValueError):
-            current_text = f"{default_amount:.2f}"
-
-    await state.set_state(SubscriptionEditForm.user_amount)
-    await state.update_data(
-        user_amount_subscription_id=subscription_id,
-        user_amount_friend_id=friend_id,
-    )
-    if callback.message:
-        prompt = (
-            "👥 Amount per user:\n\n"
-            f"User: <code>{escape_html(str(target_person['full_name']))}</code>\n"
-            f"Current: <code>{escape_html(current_text)}</code>\n\n"
-            "Send amount (example: <code>300</code>)."
-        )
-        if has_current_value:
-            prompt += "\nOr tap <code>Clear</code> to use subscription amount."
-        await callback.message.answer(
-            prompt,
-            reply_markup=(
-                user_amount_clear_keyboard(subscription_id, friend_id)
-                if has_current_value
-                else dialog_cancel_inline_keyboard()
-            ),
-        )
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data.startswith("sub_user_amount_clear:"))
-async def handle_subscription_user_amount_clear_callback(
-    callback: CallbackQuery,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
-        return
-    _, subscription_id_raw, friend_id_raw = parts
-    try:
-        subscription_id = int(subscription_id_raw)
-        friend_id = int(friend_id_raw)
-    except ValueError:
-        await callback.answer("Invalid user.", show_alert=True)
-        return
-
-    participants = await db.list_subscription_participants(subscription_id)
-    target_person = next((person for person in participants if int(person["id"]) == friend_id), None)
-    if target_person is None:
-        await callback.answer("User is not in this subscription.", show_alert=True)
-        return
-
-    await db.update_participant_fixed_amount(subscription_id, friend_id, None)
-    await state.clear()
-    await callback.answer("Using subscription amount.")
-    await send_subscription_user_amounts(callback, db, subscription_id)
-
-
-@admin_router.callback_query(F.data.startswith("sub_user_amount_all:"))
-async def handle_subscription_user_amount_set_all_callback(
-    callback: CallbackQuery,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    parts = callback.data.split(":", 1)
-    if len(parts) != 2:
-        await callback.answer("Invalid action.", show_alert=True)
-        return
-    _, subscription_id_raw = parts
-    try:
-        subscription_id = int(subscription_id_raw)
-    except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
-        return
-
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
-        return
-    participants = await db.list_subscription_participants(subscription_id)
-    if not participants:
-        await callback.answer("No users in this subscription.", show_alert=True)
-        return
-
-    await state.set_state(SubscriptionEditForm.user_amount_all)
-    await state.update_data(user_amount_all_subscription_id=subscription_id)
-    if callback.message:
-        await callback.message.answer(
-            "👥 Amount per user:\n\n"
-            "Send amount to apply it to all users.\n"
-            "Example: <code>300</code>.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "duedate"))
@@ -1010,22 +1134,14 @@ async def handle_subscription_due_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    try:
-        current = datetime.strptime(subscription["next_charge_at"], "%Y-%m-%d").strftime(DATE_INPUT_FORMAT)
-    except (KeyError, ValueError):
-        current = subscription.get("next_charge_at", "unknown")
-    prompt = (
-        "📅 Next charge:\n"
-        f"Current: <code>{escape_html(current)}</code>\n"
-        "\n"
-        "Send new date in <code>DD.MM.YYYY</code>"
-    )
+    dropped = await _cycles_without_payments(db, callback_data.subscription_id)
     await start_subscription_edit_flow(
         callback,
         state,
         callback_data.subscription_id,
         SubscriptionEditForm.due_date,
-        prompt,
+        due_date_prompt_text(subscription, await resolve_report_timezone(db), dropped),
+        origin_screen=_pricing_origin(callback_data.subscription_id),
     )
 
 
@@ -1039,37 +1155,19 @@ async def handle_subscription_period_callback(
     subscription = await _load_subscription(callback, db, callback_data.subscription_id)
     if not subscription:
         return
-    _, period_markup = period_prompt()
-    current_period = int(subscription.get("period_days") or 30)
-    if current_period == MONTHLY_PERIOD_SENTINEL:
-        current_label = "monthly"
-    else:
-        current_label = f"{current_period} day(s)"
-    prompt = (
-        "🔁 Period:\n"
-        f"Current: <code>{escape_html(current_label)}</code>\n"
-        "\n"
-        "Repeat period in days. Choose a preset or send your own number."
-    )
+    current_period = _subscription_period(subscription)
     await start_subscription_edit_flow(
         callback,
         state,
         callback_data.subscription_id,
         SubscriptionEditForm.period,
-        prompt,
-        reply_markup=period_markup,
+        period_edit_prompt_text(subscription),
+        reply_markup=build_period_keyboard(selected=current_period),
+        origin_screen=_pricing_origin(callback_data.subscription_id),
     )
 
 
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "reminders"))
-async def handle_subscription_reminders_callback(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    await state.clear()
-    await send_reminder_settings(callback, db, callback_data.subscription_id)
+# Reports and cycles (WP8): sub:more (legacy), sub:report, sub:cycles, cycle:*.
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "more"))
@@ -1079,63 +1177,30 @@ async def handle_subscription_more_callback(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
-    await send_subscription_more(callback, db, callback_data.subscription_id)
+    """The old 'more' submenu is gone (Delete and Reports are on the card).
 
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "paymentinfo"))
-async def handle_subscription_payment_info_callback(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    await state.clear()
-    await send_subscription_payment_info(callback, db, callback_data.subscription_id)
-
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "paymentmethod"))
-async def handle_subscription_payment_method_callback(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    await state.clear()
-    await _show_subscription_payment_destination_menu(callback, db, callback_data.subscription_id)
-
-
-@admin_router.callback_query(F.data.startswith("sub_payment_destination:"))
-async def handle_subscription_payment_method_select(
-    callback: CallbackQuery,
-    db: Database,
-) -> None:
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
+    On a card sent before the redesign this button was labelled '📊 Reports',
+    so a tap there opens the report (it has [◀️ To card]). Anywhere else (the
+    old report's Back, the old submenu) it redraws the card.
+    """
+    await _drop_flow(callback, state)
+    subscription_id = callback_data.subscription_id
+    if _tapped_on_old_card(callback, subscription_id):
+        await send_subscription_payment_report(callback, db, subscription_id)
         return
-    try:
-        subscription_id = int(parts[1])
-    except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
-        return
-    selected_value = parts[2].strip().lower()
-    if selected_value == "default":
-        await db.update_subscription_fields(subscription_id, payment_destination_id=None)
-        await callback.answer("Using default payment method.")
-        await send_subscription_payment_info(callback, db, subscription_id)
-        return
-    try:
-        destination_id = int(selected_value)
-    except ValueError:
-        await callback.answer("Invalid payment method.", show_alert=True)
-        return
-    if not await db.get_payment_destination(destination_id):
-        await callback.answer("Payment method not found.", show_alert=True)
-        return
-    await db.update_subscription_fields(subscription_id, payment_destination_id=destination_id)
-    await callback.answer("Payment method updated.")
-    await send_subscription_payment_info(callback, db, subscription_id)
+    await send_subscription_more(callback, db, subscription_id)
+
+
+def _tapped_on_old_card(callback: CallbackQuery, subscription_id: int) -> bool:
+    """The tapped message is an old card: next to sub:more it still offers sub:pricing."""
+    markup = getattr(callback.message, "reply_markup", None)
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return False
+    pricing = SubscriptionAction(action="pricing", subscription_id=subscription_id).pack()
+    return any(button.callback_data == pricing for row in markup.inline_keyboard for button in row)
+
+
+# Payment (sub:paymentinfo), the method picker and its choices: app/handlers/subscription_payment.py (WP7).
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "report"))
@@ -1145,7 +1210,7 @@ async def handle_subscription_report_callback(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
+    await _drop_flow(callback, state)
     await send_subscription_payment_report(callback, db, callback_data.subscription_id)
 
 
@@ -1156,7 +1221,7 @@ async def handle_subscription_cycles_callback(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
+    await _drop_flow(callback, state)
     await send_subscription_open_cycles(callback, db, callback_data.subscription_id)
 
 
@@ -1167,7 +1232,8 @@ async def handle_cycle_open_callback(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
+    """The cycle screen; a closed cycle redraws the open cycles with 'This cycle is already closed'."""
+    await _drop_flow(callback, state)
     await send_subscription_cycle_actions(
         callback,
         db,
@@ -1183,25 +1249,9 @@ async def handle_cycle_recreate_callback(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
-    subscription = await _load_open_cycle(
-        callback,
-        db,
-        callback_data.subscription_id,
-        callback_data.due_date,
-    )
-    if not subscription:
-        return
-
-    await db.reset_cycle(callback_data.subscription_id, callback_data.due_date)
-    await db.ensure_cycle(callback_data.subscription_id, callback_data.due_date)
-    await send_subscription_cycle_actions(
-        callback,
-        db,
-        callback_data.subscription_id,
-        callback_data.due_date,
-        notice="Cycle recreated. Snapshot and payment marks were cleared.",
-    )
+    """♻️ Recreate (also on old messages) asks first: '⚠️ <b>Recreate the … cycle?</b>'."""
+    await _drop_flow(callback, state)
+    await send_cycle_confirm(callback, db, callback_data.subscription_id, callback_data.due_date, close=False)
 
 
 @admin_router.callback_query(CycleAction.filter(F.action == "force_close"))
@@ -1211,353 +1261,134 @@ async def handle_cycle_force_close_callback(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
-    subscription = await _load_open_cycle(
-        callback,
-        db,
-        callback_data.subscription_id,
-        callback_data.due_date,
-    )
-    if not subscription:
-        return
+    """🔒 Close cycle (the old '✅ Force close' too) asks first: '⚠️ <b>Close the … cycle?</b>'."""
+    await _drop_flow(callback, state)
+    await send_cycle_confirm(callback, db, callback_data.subscription_id, callback_data.due_date, close=True)
 
-    await db.freeze_cycle_snapshot(callback_data.subscription_id, callback_data.due_date)
-    cycle_state_map = await db.list_cycle_participants_for_due_dates(
-        callback_data.subscription_id,
-        [callback_data.due_date],
-    )
-    cycle_state = cycle_state_map.get(callback_data.due_date) or {}
-    live_participants = await db.list_subscription_participants(callback_data.subscription_id)
-    cycle_participants = _resolve_cycle_participants(cycle_state, live_participants)
+
+@admin_router.callback_query(CycleAction.filter(F.action == CYCLE_RECREATE_YES))
+async def handle_cycle_recreate_yes(
+    callback: CallbackQuery,
+    callback_data: CycleAction,
+    db: Database,
+) -> None:
+    """Recreate the cycle from the current people and settings, then redraw it with a banner."""
+    subscription_id, due_value = callback_data.subscription_id, callback_data.due_date
+    async with guarded(callback, ("cycle", (subscription_id, due_value))) as acquired:
+        if not acquired:
+            return
+        subscription = await _load_open_cycle(callback, db, subscription_id, due_value)
+        if not subscription:
+            return
+        await db.reset_cycle(subscription_id, due_value)
+        await db.ensure_cycle(subscription_id, due_value)
+        await send_subscription_cycle_actions(
+            callback,
+            db,
+            subscription_id,
+            due_value,
+            banner=CYCLE_RECREATED_BANNER,
+            toast=toast_from_html(CYCLE_RECREATED_BANNER),
+        )
+
+
+async def force_close_cycle(db: Database, subscription: Dict[str, object], due_value: str) -> int:
+    """Mark everyone unpaid in the cycle as paid, close it and move the next charge on.
+
+    Returns how many people were marked as paid.
+    """
+    subscription_id = int(subscription["id"])  # type: ignore[call-overload]
+    await db.freeze_cycle_snapshot(subscription_id, due_value)
+    cycle_state = (await db.list_cycle_participants_for_due_dates(subscription_id, [due_value])).get(due_value) or {}
+    live_participants = await db.list_subscription_participants(subscription_id)
     participant_ids = sorted(
         {
             int(person.get("telegram_id") or 0)
-            for person in cycle_participants
+            for person in _resolve_cycle_participants(cycle_state, live_participants)
             if int(person.get("telegram_id") or 0) > 0
         }
     )
-
-    payments = await db.list_payments_for_cycles(
-        callback_data.subscription_id,
-        [callback_data.due_date],
-    )
     paid_ids = {
         int(row["paid_by_telegram_id"])
-        for row in payments
+        for row in await db.list_payments_for_cycles(subscription_id, [due_value])
         if row.get("paid_by_telegram_id") is not None
     }
     added_count = 0
     for telegram_id in participant_ids:
         if telegram_id in paid_ids:
             continue
-        await db.log_payment(callback_data.subscription_id, callback_data.due_date, telegram_id)
+        await db.log_payment(subscription_id, due_value, telegram_id)
         added_count += 1
-
-    await db.close_cycle(callback_data.subscription_id, callback_data.due_date)
-    await _advance_subscription_after_cycle_close(db, subscription, callback_data.due_date)
-    await send_subscription_open_cycles(
-        callback,
-        db,
-        callback_data.subscription_id,
-        notice=f"Cycle closed. Marked {added_count} unpaid user(s) as paid.",
-    )
+    await db.close_cycle(subscription_id, due_value)
+    await _advance_subscription_after_cycle_close(db, subscription, due_value)
+    return added_count
 
 
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "reminders_send"))
-async def handle_subscription_reminders_send(
+@admin_router.callback_query(CycleAction.filter(F.action == CYCLE_FORCE_CLOSE_YES))
+async def handle_cycle_force_close_yes(
     callback: CallbackQuery,
-    callback_data: SubscriptionAction,
+    callback_data: CycleAction,
     db: Database,
-    state: FSMContext,
 ) -> None:
-    await state.clear()
-    await send_reminder_send_menu(callback, db, callback_data.subscription_id)
-
-
-@admin_router.callback_query(ReminderSendAction.filter())
-async def handle_subscription_reminders_send_target(
-    callback: CallbackQuery,
-    callback_data: ReminderSendAction,
-    bot: Bot,
-    settings: Settings,
-    db: Database,
-    converter: CurrencyConverter,
-    state: FSMContext,
-) -> None:
-    await state.clear()
-    target_id = callback_data.telegram_id or None
-    sent_count = await send_reminders_now(
-        bot,
-        db,
-        converter,
-        subscription_id=callback_data.subscription_id,
-        rounding_mode=settings.currency_rounding,
-        target_telegram_id=target_id,
-    )
-    await callback.answer(f"Sent {sent_count} notification(s).")
-    await send_reminder_settings(callback, db, callback_data.subscription_id)
-
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "share"))
-async def handle_subscription_share_callback(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
-    if not subscription:
-        return
-    _, prompt_markup = share_limit_prompt()
-    current_share = subscription.get("share_limit")
-    current_label = f"{current_share} user(s)" if current_share else "all users"
-    prompt_text = (
-        "➗ Split limit:\n"
-        f"Current: <code>{escape_html(current_label)}</code>\n"
-        "\n"
-        "Send number of users or tap “Split across all”."
-    )
-    await start_subscription_edit_flow(
-        callback,
-        state,
-        callback_data.subscription_id,
-        SubscriptionEditForm.share_limit,
-        prompt_text,
-        reply_markup=prompt_markup,
-    )
-
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "remindertime"))
-async def handle_subscription_reminder_time_callback(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
-    if not subscription:
-        return
-    await state.clear()
-    await _show_reminder_time_menu(callback, db, callback_data.subscription_id)
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data.startswith("sub_remindertime:"))
-async def handle_subscription_reminder_time_select(
-    callback: CallbackQuery,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    parts = callback.data.split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Invalid action.", show_alert=True)
-        return
-    _, subscription_id_raw, time_raw = parts
-    try:
-        subscription_id = int(subscription_id_raw)
-    except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
-        return
-    normalized = normalize_time_string(time_raw)
-    if normalized is None:
-        await callback.answer("Time must be HH:MM.", show_alert=True)
-        return
-    await db.update_subscription_fields(subscription_id, reminder_time=normalized)
-    await state.clear()
-    await callback.answer(f"Reminder time set to {normalized}")
-    await _show_reminder_time_menu(callback, db, subscription_id)
-
-
-@admin_router.callback_query(F.data.startswith("sub_remindertime_other:"))
-async def handle_subscription_reminder_time_other(
-    callback: CallbackQuery,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    parts = callback.data.split(":", 1)
-    if len(parts) != 2:
-        await callback.answer("Invalid action.", show_alert=True)
-        return
-    _, subscription_id_raw = parts
-    try:
-        subscription_id = int(subscription_id_raw)
-    except ValueError:
-        await callback.answer("Invalid subscription.", show_alert=True)
-        return
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
-        return
-    await state.set_state(SubscriptionEditForm.reminder_time)
-    await state.update_data(edit_subscription_id=subscription_id)
-    if callback.message:
-        await callback.message.answer(
-            "⏰ Reminder time:\n"
-            "Send time in <code>HH:MM</code>\n"
-            "\n"
-            "Example: <code>16:00</code>",
-            reply_markup=dialog_cancel_inline_keyboard(),
+    """Close the cycle (everyone unpaid marked as paid), then the open cycles with a banner."""
+    subscription_id, due_value = callback_data.subscription_id, callback_data.due_date
+    async with guarded(callback, ("cycle", (subscription_id, due_value))) as acquired:
+        if not acquired:
+            return
+        subscription = await _load_open_cycle(callback, db, subscription_id, due_value)
+        if not subscription:
+            return
+        marked = await force_close_cycle(db, subscription, due_value)
+        banner = cycle_closed_banner(marked)
+        await send_subscription_open_cycles(
+            callback,
+            db,
+            subscription_id,
+            banner=banner,
+            toast=toast_from_html(banner),
         )
-    await callback.answer()
 
 
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "remindertime_default"))
-async def handle_subscription_reminder_time_default(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    await db.update_subscription_fields(callback_data.subscription_id, reminder_time="")
-    await state.clear()
-    await callback.answer("Using base time now.")
-    await _show_reminder_time_menu(callback, db, callback_data.subscription_id)
+# The comment prompt (sub:comment, sub:comment_clear) lives in app/handlers/subscription_payment.py (WP7).
 
 
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "reminderdays"))
-async def handle_subscription_reminder_days_callback(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
-    if not subscription:
-        return
-    current_offsets = format_offsets_for_display(
-        parse_offsets(subscription.get("reminder_offsets"))
-    )
-    prompt = (
-        "🔔 Reminder days:\n"
-        "Send offsets separated by commas or spaces (example: <code>-1 0 1</code>).\n"
-        "Negative means before due date, positive means after.\n"
-        "\n"
-        f"🏷️ Current: <code>{escape_html(current_offsets)}</code>."
-    )
-    await start_subscription_edit_flow(
-        callback,
-        state,
-        callback_data.subscription_id,
-        SubscriptionEditForm.reminder_offsets,
-        prompt,
-    )
-
-
-def _comment_prompt_text(current_value: str) -> str:
-    base = "📝 Comment:"
-    if current_value:
-        return (
-            f"{base}\n"
-            f"Current: <code>{escape_html(current_value)}</code>.\n"
-            "\n"
-            "Send text to attach to reminders."
-        )
-    return f"{base}\nSend text to attach to reminders."
-
-
-async def _open_comment_editor(
-    callback: CallbackQuery,
-    state: FSMContext,
-    subscription_id: int,
-    current_value: str,
-    *,
-    edit_existing: bool,
-) -> None:
-    await state.set_state(SubscriptionEditForm.comment)
-    await state.update_data(edit_subscription_id=int(subscription_id))
-    prompt = _comment_prompt_text(current_value)
-    # force_reply is only valid on a freshly sent prompt, never on edit_text.
-    markup = comment_edit_keyboard(subscription_id, bool(current_value), force_reply=not edit_existing)
-    if callback.message:
-        if edit_existing:
-            await callback.message.edit_text(prompt, reply_markup=markup)
-        else:
-            await callback.message.answer(prompt, reply_markup=markup)
-    await callback.answer()
-
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "comment"))
-async def handle_subscription_comment_callback(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
-    if not subscription:
-        return
-    current_value = (subscription.get("comment") or "").strip()
-    await _open_comment_editor(
-        callback,
-        state,
-        callback_data.subscription_id,
-        current_value,
-        edit_existing=False,
-    )
-
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "comment_clear"))
-async def handle_subscription_comment_clear(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-    state: FSMContext,
-) -> None:
-    await db.update_subscription_fields(callback_data.subscription_id, comment="")
-    subscription = await db.get_subscription(callback_data.subscription_id)
-    if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
-        return
-    await _open_comment_editor(
-        callback,
-        state,
-        callback_data.subscription_id,
-        "",
-        edit_existing=True,
-    )
-
-
-@admin_router.callback_query(SubscriptionAction.filter(F.action == "reminderloop"))
-async def handle_subscription_reminder_loop_toggle(
-    callback: CallbackQuery,
-    callback_data: SubscriptionAction,
-    db: Database,
-) -> None:
-    subscription = await db.get_subscription(callback_data.subscription_id)
-    if not subscription:
-        await callback.answer("Subscription not found.", show_alert=True)
-        return
-
-    new_value = 0 if subscription.get("remind_after_due") else 1
-    await db.update_subscription_fields(callback_data.subscription_id, remind_after_due=new_value)
-    status = "enabled" if new_value else "disabled"
-    await callback.answer(f"Post-due reminders {status}.")
-    await send_reminder_settings(callback, db, callback_data.subscription_id)
+def subscription_delete_question(name: str, open_cycles: int, participants: int) -> str:
+    """'⚠️ <b>Delete Netflix?</b>' and one consequence line (``name`` is plain text)."""
+    if open_cycles:
+        what = f"Its {plural(open_cycles, 'open cycle')} and payment history are deleted"
+    else:
+        what = "Its payment history is deleted"
+    tail = "; members stop getting reminders." if participants else "."
+    return f"⚠️ <b>Delete {escape_html(name)}?</b>\n{what}{tail}"
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "delete"))
 async def handle_subscription_delete_prompt(
     callback: CallbackQuery,
     callback_data: SubscriptionAction,
+    db: Database,
+    state: FSMContext,
 ) -> None:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="⬅️ Back",
-        callback_data=SubscriptionAction(action="more", subscription_id=callback_data.subscription_id).pack(),
+    """Edit the card into the question above the card: [✖️ Cancel][🗑 Delete]."""
+    await _drop_flow(callback, state)
+    subscription_id = callback_data.subscription_id
+    subscription = await _load_subscription(callback, db, subscription_id)
+    if not subscription:
+        return
+    card = await build_subscription_card(db, subscription_id)
+    if card is None:
+        await show_subscription_gone(callback, db)
+        return
+    question = subscription_delete_question(
+        str(subscription["name"]),
+        len(await db.list_open_cycles(subscription_id)),
+        len(await db.list_subscription_participants(subscription_id)),
     )
-    builder.button(
-        text="🗑 Yes, delete",
-        callback_data=SubscriptionAction(
-            action="confirm_delete",
-            subscription_id=callback_data.subscription_id,
-        ).pack(),
-        style="danger",
+    await respond_with_markup(
+        callback,
+        f"{question}\n\n{card[0]}",
+        reply_markup=subscription_delete_confirm_keyboard(subscription_id),
     )
-    await callback.message.edit_text(
-        "Are you sure you want to delete this subscription?",
-        reply_markup=builder.as_markup(),
-    )
-    await callback.answer()
 
 
 @admin_router.callback_query(SubscriptionAction.filter(F.action == "confirm_delete"))
@@ -1566,9 +1397,24 @@ async def handle_subscription_delete_confirm(
     callback_data: SubscriptionAction,
     db: Database,
 ) -> None:
-    await db.delete_subscription(callback_data.subscription_id)
-    await callback.answer("Subscription deleted.")
-    await send_subscription_list(callback, db)
+    """Delete once (guarded; another admin may have deleted it already), then the list with a banner."""
+    subscription_id = callback_data.subscription_id
+    async with guarded(callback, ("sub_delete", subscription_id)) as acquired:
+        if not acquired:
+            return
+        subscription = await db.get_subscription(subscription_id)
+        if not subscription:
+            await show_subscription_gone(callback, db)
+            return
+        await db.delete_subscription(subscription_id)
+        banner = f"✅ {escape_html(subscription['name'])} deleted"
+        await send_subscription_list(callback, db, banner=banner, toast=toast_from_html(banner))
+
+
+RENAME_HINT = "⚠️ Send text, for example <code>Netflix Premium</code>."
+RENAME_TOO_LONG_HINT = (
+    f"⚠️ Keep the name under {SUBSCRIPTION_NAME_MAX_LEN} characters, for example <code>Netflix Premium</code>."
+)
 
 
 @admin_router.message(SubscriptionEditForm.rename)
@@ -1577,15 +1423,23 @@ async def edit_subscription_rename(message: Message, state: FSMContext, db: Data
     if sub_id is None:
         return
 
-    new_name = (message.text or "").strip()
+    new_name = " ".join((message.text or "").split())
     if not new_name:
-        await message.answer("Name cannot be empty.")
+        await note_typo(message, state, RENAME_HINT)
+        return
+    if len(new_name) > SUBSCRIPTION_NAME_MAX_LEN:
+        await note_typo(message, state, RENAME_TOO_LONG_HINT)
         return
 
+    if not await db.get_subscription(sub_id):
+        await finish_prompt(message, state)
+        await send_subscription_list(message, db, banner=SUBSCRIPTION_GONE_BANNER)
+        return
     await db.update_subscription_fields(sub_id, name=new_name)
-    await state.clear()
-    await message.answer("Name updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
+    flow_data = await finish_prompt(message, state)
+    await show_card_after_prompt(
+        message, db, sub_id, flow_data, banner=f"✅ Renamed · <b>{escape_html(new_name)}</b>"
+    )
 
 
 @admin_router.message(SubscriptionEditForm.amount)
@@ -1594,19 +1448,22 @@ async def edit_subscription_amount(message: Message, state: FSMContext, db: Data
     if sub_id is None:
         return
 
-    try:
-        raw = (message.text or "").strip().replace(",", ".")
-        amount = float(raw)
-        if not math.isfinite(amount) or amount <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("Amount must be a positive number. Try again.")
+    parsed = parse_amount(message.text)
+    if parsed is None or not math.isfinite(parsed[0]):
+        await note_typo(message, state, AMOUNT_HINT)
+        return
+    if parsed[0] <= 0:
+        await note_typo(message, state, AMOUNT_ZERO_HINT)
         return
 
-    await db.update_subscription_fields(sub_id, amount=amount)
-    await state.clear()
-    await message.answer("Amount updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
+    subscription = await db.get_subscription(sub_id)
+    if not subscription:
+        await _pricing_prompt_gone(message, state, db)
+        return
+    await db.update_subscription_fields(sub_id, amount=parsed[0])
+    flow_data = await finish_prompt(message, state)
+    banner = amount_banner(parsed[0], subscription_currency_of(subscription))
+    await show_pricing_after_prompt(message, db, sub_id, flow_data, banner=banner)
 
 
 @admin_router.message(SubscriptionEditForm.currency)
@@ -1615,15 +1472,17 @@ async def edit_subscription_currency(message: Message, state: FSMContext, db: Da
     if sub_id is None:
         return
 
-    currency = (message.text or "").strip().upper()
-    if len(currency) != 3:
-        await message.answer("Currency must contain exactly 3 letters, e.g. USD.")
+    currency = parse_currency(message.text)
+    if currency is None:
+        await note_typo(message, state, CURRENCY_OTHER_HINT)
         return
 
+    if not await db.get_subscription(sub_id):
+        await _pricing_prompt_gone(message, state, db)
+        return
     await db.update_subscription_fields(sub_id, currency=currency)
-    await state.clear()
-    await message.answer("Currency updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
+    flow_data = await finish_prompt(message, state)
+    await show_pricing_after_prompt(message, db, sub_id, flow_data, banner=currency_banner(currency))
 
 
 @admin_router.message(SubscriptionEditForm.base_currency)
@@ -1632,92 +1491,17 @@ async def edit_subscription_base_currency(message: Message, state: FSMContext, d
     if sub_id is None:
         return
 
-    currency = (message.text or "").strip().upper()
-    if len(currency) != 3 or not currency.isalpha():
-        await message.answer("Currency must contain exactly 3 letters, e.g. EUR.")
+    currency = parse_currency(message.text)
+    if currency is None:
+        await note_typo(message, state, CURRENCY_HINT)
         return
 
+    if not await db.get_subscription(sub_id):
+        await _pricing_prompt_gone(message, state, db)
+        return
     await db.update_subscription_fields(sub_id, base_currency=currency)
-    await state.clear()
-    await message.answer("Convert currency updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
-
-
-@admin_router.message(SubscriptionEditForm.user_amount)
-async def edit_subscription_user_amount(message: Message, state: FSMContext, db: Database) -> None:
-    data = await state.get_data()
-    subscription_id = data.get("user_amount_subscription_id")
-    friend_id = data.get("user_amount_friend_id")
-    if not subscription_id or not friend_id:
-        await state.clear()
-        await message.answer("Session expired. Reopen amount-per-user menu.")
-        return
-
-    participants = await db.list_subscription_participants(int(subscription_id))
-    target_person = next((person for person in participants if int(person["id"]) == int(friend_id)), None)
-    if target_person is None:
-        await state.clear()
-        await message.answer("User is not in this subscription.")
-        return
-
-    raw_value = (message.text or "").strip()
-    if raw_value.lower() in {"clear", "default", "none", "-"}:
-        await db.update_participant_fixed_amount(
-            int(subscription_id),
-            int(friend_id),
-            None,
-        )
-        await state.clear()
-        await message.answer("Using subscription amount.", reply_markup=admin_reply_keyboard())
-        await send_subscription_user_amounts(message, db, int(subscription_id))
-        return
-
-    try:
-        amount = float(raw_value.replace(",", "."))
-        if not math.isfinite(amount) or amount < 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("Amount must be zero or a positive number. Example: 300 or 0")
-        return
-
-    await db.update_participant_fixed_amount(
-        int(subscription_id),
-        int(friend_id),
-        amount,
-    )
-    await state.clear()
-    await message.answer("Fixed amount updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_user_amounts(message, db, int(subscription_id))
-
-
-@admin_router.message(SubscriptionEditForm.user_amount_all)
-async def edit_subscription_user_amount_all(message: Message, state: FSMContext, db: Database) -> None:
-    data = await state.get_data()
-    subscription_id = data.get("user_amount_all_subscription_id")
-    if not subscription_id:
-        await state.clear()
-        await message.answer("Session expired. Reopen amount-per-user menu.")
-        return
-
-    participants = await db.list_subscription_participants(int(subscription_id))
-    if not participants:
-        await state.clear()
-        await message.answer("No users in this subscription.")
-        return
-
-    raw_value = (message.text or "").strip()
-    try:
-        amount = float(raw_value.replace(",", "."))
-        if not math.isfinite(amount) or amount < 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("Amount must be zero or a positive number. Example: 300 or 0")
-        return
-
-    await db.update_all_participants_fixed_amount(int(subscription_id), amount)
-    await state.clear()
-    await message.answer("Fixed amount updated for all users.", reply_markup=admin_reply_keyboard())
-    await send_subscription_user_amounts(message, db, int(subscription_id))
+    flow_data = await finish_prompt(message, state)
+    await show_pricing_after_prompt(message, db, sub_id, flow_data, banner=shown_in_banner(currency))
 
 
 async def _apply_due_date_change(db: Database, subscription: Dict[str, object], due_date) -> None:
@@ -1786,49 +1570,45 @@ async def edit_subscription_due_date(message: Message, state: FSMContext, db: Da
     if sub_id is None:
         return
 
-    raw = (message.text or "").strip()
-    normalized = raw.replace("-", ".")
-    try:
-        due_date = datetime.strptime(normalized, DATE_INPUT_FORMAT).date()
-    except ValueError:
-        await message.answer("Date must be in DD.MM.YYYY format. Try again.")
+    tz_name = await resolve_report_timezone(db)
+    today = datetime.now(parse_timezone(tz_name)).date()
+    due_date = parse_date_loose(message.text, today)
+    if due_date is None:
+        await note_typo(message, state, NEXT_CHARGE_HINT)
+        return
+    if due_date < today and (await state.get_data()).get("pending_due") != due_date.isoformat():
+        # Warn once, as the creation wizard does; sending the same past date again keeps it.
+        await note_typo(message, state, PAST_DATE_HINT)
+        await state.update_data(pending_due=due_date.isoformat())
         return
 
     subscription = await db.get_subscription(sub_id)
     if not subscription:
-        await state.clear()
-        await message.answer("Subscription not found.", reply_markup=admin_reply_keyboard())
+        await _pricing_prompt_gone(message, state, db)
         return
 
     conflict = await _find_due_date_conflict_cycle(db, subscription, due_date)
+    flow_data = await finish_prompt(message, state)
     if conflict:
-        await state.clear()
-        conflict_due = str(conflict["due_date"])
-        if conflict["closed"]:
-            status_line = f"closed, all payments recorded ({conflict['payments']})"
-        else:
-            status_line = f"open, {conflict['payments']} payment(s) recorded"
-        await message.answer(
-            "📅 Change next charge date?\n"
-            f"Current cycle: <code>{format_due_date(conflict_due)}</code> — {status_line}.\n"
-            f"New date: <code>{format_due_date(due_date.isoformat())}</code>\n"
-            "\n"
-            "🔀 Move cycle — same billing period, payments carry over;\n"
-            "nobody is asked to pay again for this period.\n"
-            "🆕 New cycle — keep history at the old date and request\n"
-            "payments for the new date.",
-            reply_markup=build_due_date_change_keyboard(
-                sub_id,
-                conflict_due,
-                due_date.isoformat(),
-            ),
-        )
+        # Ask on the Pricing screen the prompt came from; both answers redraw Pricing.
+        text = due_date_conflict_text(conflict, due_date.isoformat(), tz_name)
+        markup = build_due_date_change_keyboard(sub_id, str(conflict["due_date"]), due_date.isoformat())
+        origin = origin_of(flow_data)
+        if origin is None or message.bot is None or not await edit_in_place(message.bot, *origin, text, markup):
+            await message.answer(text, reply_markup=markup)
         return
 
     await _apply_due_date_change(db, subscription, due_date)
-    await state.clear()
-    await message.answer("Next charge date updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
+    await show_pricing_after_prompt(
+        message, db, sub_id, flow_data, banner=next_charge_banner(due_date.isoformat(), tz_name)
+    )
+
+
+def _parse_iso_date(value: str) -> Optional[date]:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
 
 
 @admin_router.callback_query(DueDateChangeAction.filter(F.action == "move"))
@@ -1838,47 +1618,41 @@ async def handle_due_date_move(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
-    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
-    if not subscription:
-        return
-    sub_id = int(subscription["id"])
+    """[🔀 Move cycle]: the cycle and its payments move to the new date; back to Pricing."""
+    await _drop_flow(callback, state)
+    sub_id = callback_data.subscription_id
+    async with guarded(callback, ("duedate", sub_id)) as acquired:
+        if not acquired:
+            return
+        subscription = await _load_subscription(callback, db, sub_id)
+        if not subscription:
+            return
+        new_date = _parse_iso_date(callback_data.new_due)
+        if new_date is None:
+            await send_pricing_settings(callback, db, sub_id, toast=DEAD_BUTTON)
+            return
+        cycle = await db.get_cycle(sub_id, callback_data.old_due)
+        if not cycle:
+            await stale_redirect(callback, CYCLE_GONE_TOAST, lambda: send_pricing_settings(callback, db, sub_id))
+            return
+        if not await db.move_cycle(sub_id, callback_data.old_due, callback_data.new_due):
+            await answer_callback_once(callback, MOVE_BLOCKED_ALERT, alert=True)
+            return
+        await db.discard_unpaid_open_cycles(sub_id, keep_due=callback_data.new_due)
 
-    cycle = await db.get_cycle(sub_id, callback_data.old_due)
-    if not cycle:
-        await callback.answer("The original cycle no longer exists.", show_alert=True)
-        return
-    try:
-        new_date = datetime.strptime(callback_data.new_due, "%Y-%m-%d").date()
-    except ValueError:
-        await callback.answer("Invalid date.", show_alert=True)
-        return
-
-    if not await db.move_cycle(sub_id, callback_data.old_due, callback_data.new_due):
-        await callback.answer(
-            "Cannot move: the target date already has recorded payments.",
-            show_alert=True,
+        period_days = _subscription_period(subscription)
+        update_fields: Dict[str, object] = {}
+        if period_days == MONTHLY_PERIOD_SENTINEL:
+            update_fields["monthly_anchor_day"] = new_date.day
+        if cycle.get("closed_at"):
+            monthly_anchor_day = new_date.day if period_days == MONTHLY_PERIOD_SENTINEL else None
+            update_fields["next_charge_at"] = calculate_next_charge_date(new_date, period_days, monthly_anchor_day)
+        else:
+            update_fields["next_charge_at"] = new_date
+        await db.update_subscription_fields(sub_id, **update_fields)
+        await send_pricing_settings(
+            callback, db, sub_id, banner=CYCLE_MOVED_BANNER, toast=toast_from_html(CYCLE_MOVED_BANNER)
         )
-        return
-    await db.discard_unpaid_open_cycles(sub_id, keep_due=callback_data.new_due)
-
-    period_days = int(subscription.get("period_days") or 30)
-    update_fields: Dict[str, object] = {}
-    if period_days == MONTHLY_PERIOD_SENTINEL:
-        update_fields["monthly_anchor_day"] = new_date.day
-    if cycle.get("closed_at"):
-        monthly_anchor_day = new_date.day if period_days == MONTHLY_PERIOD_SENTINEL else None
-        update_fields["next_charge_at"] = calculate_next_charge_date(
-            new_date,
-            period_days,
-            monthly_anchor_day,
-        )
-    else:
-        update_fields["next_charge_at"] = new_date
-    await db.update_subscription_fields(sub_id, **update_fields)
-
-    await callback.answer("Cycle moved to the new date. Payments kept.")
-    await send_subscription_detail(callback, db, sub_id)
 
 
 @admin_router.callback_query(DueDateChangeAction.filter(F.action == "new"))
@@ -1888,19 +1662,69 @@ async def handle_due_date_new_cycle(
     db: Database,
     state: FSMContext,
 ) -> None:
-    await state.clear()
-    subscription = await _load_subscription(callback, db, callback_data.subscription_id)
-    if not subscription:
-        return
-    try:
-        new_date = datetime.strptime(callback_data.new_due, "%Y-%m-%d").date()
-    except ValueError:
-        await callback.answer("Invalid date.", show_alert=True)
-        return
+    """[🆕 New cycle]: the old cycle stays, payment is asked on the new date; back to Pricing."""
+    await _drop_flow(callback, state)
+    sub_id = callback_data.subscription_id
+    async with guarded(callback, ("duedate", sub_id)) as acquired:
+        if not acquired:
+            return
+        subscription = await _load_subscription(callback, db, sub_id)
+        if not subscription:
+            return
+        new_date = _parse_iso_date(callback_data.new_due)
+        if new_date is None:
+            await send_pricing_settings(callback, db, sub_id, toast=DEAD_BUTTON)
+            return
+        await _apply_due_date_change(db, subscription, new_date)
+        banner = new_cycle_banner(new_date.isoformat(), await resolve_report_timezone(db))
+        await send_pricing_settings(callback, db, sub_id, banner=banner, toast=toast_from_html(banner))
 
-    await _apply_due_date_change(db, subscription, new_date)
-    await callback.answer("New cycle scheduled for the new date.")
-    await send_subscription_detail(callback, db, int(subscription["id"]))
+
+async def _apply_period(db: Database, subscription: Dict[str, object], period: int) -> None:
+    """Save the period; Monthly keeps the anchor day (or takes it from the next charge)."""
+    monthly_anchor_day: Optional[int] = None
+    if period == MONTHLY_PERIOD_SENTINEL:
+        monthly_anchor_day = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
+        if monthly_anchor_day is None:
+            next_charge = _parse_iso_date(str(subscription.get("next_charge_at")))
+            monthly_anchor_day = next_charge.day if next_charge else None
+    await db.update_subscription_fields(
+        int(subscription["id"]),  # type: ignore[arg-type]
+        period_days=period,
+        monthly_anchor_day=monthly_anchor_day,
+    )
+
+
+async def _finish_period_edit(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    sub_id: int,
+    period: int,
+) -> None:
+    """A period preset tapped on the prompt: save, remove the prompt, redraw Pricing with a banner."""
+    message = callback.message
+    data = await state.get_data()
+    if message is None or data.get("prompt_message_id") not in (None, message.message_id):
+        # A preset on an older prompt than the one that is running.
+        await _stale_wizard_button(callback, state)
+        return
+    subscription = await db.get_subscription(sub_id)
+    if not subscription:
+        await _drop_flow(callback, state)
+        await show_subscription_gone(callback, db)
+        return
+    await _apply_period(db, subscription, period)
+    flow_data = await finish_prompt(message, state, bot=callback.bot)  # type: ignore[arg-type]
+    banner = period_banner(period)
+    screen = await build_pricing_screen(db, sub_id, banner=banner)
+    if screen is not None:
+        text, markup = screen
+        origin = origin_of(flow_data)
+        bot = callback.bot
+        if origin is None or bot is None or not await edit_in_place(bot, *origin, text, markup):
+            await message.answer(text, reply_markup=markup)
+    await answer_callback_once(callback, f"Period: {period_phrase(period)}")
 
 
 @admin_router.message(SubscriptionEditForm.period)
@@ -1909,122 +1733,18 @@ async def edit_subscription_period(message: Message, state: FSMContext, db: Data
     if sub_id is None:
         return
 
-    try:
-        text = (message.text or "").strip()
-        lower = text.lower()
-        if lower in {"month", "monthly"}:
-            period = MONTHLY_PERIOD_SENTINEL
-        else:
-            period = int(text)
-            if period <= 0:
-                raise ValueError
-    except ValueError:
-        await message.answer("Period must be a positive integer or 'monthly'.")
+    period = parse_period_input(message.text)
+    if period is None:
+        await note_typo(message, state, PERIOD_EDIT_HINT)
         return
 
     subscription = await db.get_subscription(sub_id)
-    monthly_anchor_day: Optional[int] = None
-    if period == MONTHLY_PERIOD_SENTINEL:
-        monthly_anchor_day = normalize_monthly_anchor_day(
-            subscription.get("monthly_anchor_day") if subscription else None
-        )
-        if monthly_anchor_day is None and subscription:
-            try:
-                monthly_anchor_day = datetime.strptime(
-                    str(subscription["next_charge_at"]),
-                    "%Y-%m-%d",
-                ).date().day
-            except (KeyError, TypeError, ValueError):
-                monthly_anchor_day = None
-    await db.update_subscription_fields(
-        sub_id,
-        period_days=period,
-        monthly_anchor_day=monthly_anchor_day,
-    )
-    await state.clear()
-    await message.answer("Period updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
-
-
-@admin_router.message(SubscriptionEditForm.share_limit)
-async def edit_subscription_share(message: Message, state: FSMContext, db: Database) -> None:
-    sub_id = await require_edit_subscription_id(message, state)
-    if sub_id is None:
+    if not subscription:
+        await _pricing_prompt_gone(message, state, db)
         return
-
-    text = (message.text or "").strip()
-    share_limit: Optional[int]
-    if text:
-        try:
-            share_limit = int(text)
-            if share_limit <= 0:
-                raise ValueError
-        except ValueError:
-            await message.answer("Share count must be a positive integer or empty.")
-            return
-    else:
-        share_limit = None
-
-    await db.update_subscription_fields(sub_id, share_limit=share_limit)
-    await state.clear()
-    await message.answer("Split limit updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
+    await _apply_period(db, subscription, period)
+    flow_data = await finish_prompt(message, state)
+    await show_pricing_after_prompt(message, db, sub_id, flow_data, banner=period_banner(period))
 
 
-@admin_router.message(SubscriptionEditForm.reminder_time)
-async def edit_subscription_reminder_time(message: Message, state: FSMContext, db: Database) -> None:
-    sub_id = await require_edit_subscription_id(message, state)
-    if sub_id is None:
-        return
-
-    candidate = (message.text or "").strip()
-    normalized = normalize_time_string(candidate)
-    if normalized is None:
-        await message.answer("Time must be in HH:MM format (24-hour clock).")
-        return
-
-    await db.update_subscription_fields(sub_id, reminder_time=normalized)
-    await state.clear()
-    await message.answer("Reminder time updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
-
-
-@admin_router.message(SubscriptionEditForm.reminder_offsets)
-async def edit_subscription_reminder_offsets(message: Message, state: FSMContext, db: Database) -> None:
-    sub_id = await require_edit_subscription_id(message, state)
-    if sub_id is None:
-        return
-
-    text = (message.text or "").strip()
-    if text:
-        offsets = _parse_offset_input(text)
-        if offsets is None:
-            await message.answer(
-                "Use integers separated by commas or spaces (example: -1 0). Negative = before, positive = after."
-            )
-            return
-    else:
-        offsets = DEFAULT_REMINDER_OFFSETS.copy()
-
-    await db.update_subscription_fields(sub_id, reminder_offsets=serialize_offsets(offsets))
-    await state.clear()
-    await message.answer("Reminder schedule updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
-
-
-@admin_router.message(SubscriptionEditForm.comment)
-async def edit_subscription_comment(message: Message, state: FSMContext, db: Database) -> None:
-    sub_id = await require_edit_subscription_id(message, state)
-    if sub_id is None:
-        return
-
-    raw = (message.text or "").strip()
-    if raw.lower() in {"clear", "none", "-"}:
-        comment = ""
-    else:
-        comment = raw
-
-    await db.update_subscription_fields(sub_id, comment=comment)
-    await state.clear()
-    await message.answer("Comment updated.", reply_markup=admin_reply_keyboard())
-    await send_subscription_detail(message, db, sub_id)
+# The typed comment is handled in app/handlers/subscription_payment.py (WP7).

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Dict, Optional
@@ -322,6 +323,47 @@ def _build_batch_reminder_message(
     return "\n\n".join("\n".join(block) for block in blocks)
 
 
+SEND_BLOCKED = "blocked"
+SEND_ERROR = "error"
+
+
+@dataclass
+class ReminderSendResult:
+    """What a manual "send now" did for members (admin notes are not counted).
+
+    ``sent``: members who got a message (a reminder, or a paid-from-balance
+    notice); ``skipped_paid``: members left out because they already paid;
+    ``not_due``: unpaid members with no reminder due today; ``failed``:
+    members the message could not reach, by reason (``SEND_BLOCKED`` /
+    ``SEND_ERROR``).
+    """
+
+    sent: set[int] = field(default_factory=set)
+    skipped_paid: set[int] = field(default_factory=set)
+    not_due: set[int] = field(default_factory=set)
+    failed: dict[int, str] = field(default_factory=dict)
+
+    @property
+    def sent_count(self) -> int:
+        return len(self.sent)
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failed)
+
+    @property
+    def blocked_count(self) -> int:
+        return sum(1 for reason in self.failed.values() if reason == SEND_BLOCKED)
+
+    def delivered(self, telegram_id: int) -> None:
+        self.sent.add(telegram_id)
+        self.failed.pop(telegram_id, None)
+
+    def undelivered(self, telegram_id: int, failures: list[str]) -> None:
+        if telegram_id not in self.sent:
+            self.failed[telegram_id] = failures[-1] if failures else SEND_ERROR
+
+
 async def _send_message_with_retry(
     bot: Bot,
     chat_id: int,
@@ -331,7 +373,13 @@ async def _send_message_with_retry(
     logger: logging.Logger,
     retries: int = 2,
     base_delay: float = 1.0,
+    failures: Optional[list[str]] = None,
 ) -> Optional[int]:
+    """Send with retries; ``None`` when it could not be delivered.
+
+    ``failures`` (optional) gets ``SEND_BLOCKED`` appended when the user
+    blocked the bot, or ``SEND_ERROR`` for any other final failure.
+    """
     attempt = 0
     flood_waits = 0
     while True:
@@ -341,6 +389,8 @@ async def _send_message_with_retry(
         except TelegramRetryAfter as exc:
             if flood_waits >= 3:
                 logger.warning("Giving up on reminder to user %s after repeated flood waits", chat_id)
+                if failures is not None:
+                    failures.append(SEND_ERROR)
                 return None
             flood_waits += 1
             delay = float(exc.retry_after) + 1.0
@@ -352,6 +402,8 @@ async def _send_message_with_retry(
                 chat_id,
                 exc,
             )
+            if failures is not None:
+                failures.append(SEND_BLOCKED)
             return None
         except TelegramBadRequest as exc:
             logger.warning(
@@ -359,6 +411,8 @@ async def _send_message_with_retry(
                 chat_id,
                 exc,
             )
+            if failures is not None:
+                failures.append(SEND_ERROR)
             return None
         except (TelegramNetworkError, asyncio.TimeoutError, aiohttp.ClientError) as exc:
             if attempt >= retries:
@@ -368,6 +422,8 @@ async def _send_message_with_retry(
                     attempt + 1,
                     exc,
                 )
+                if failures is not None:
+                    failures.append(SEND_ERROR)
                 return None
             delay = base_delay * (2 ** attempt)
             logger.warning(
@@ -380,6 +436,8 @@ async def _send_message_with_retry(
             await asyncio.sleep(delay)
         except Exception:  # noqa: BLE001
             logger.exception("Failed to send reminder to user %s", chat_id)
+            if failures is not None:
+                failures.append(SEND_ERROR)
             return None
 
 
@@ -486,7 +544,15 @@ async def _run_reminder_pass(
     register_reminders: bool,
     target_telegram_id: Optional[int] = None,
     record_manual_suppressions: bool = False,
+    stats: Optional[ReminderSendResult] = None,
+    remind_any_due: bool = False,
 ) -> int:
+    """One reminder pass; returns the number of messages sent (members and admins).
+
+    ``stats`` (optional) collects the per-member outcome for a manual send.
+    ``remind_any_due`` ('Send now') reminds every unpaid member of a cycle that
+    is due today or overdue, whatever its reminder days and after-due toggle.
+    """
     logger = logging.getLogger("reminder_runner")
     if now.tzinfo is None:
         now_utc = now.replace(tzinfo=timezone.utc)
@@ -685,6 +751,8 @@ async def _run_reminder_pass(
                     if telegram_id <= 0:
                         continue
                     if (due_key, telegram_id) in paid_map:
+                        if stats is not None:
+                            stats.skipped_paid.add(telegram_id)
                         continue
                     if telegram_id not in user_subscription_time_cache:
                         raw_user_sub_time = await db.get_user_subscription_setting(
@@ -738,7 +806,11 @@ async def _run_reminder_pass(
                     }
                     if cycle_remind_after_due and local_today > cycle_due:
                         event_offsets.add((local_today - cycle_due).days)
+                    if remind_any_due and local_today >= cycle_due:
+                        event_offsets.add((local_today - cycle_due).days)
                     if not event_offsets:
+                        if stats is not None:
+                            stats.not_due.add(telegram_id)
                         continue
 
                     if register_reminders:
@@ -1118,15 +1190,21 @@ async def _run_reminder_pass(
             # No keyboard goes with an auto-paid notice, so nothing to copy.
             copyable=False,
         )
+        notice_failures: list[str] = []
         sent = await _send_message_with_retry(
             bot,
             telegram_id,
             message_text,
             reply_markup=None,
             logger=logger,
+            failures=notice_failures,
         )
         if sent is not None:
             sent_count += 1
+            if stats is not None:
+                stats.delivered(telegram_id)
+        elif stats is not None:
+            stats.undelivered(telegram_id, notice_failures)
 
     for (telegram_id, _reminder_time), items in pending.items():
         if not items:
@@ -1159,15 +1237,21 @@ async def _run_reminder_pass(
                 payment_details=item_details,
                 payment_link=str(item.get("payment_link") or ""),
             )
+            single_failures: list[str] = []
             message_id = await _send_message_with_retry(
                 bot,
                 telegram_id,
                 message_text,
                 reply_markup=keyboard,
                 logger=logger,
+                failures=single_failures,
             )
+            if message_id is None and stats is not None:
+                stats.undelivered(telegram_id, single_failures)
             if message_id is not None:
                 sent_count += 1
+                if stats is not None:
+                    stats.delivered(telegram_id)
                 await db.record_reminder_message(
                     subscription_id=int(item["subscription_id"]),
                     due_date=item["due_date"],
@@ -1231,15 +1315,21 @@ async def _run_reminder_pass(
             payment_details=batch_details,
             payment_link=batch_link,
         )
+        batch_failures: list[str] = []
         message_id = await _send_message_with_retry(
             bot,
             telegram_id,
             message_text,
             reply_markup=keyboard,
             logger=logger,
+            failures=batch_failures,
         )
+        if message_id is None and stats is not None:
+            stats.undelivered(telegram_id, batch_failures)
         if message_id is not None:
             sent_count += 1
+            if stats is not None:
+                stats.delivered(telegram_id)
             if record_manual_suppressions:
                 for item in items:
                     await db.register_reminder_suppression(
@@ -1260,9 +1350,11 @@ async def send_reminders_now(
     rounding_mode: str = "precise",
     target_telegram_id: Optional[int] = None,
     suppress_auto_today: bool = True,
-) -> int:
+) -> ReminderSendResult:
+    """Send due reminders right away (outside the schedule) and report what members got."""
     now = datetime.now(timezone.utc)
-    return await _run_reminder_pass(
+    result = ReminderSendResult()
+    await _run_reminder_pass(
         bot,
         db,
         converter,
@@ -1273,7 +1365,10 @@ async def send_reminders_now(
         register_reminders=False,
         target_telegram_id=target_telegram_id,
         record_manual_suppressions=suppress_auto_today,
+        stats=result,
+        remind_any_due=True,
     )
+    return result
 
 
 async def reminder_worker(

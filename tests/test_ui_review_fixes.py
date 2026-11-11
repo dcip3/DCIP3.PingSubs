@@ -9,22 +9,26 @@ legacy '➕ Top up', the balance split and the reworded screens.
 """
 from __future__ import annotations
 
+import re
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from aiogram.methods import SendMessage
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.methods import EditMessageText, SendMessage
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.core.reminders import tg_due
+from app.handlers.subscriptions import PAST_DATE_HINT
 from app.services import CurrencyConverter
+from app.ui.helpers import build_subscription_card, edit_in_place, split_text_chunks
 from app.ui.keyboards import guest_reply_keyboard, public_reply_keyboard
 from app.ui.shell import JOIN_ALREADY_LINKED_TEXT
-from app.ui.style import expandable
+from app.ui.style import expandable, visible_len
 from app.ui.text import escape_html, parse_amount, parse_date_loose
 from dispatcher_harness import RealDispatcherTestCase
 from keyboard_guard import install_keyboard_guard
-from telegram_fakes import make_message
+from telegram_fakes import CHAT_ID, FakeBot, make_message
 
 install_keyboard_guard()
 
@@ -32,8 +36,25 @@ OTHER_ADMIN = 9001
 TZ = "Europe/Moscow"
 
 
+def _texts(markup) -> list[list[str]]:
+    return [[button.text for button in row] for row in markup.inline_keyboard]
+
+
 def _keyboard(markup) -> list[list[str]]:
     return [[button.text for button in row] for row in markup.keyboard]
+
+
+def _balanced(chunk: str) -> bool:
+    """Every opening tag in the chunk is closed in it, in order (no tag cut in half)."""
+    if re.search(r"<[^>]*$", chunk) or re.search(r"^[^<]*>", chunk):
+        return False
+    stack: list[str] = []
+    for closing, name in re.findall(r"<(/?)([a-z-]+)[^>]*>", chunk):
+        if not closing:
+            stack.append(name)
+        elif not stack or stack.pop() != name:
+            return False
+    return not stack
 
 
 class _Case(RealDispatcherTestCase):
@@ -96,6 +117,57 @@ class JoinMenuTests(_Case):
         self.assertEqual(_keyboard(sent.reply_markup), [["❓ Help"]])
 
 
+# =================================================== the old card's Reports
+
+
+class OldCardReportsTests(_Case):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        await self.make_admin()
+        self.sub_id = await self.db.create_subscription("Netflix", 10.0, "USD", self.today + timedelta(days=5), 30, None)
+
+    async def test_old_card_reports_button_opens_the_report(self):
+        old_card = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="💰 Pricing & schedule", callback_data=f"sub:pricing:{self.sub_id}")],
+                [InlineKeyboardButton(text="📊 Reports", callback_data=f"sub:more:{self.sub_id}")],
+            ]
+        )
+        await self.feed(self.callback(f"sub:more:{self.sub_id}", self._screen(markup=old_card)))
+        edit = self.bot.of(EditMessageText)[-1]
+        self.assertTrue(edit.text.startswith("📊 <b>Reports · Netflix</b>"), edit.text)
+        self.assertEqual(_texts(edit.reply_markup)[-1], ["◀️ To card"])
+
+    async def test_sub_more_elsewhere_still_redraws_the_card(self):
+        old_report_back = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=f"sub:more:{self.sub_id}")]]
+        )
+        await self.feed(self.callback(f"sub:more:{self.sub_id}", self._screen(markup=old_report_back)))
+        self.assertTrue(self.bot.of(EditMessageText)[-1].text.startswith("🏷️ <b>Netflix</b>"))
+
+
+# ======================================================= not-modified edits
+
+
+class NotModifiedTests(_Case):
+    async def test_edit_in_place_reports_not_modified_as_shown(self):
+        bot = FakeBot()
+        bot.fail(EditMessageText, "Bad Request: message is not modified: specified new message content")
+        self.assertTrue(await edit_in_place(bot, CHAT_ID, 20, "same"))
+
+    async def test_saving_the_same_amount_twice_sends_no_second_pricing(self):
+        await self.make_admin()
+        sub_id = await self.db.create_subscription("Netflix", 10.0, "USD", self.today + timedelta(days=5), 30, None)
+        screen = make_message(self.bot, 600, "pricing", from_bot=True)
+        await self.feed(self.callback(f"sub:amount:{sub_id}", screen))
+        sent_before = len(self.bot.of(SendMessage))
+        # The origin already shows exactly this text and banner.
+        self.bot.fail(EditMessageText, "Bad Request: message is not modified", message_id=600)
+        await self.feed(self.message("10"))
+        self.assertEqual(len(self.bot.of(SendMessage)), sent_before, "no duplicate Pricing message")
+        self.assertIsNone(await self.state().get_state())
+
+
 # ================================================================ input
 
 
@@ -119,12 +191,65 @@ class InputToleranceTests(unittest.TestCase):
         self.assertEqual(parse_amount("1.000.000"), (1000000.0, False))
 
 
+class PastDueDateTests(_Case):
+    async def test_next_charge_warns_once_about_a_past_date(self):
+        await self.make_admin()
+        due = self.today + timedelta(days=5)
+        sub_id = await self.db.create_subscription("Netflix", 10.0, "USD", due, 30, None)
+        screen = make_message(self.bot, 600, "pricing", from_bot=True)
+        await self.feed(self.callback(f"sub:duedate:{sub_id}", screen))
+        yesterday = self.today - timedelta(days=1)
+        await self.feed(self.message(yesterday.strftime("%d.%m")))
+        self.assertEqual(self.bot.sent_texts()[-1], PAST_DATE_HINT)
+        self.assertEqual((await self.db.get_subscription(sub_id))["next_charge_at"], due.isoformat())
+        # The same date again keeps it: yesterday, never a year ahead.
+        await self.feed(self.message(yesterday.strftime("%d.%m")))
+        stored = str((await self.db.get_subscription(sub_id))["next_charge_at"])
+        self.assertLessEqual(stored, self.today.isoformat())
+        self.assertIsNone(await self.state().get_state())
+
+
+class ReportChunkTests(unittest.TestCase):
+    def test_an_oversized_report_block_is_split_between_lines_never_inside_a_tag(self):
+        lines = []
+        for week in range(16):
+            due = (date(2026, 7, 6) + timedelta(days=7 * week)).isoformat()
+            names = ", ".join(f"Person {n:02d} Longname" for n in range(20))
+            lines.append(f"⚠️ <b>{tg_due(due, TZ, 'wd')}</b> · overdue by {week + 1} days: {names}")
+        block = "🔴 <b>Netflix</b>\n" + "\n".join(lines)
+        self.assertGreater(len(block), 3900)
+        chunks = split_text_chunks(f"📊 <b>Reports</b>\n\n{block}")
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), 3900)
+            self.assertTrue(_balanced(chunk), chunk[:120])
+        self.assertEqual(sum(chunk.count("overdue by") for chunk in chunks), 16)
+
+
 class FoldTests(unittest.TestCase):
     def test_one_comment_with_ampersands_is_shown_not_dropped(self):
         comment = "Family plan: R&D & Q&A. " * 41
         folded = expandable([escape_html(comment)], 1200, "line")
         self.assertNotIn("more line", folded)
         self.assertIn("Family plan: R&amp;D", folded)
+
+
+class AdminCardBudgetTests(_Case):
+    async def test_worst_case_admin_card_stays_under_the_limit(self):
+        await self.make_admin()
+        sub_id = await self.db.create_subscription("Netflix", 400.0, "RUB", self.today + timedelta(days=5), 30, None)
+        for index in range(40):
+            friend_id = await self._friend(f"Participant Number {index:02d} Longsurname", 6000 + index)
+            await self.db.set_participant(sub_id, friend_id, True)
+        await self.db.ensure_cycle(sub_id, self.today - timedelta(days=2))
+        destination_id = await self.db.create_payment_destination(
+            title="Sber", currency="RUB", details="4" * 1500, payment_link="https://pay.example/" + "l" * 480
+        )
+        await self.db.set_default_payment_destination_id(destination_id)
+        await self.db.update_subscription_fields(sub_id, comment="Comment & notes " * 62)
+        text, _ = await build_subscription_card(self.db, sub_id)
+        self.assertLessEqual(visible_len(text), 4096)
+        self.assertIn("(more in “💳 Payment”)", text)
 
 
 if __name__ == "__main__":

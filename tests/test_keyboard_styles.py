@@ -1,4 +1,4 @@
-"""Semantic button colours, force_reply prompts, stable pagination rows and the invite copy button."""
+"""Semantic button colours, prompts without a dead force_reply, stable pagination rows and the invite copy button."""
 
 import unittest
 
@@ -55,9 +55,13 @@ class PrimaryActionTests(unittest.TestCase):
             if button["text"] in NAV_TEXTS:
                 self.assertNotIn("style", button, button)
 
-    def test_new_subscription_is_the_primary_action(self):
-        markup = build_subscription_list_keyboard([{"id": 1, "name": "Netflix", "amount": 9.5, "currency": "USD"}])
-        self._assert_single_primary(markup, "➕ New subscription")
+    def test_new_subscription_is_the_primary_action_only_while_the_list_is_empty(self):
+        self._assert_single_primary(build_subscription_list_keyboard([]), "➕ New subscription")
+        markup = build_subscription_list_keyboard(
+            [{"id": 1, "name": "Netflix", "amount": 9.5, "currency": "USD", "participant_count": 1}]
+        )
+        self.assertEqual([button for button in _buttons(markup) if button.get("style")], [])
+        self.assertEqual(_buttons(markup)[0]["text"], "➕ New subscription")
 
     def test_add_user_is_the_primary_action(self):
         markup = build_members_list_keyboard([{"id": 1, "full_name": "Anna"}], total_users=1)
@@ -70,19 +74,28 @@ class PrimaryActionTests(unittest.TestCase):
     def test_top_up_is_the_primary_action(self):
         self._assert_single_primary(public_account_keyboard(), "➕ Top up")
 
+    def test_amount_per_user_has_no_coloured_button(self):
+        # Setting amounts is an everyday edit; "Set all" asks a red confirmation instead (WP5).
+        participants = [{"id": 1, "full_name": "Anna", "share_weight": 1, "fixed_amount": None}]
+        markup = subscription_user_amounts_keyboard(3, participants, "usd", 10.0)
+        self.assertEqual([button for button in _buttons(markup) if button.get("style")], [])
+        self.assertEqual(_button(markup, "✏️ Set all")["callback_data"], "sub_user_amount_all:3")
+
+    def test_reminders_screen_has_no_coloured_button(self):
+        # WP6: "Send now" is a way into the picker, not the call to action; that is "Remind unpaid".
+        markup = reminder_settings_keyboard(3)
+        self.assertEqual([button for button in _buttons(markup) if button.get("style")], [])
+        self.assertEqual(_button(markup, "📬 Send now")["callback_data"], "sub:reminders_send:3")
+
+    def test_remind_unpaid_is_the_primary_action_only_while_someone_is_unpaid(self):
+        markup = reminder_send_targets_keyboard(3, [{"full_name": "Anna", "telegram_id": 42, "status": "unpaid"}])
+        self._assert_single_primary(markup, "📬 Remind unpaid (1)")
+        self.assertEqual(_button(markup, "📬 Remind unpaid (1)")["callback_data"], "remsend:3:0")
+        paid = reminder_send_targets_keyboard(3, [{"full_name": "Anna", "telegram_id": 42, "status": "paid"}])
+        self.assertEqual([button for button in _buttons(paid) if button.get("style")], [])
+
     def test_balance_set_is_the_primary_action(self):
         self._assert_single_primary(member_balance_keyboard(7), "✏️ Set")
-
-    def test_set_all_is_the_primary_action(self):
-        participants = [{"id": 1, "full_name": "Anna", "share_weight": 1, "fixed_amount": None}]
-        self._assert_single_primary(subscription_user_amounts_keyboard(3, participants, "usd", 10.0), "✏️ Set all")
-
-    def test_send_reminders_now_is_the_primary_action(self):
-        self._assert_single_primary(reminder_settings_keyboard(3), "📬 Send reminders now")
-
-    def test_send_to_all_is_the_primary_action(self):
-        markup = reminder_send_targets_keyboard(3, [{"full_name": "Anna", "telegram_id": 42}])
-        self._assert_single_primary(markup, "📬 All")
 
     def test_send_test_reminders_is_the_primary_action(self):
         self._assert_single_primary(tests_menu_keyboard(), "📬 Send test reminders")
@@ -107,14 +120,16 @@ class DeleteConfirmationTests(unittest.TestCase):
 
 
 class ForceReplyTests(unittest.TestCase):
+    """A message carries one reply_markup: with the inline [✖️ Cancel] a ForceReply
+    can never reach the client, so no prompt keyboard sends the dead extra."""
 
     def test_prompt_keyboard_is_inline_cancel_only(self):
         dumped = _dump(dialog_cancel_inline_keyboard())
         self.assertNotIn("force_reply", dumped)
         self.assertEqual(dumped["inline_keyboard"], [[{"text": "✖️ Cancel", "callback_data": "dialog:cancel"}]])
 
-    def test_builder_based_prompts_keep_force_reply(self):
-        comment_markup = comment_edit_keyboard(3, True, force_reply=True)
+    def test_builder_based_prompts_never_send_force_reply(self):
+        comment_markup = comment_edit_keyboard(3, True)
         for markup in (
             build_currency_keyboard(("usd", "eur")),
             build_period_keyboard(),
@@ -124,25 +139,27 @@ class ForceReplyTests(unittest.TestCase):
         ):
             with self.subTest(markup=markup):
                 dumped = _dump(markup)
-                self.assertIs(dumped["force_reply"], True)
-                cancel_row = -2 if markup is comment_markup else -1
-                self.assertEqual(dumped["inline_keyboard"][cancel_row][0]["callback_data"], "dialog:cancel")
-
-    def test_builder_based_prompts_drop_force_reply_on_edit_paths(self):
-        for markup in (
-            build_currency_keyboard(("usd",), force_reply=False),
-            build_period_keyboard(force_reply=False),
-            build_share_limit_keyboard(force_reply=False),
-            user_amount_clear_keyboard(3, 4, force_reply=False),
-            comment_edit_keyboard(3, False),
-        ):
-            with self.subTest(markup=markup):
-                self.assertNotIn("force_reply", _dump(markup))
+                self.assertNotIn("force_reply", dumped)
+                self.assertEqual(dumped["inline_keyboard"][-1][0]["callback_data"], "dialog:cancel")
+        # WP7: no "✖️ Close" (it left the input armed); "🗑 Clear comment" is too wide to share
+        # a row with Cancel, so it sits above it like any quick value.
+        self.assertEqual(
+            _dump(comment_markup)["inline_keyboard"],
+            [
+                [{"text": "🗑 Clear comment", "callback_data": "sub:comment_clear:3"}],
+                [{"text": "✖️ Cancel", "callback_data": "dialog:cancel"}],
+            ],
+        )
+        self.assertEqual(
+            _dump(comment_edit_keyboard(3, False))["inline_keyboard"],
+            [[{"text": "✖️ Cancel", "callback_data": "dialog:cancel"}]],
+        )
 
     def test_currency_keyboard_callbacks_are_unchanged(self):
         dumped = _dump(build_currency_keyboard(("usd", "eur", "rub")))
+        # Two per row, like every currency picker; the callbacks are unchanged.
         self.assertEqual(
-            [button["callback_data"] for button in dumped["inline_keyboard"][0]],
+            [button["callback_data"] for row in dumped["inline_keyboard"][:-1] for button in row],
             ["currency:USD", "currency:EUR", "currency:RUB"],
         )
 

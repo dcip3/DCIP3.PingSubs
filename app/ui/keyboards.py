@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from typing import Dict, Iterable, Sequence
+from typing import Dict, Iterable, Optional, Sequence
 from urllib.parse import urlsplit
 
 from aiogram.types import (
@@ -15,8 +15,9 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.core.constants import PAYMENT_MODE_FIXED, PAYMENT_MODE_SPLIT
-from app.ui.keyboard_fit import label_units, row_budget
+from app.core.constants import MONTHLY_PERIOD_SENTINEL, PAYMENT_MODE_FIXED, PAYMENT_MODE_SPLIT
+from app.ui.keyboard_fit import fit_label, label_units, row_budget
+from app.ui.text import escape_html, format_days, format_money, format_number
 from app.ui.style import SEP
 from app.ui.states import (
     CycleAction,
@@ -26,6 +27,7 @@ from app.ui.states import (
     PaymentDestinationAction,
     ReminderAction,
     ReminderSendAction,
+    ReminderSendConfirmAction,
     SubscriptionAction,
     TestListAction,
     TestPaidAction,
@@ -181,13 +183,6 @@ def _reply_keyboard(*rows: Sequence[str]) -> ReplyKeyboardMarkup:
     )
 
 
-def _format_cycle_button_label(due_value: str) -> str:
-    try:
-        return datetime.strptime(due_value, "%Y-%m-%d").strftime("%d.%m.%Y")
-    except ValueError:
-        return due_value
-
-
 def admin_reply_keyboard() -> ReplyKeyboardMarkup:
     return _reply_keyboard(
         (MENU_USERS, MENU_SUBSCRIPTIONS),
@@ -301,6 +296,25 @@ def payment_method_label(title: object, currency: object = "", *, default: bool 
     return f"{DEFAULT_METHOD_MARK}{label}" if default else label
 
 
+def default_method_option_label(default_target: Optional[Dict[str, object]], selected: bool) -> str:
+    """``'✅ Default (⭐ Sber · RUB)'`` fit to a full row: the title is cut, ``' · RUB)'`` kept."""
+    if not default_target:
+        return radio_label("Default (not set)", selected)
+    name = " ".join(str(default_target.get("title") or "").split())
+    code = str(default_target.get("currency") or "").strip().upper()
+    head = radio_label(f"Default ({DEFAULT_METHOD_MARK}{name}", selected)
+    return fit_label(head, 1, tail=f"{SEP}{code})" if code else ")")
+
+
+def payment_method_choice_banner(value: str) -> str:
+    """``'✅ Payment method · <b>Default (⭐ Sber · RUB)</b>'``: one banner for every payment-method picker.
+
+    The toast is its first line (``toast_from_html``), so users, subscriptions
+    and the member card all say the same thing.
+    """
+    return f"✅ Payment method{SEP}<b>{escape_html(value)}</b>"
+
+
 def dialog_cancel_inline_button() -> InlineKeyboardButton:
     """The prompt's "✖️ Cancel" (callback ``dialog:cancel``, kept for old messages)."""
     return cancel_button()
@@ -314,14 +328,6 @@ def dialog_cancel_inline_keyboard() -> InlineKeyboardMarkup:
     """
     return InlineKeyboardMarkup(
         inline_keyboard=[[dialog_cancel_inline_button()]],
-    )
-
-
-def _prompt_markup(builder: InlineKeyboardBuilder, force_reply: bool) -> InlineKeyboardMarkup:
-    """Export a builder as markup; ``as_markup(force_reply=...)`` silently drops the flag."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=builder.export(),
-        force_reply=True if force_reply else None,
     )
 
 
@@ -352,21 +358,77 @@ def pagination_row(
     ]
 
 
-def build_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="➕ New subscription",
-        callback_data=SubscriptionAction(action="create", subscription_id=0).pack(),
-        style="primary",
-    )
+SUBSCRIPTION_LIST_PAGE_SIZE = 20
+SUBSCRIPTION_LIST_PAGE_PREFIX = "sublist:page:"
+NEW_SUBSCRIPTION_TEXT = "➕ New subscription"
+NO_PARTICIPANTS_TAIL = "no participants"
+
+
+def subscription_list_label(sub: Dict[str, object]) -> str:
+    """One list row: ``'⚠️ Netflix · 15.99 USD'``, ``'Spotify · 299.00 RUB'``, ``'👥 iCloud · no participants'``.
+
+    The name is cut to the row with ``…``; the amount (or the state) is kept whole.
+    """
+    name = " ".join(str(sub.get("name") or "").split())
+    if not int(sub.get("participant_count") or 0):
+        return fit_label(f"👥 {name}", 1, tail=f"{SEP}{NO_PARTICIPANTS_TAIL}")
+    try:
+        amount: float | None = float(sub.get("amount"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        amount = None
+    tail = f"{SEP}{format_money(amount, str(sub.get('currency') or '').upper())}"
+    prefix = "⚠️ " if sub.get("unpaid") else ""
+    return fit_label(f"{prefix}{name}", 1, tail=tail)
+
+
+def build_subscription_list_keyboard(
+    subs: Sequence[Dict[str, object]],
+    *,
+    page: int = 1,
+    total_pages: int = 1,
+) -> InlineKeyboardMarkup:
+    """[➕ New subscription] (primary only while the list is empty), one row per item, paging last.
+
+    The list is a top-level screen: no Back/Close row (the reply menu is there).
+    """
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=NEW_SUBSCRIPTION_TEXT,
+                callback_data=SubscriptionAction(action="create", subscription_id=0).pack(),
+                style=None if subs else "primary",
+            )
+        ]
+    ]
     for sub in subs:
-        label = f"{sub['name']} ({sub['amount']:.2f} {sub['currency']})"
-        builder.button(
-            text=label,
-            callback_data=SubscriptionAction(action="open", subscription_id=sub["id"]).pack(),
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=subscription_list_label(sub),
+                    callback_data=SubscriptionAction(action="open", subscription_id=int(sub["id"])).pack(),
+                )
+            ]
         )
-    builder.adjust(1)
-    return builder.as_markup()
+    if total_pages > 1:
+        rows.append(
+            pagination_row(
+                page,
+                total_pages,
+                previous_callback=f"{SUBSCRIPTION_LIST_PAGE_PREFIX}{page - 1}",
+                next_callback=f"{SUBSCRIPTION_LIST_PAGE_PREFIX}{page + 1}",
+            )
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# Every currency picker offers the same codes in the same order, two per row
+# (``currency_option_rows``); anything else is typed via "✏️ Other currency".
+CURRENCY_OPTIONS = ("RUB", "USD", "EUR", "TRY")
+
+
+def currency_option_rows(buttons: Sequence[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
+    """Currency options two per row, the one layout of every currency picker."""
+    return pair_rows(buttons)
 
 
 def build_members_list_keyboard(
@@ -799,6 +861,13 @@ def public_account_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+# One name per concept on every screen (same-name-everywhere): the display
+# currency is "🌐 Shown in" and the reminder time "⏰ Reminder time" for admins
+# and members alike; "💱 Currency" is only the billed or stored currency.
+SHOWN_IN_TEXT = "🌐 Shown in"
+REMINDER_TIME_TEXT = "⏰ Reminder time"
+
+
 def build_public_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for sub in subs:
@@ -811,41 +880,71 @@ def build_public_subscription_list_keyboard(subs: Sequence[Dict[str, object]]) -
     return builder.as_markup()
 
 
-def subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✏️ Rename",
-        callback_data=SubscriptionAction(action="rename", subscription_id=subscription_id).pack(),
+def _sub_button(text: str, action: str, subscription_id: int, style: str | None = None) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        text=text,
+        callback_data=SubscriptionAction(action=action, subscription_id=subscription_id).pack(),
+        style=style,
     )
-    builder.button(
-        text="💰 Pricing & schedule",
-        callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
+
+
+ADD_PARTICIPANTS_TEXT = "👥 Add participants"
+
+
+def subscription_detail_keyboard(
+    subscription_id: int,
+    *,
+    participant_count: int | None = None,
+    close: bool = False,
+) -> InlineKeyboardMarkup:
+    """The subscription hub card (at most 6 rows with nav).
+
+    [👥 Add participants] leads, styled primary, only while nobody is in the
+    subscription. ``close=True`` is the card opened as a NEW message from a
+    push or report: its only nav is [✖️ Close]; otherwise [◀️ To list].
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if participant_count == 0:
+        rows.append([_sub_button(ADD_PARTICIPANTS_TEXT, "participants_manage", subscription_id, "primary")])
+    rows.extend(
+        [
+            [
+                _sub_button("💰 Pricing", "pricing", subscription_id),
+                _sub_button("👥 Participants", "participants", subscription_id),
+            ],
+            [
+                _sub_button("🔔 Reminders", "reminders", subscription_id),
+                _sub_button("💳 Payment", "paymentinfo", subscription_id),
+            ],
+            [
+                _sub_button("📊 Reports", "report", subscription_id),
+                _sub_button("🗂 Open cycles", "cycles", subscription_id),
+            ],
+            [
+                _sub_button("✏️ Rename", "rename", subscription_id),
+                _sub_button("🗑 Delete", "delete", subscription_id),
+            ],
+        ]
     )
-    builder.button(
-        text="👥 Participants",
-        callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
+    if close:
+        rows.append([nav_button(CLOSE_CALLBACK)])
+    else:
+        back = SubscriptionAction(action="back", subscription_id=subscription_id).pack()
+        rows.append([nav_button(back, TO_LIST_TEXT)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def subscription_delete_confirm_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    """[✖️ Cancel] back to the card, [🗑 Delete] (red) on the existing confirm callback."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            confirm_row(
+                SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+                "🗑 Delete",
+                SubscriptionAction(action="confirm_delete", subscription_id=subscription_id).pack(),
+            )
+        ]
     )
-    builder.button(
-        text="🔔 Reminders",
-        callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
-        text="💳 Payment",
-        callback_data=SubscriptionAction(action="paymentinfo", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
-        text="📊 Reports",
-        callback_data=SubscriptionAction(action="more", subscription_id=subscription_id).pack(),
-    )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="back", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
 
 
 def public_subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
@@ -873,6 +972,49 @@ def public_subscription_detail_keyboard(subscription_id: int) -> InlineKeyboardM
     return builder.as_markup()
 
 
+# Reports and cycles (WP8): the subscription report, open cycles, cycle actions
+# and their confirmations, and the admin's global 📊 Reports.
+RECREATE_CYCLE_TEXT = "♻️ Recreate"
+CLOSE_CYCLE_TEXT = "🔒 Close cycle"
+CYCLE_RECREATE_YES = "recreate_yes"
+CYCLE_FORCE_CLOSE_YES = "force_close_yes"
+# Admin 📊 Reports: at most this many '🔴 Netflix' buttons under the report.
+ADMIN_REPORT_BUTTONS_MAX = 8
+
+
+def _cycle_callback(action: str, subscription_id: int, due_value: str) -> str:
+    return CycleAction(action=action, subscription_id=subscription_id, due_date=due_value).pack()
+
+
+def cycle_short_date(due_value: str, today: date | None = None) -> str:
+    """``'01.10'``; ``'01.10.2025'`` when the cycle is in another year than ``today``."""
+    try:
+        due = datetime.strptime(due_value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return str(due_value)
+    if today is not None and due.year != today.year:
+        return due.strftime("%d.%m.%Y")
+    return due.strftime("%d.%m")
+
+
+def cycle_progress_words(paid: int, total: int) -> str:
+    """``'1 of 3 paid'`` / ``'all paid'`` / ``'no participants'``."""
+    if total <= 0:
+        return "no participants"
+    if paid >= total:
+        return "all paid"
+    return f"{paid} of {total} paid"
+
+
+def open_cycle_button_label(cycle: Dict[str, object] | str, today: date | None = None) -> str:
+    """``'📅 01.10 · 1 of 3 paid'`` (a bare due-date string gives ``'📅 01.10'``)."""
+    if isinstance(cycle, str):
+        return f"📅 {cycle_short_date(cycle, today)}"
+    short = cycle_short_date(str(cycle.get("due_value") or ""), today)
+    words = cycle_progress_words(int(cycle.get("paid") or 0), int(cycle.get("total") or 0))  # type: ignore[call-overload]
+    return f"📅 {short}{SEP}{words}"
+
+
 def build_back_keyboard(subscription_id: int, back_action: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -885,202 +1027,343 @@ def build_back_keyboard(subscription_id: int, back_action: str) -> InlineKeyboar
     return builder.as_markup()
 
 
-def subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    return build_back_keyboard(subscription_id, "more")
+def subscription_report_keyboard(
+    subscription_id: int,
+    unpaid_count: int = 0,
+    *,
+    empty: bool = False,
+) -> InlineKeyboardMarkup:
+    """[📬 Remind unpaid (2)] (primary, only while someone is overdue) / [◀️ To card].
+
+    ``empty`` (no participants): [👥 Add participants] (primary) instead, as in Send now.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if empty:
+        rows.append([_sub_button(ADD_PARTICIPANTS_TEXT, "participants_manage", subscription_id, "primary")])
+    elif unpaid_count > 0:
+        rows.append([_sub_button(remind_unpaid_label(unpaid_count), "reminders_send", subscription_id, "primary")])
+    rows.append([nav_button(SubscriptionAction(action="open", subscription_id=subscription_id).pack(), TO_CARD_TEXT)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def subscription_open_cycles_keyboard(
     subscription_id: int,
-    due_dates: Sequence[str] = (),
+    cycles: Sequence[Dict[str, object] | str] = (),
+    *,
+    today: date | None = None,
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for due_value in due_dates:
-        builder.button(
-            text=f"📅 {_format_cycle_button_label(due_value)}",
-            callback_data=CycleAction(
-                action="open",
-                subscription_id=subscription_id,
-                due_date=due_value,
-            ).pack(),
+    """One '📅 01.10 · 1 of 3 paid' per open cycle (cycle:open, unchanged) / [◀️ To card]."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for cycle in cycles:
+        due_value = cycle if isinstance(cycle, str) else str(cycle.get("due_value") or "")
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=open_cycle_button_label(cycle, today),
+                    callback_data=_cycle_callback("open", subscription_id, due_value),
+                )
+            ]
         )
-    if due_dates:
-        builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="more", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+    rows.append([nav_button(SubscriptionAction(action="open", subscription_id=subscription_id).pack(), TO_CARD_TEXT)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def subscription_cycle_actions_keyboard(subscription_id: int, due_value: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="♻️ Recreate cycle",
-        callback_data=CycleAction(
-            action="recreate",
-            subscription_id=subscription_id,
-            due_date=due_value,
-        ).pack(),
+    """[♻️ Recreate][🔒 Close cycle] (each opens its confirmation) / [◀️ To list] (open cycles)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=RECREATE_CYCLE_TEXT,
+                    callback_data=_cycle_callback("recreate", subscription_id, due_value),
+                ),
+                InlineKeyboardButton(
+                    text=CLOSE_CYCLE_TEXT,
+                    callback_data=_cycle_callback("force_close", subscription_id, due_value),
+                ),
+            ],
+            [nav_button(SubscriptionAction(action="cycles", subscription_id=subscription_id).pack(), TO_LIST_TEXT)],
+        ]
     )
-    builder.button(
-        text="✅ Force close",
-        callback_data=CycleAction(
-            action="force_close",
-            subscription_id=subscription_id,
-            due_date=due_value,
-        ).pack(),
+
+
+def cycle_recreate_confirm_keyboard(subscription_id: int, due_value: str) -> InlineKeyboardMarkup:
+    """[✖️ Cancel] back to the cycle, [♻️ Recreate] (red, cycle:recreate_yes)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            confirm_row(
+                _cycle_callback("open", subscription_id, due_value),
+                RECREATE_CYCLE_TEXT,
+                _cycle_callback(CYCLE_RECREATE_YES, subscription_id, due_value),
+            )
+        ]
     )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="cycles", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+
+
+def cycle_close_confirm_keyboard(subscription_id: int, due_value: str) -> InlineKeyboardMarkup:
+    """[✖️ Cancel] back to the cycle, [🔒 Close cycle] (red, cycle:force_close_yes)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            confirm_row(
+                _cycle_callback("open", subscription_id, due_value),
+                CLOSE_CYCLE_TEXT,
+                _cycle_callback(CYCLE_FORCE_CLOSE_YES, subscription_id, due_value),
+            )
+        ]
     )
-    return builder.as_markup()
+
+
+def new_subscription_keyboard() -> InlineKeyboardMarkup:
+    """[➕ New subscription] (primary): the forward button of an empty 📊 Reports."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=NEW_SUBSCRIPTION_TEXT,
+                    callback_data=SubscriptionAction(action="create", subscription_id=0).pack(),
+                    style="primary",
+                )
+            ]
+        ]
+    )
+
+
+def admin_report_keyboard(subs: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup | None:
+    """One '🔴 Netflix' per subscription that needs attention (at most 8).
+
+    Each opens the admin card as a NEW message ending in [✖️ Close]
+    (sub:open_new). The report is a top-level screen: no nav row. None when
+    nothing needs attention.
+    """
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=fit_label(f"🔴 {' '.join(str(sub.get('name') or '').split())}", 1),
+                callback_data=SubscriptionAction(action="open_new", subscription_id=int(sub["id"])).pack(),  # type: ignore[call-overload]
+            )
+        ]
+        for sub in list(subs)[:ADMIN_REPORT_BUTTONS_MAX]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 def public_subscription_report_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     return build_back_keyboard(subscription_id, "open_public")
 
 
-def reminder_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="⏰ Reminder time",
-        callback_data=SubscriptionAction(action="remindertime", subscription_id=subscription_id).pack(),
+# Reminders subtree (WP6): Reminders, Reminder time, the Days prompt and Send
+# now with its confirmation. Callbacks are the shipped ones; the confirmation's
+# Send is the new ReminderSendConfirmAction ('remsendok') and the Days quick
+# value the raw 'remdays_default:<sub>'.
+REMINDER_TIME_BUTTON_TEXT = REMINDER_TIME_TEXT
+REMINDER_DAYS_TEXT = "📅 Days"
+AFTER_DUE_TEXT = "📣 After due date"
+AFTER_DUE_ON_TEXT = "daily until paid"
+
+
+def after_due_line(on: bool) -> str:
+    """``'After due date: daily until paid'`` / ``'… off'``: one wording for the card, the screen and the toast."""
+    return f"After due date: {AFTER_DUE_ON_TEXT if on else 'off'}"
+
+SEND_NOW_TEXT = "📬 Send now"
+SEND_TEXT = "📬 Send"
+REMIND_UNPAID_TEXT = "📬 Remind unpaid"
+REMINDER_DAYS_DEFAULT_PREFIX = "remdays_default:"
+SEND_STATUS_UNPAID = "unpaid"
+SEND_STATUS_PAID = "paid"
+
+
+def reminders_callback(subscription_id: int) -> str:
+    return SubscriptionAction(action="reminders", subscription_id=subscription_id).pack()
+
+
+def reminder_send_callback(subscription_id: int) -> str:
+    return SubscriptionAction(action="reminders_send", subscription_id=subscription_id).pack()
+
+
+def reminder_settings_keyboard(subscription_id: int, *, after_due: bool = False) -> InlineKeyboardMarkup:
+    """[⏰ Reminder time] / [📅 Days] / [📣 After due date · 🟢] / [📬 Send now] / [◀️ To card].
+
+    "⏰ Reminder time" is the one name of the setting, too wide to share a row.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_sub_button(REMINDER_TIME_BUTTON_TEXT, "remindertime", subscription_id)],
+            [_sub_button(REMINDER_DAYS_TEXT, "reminderdays", subscription_id)],
+            [_sub_button(toggle_label(AFTER_DUE_TEXT, after_due), "reminderloop", subscription_id)],
+            [_sub_button(SEND_NOW_TEXT, "reminders_send", subscription_id)],
+            [
+                nav_button(
+                    SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
+                    TO_CARD_TEXT,
+                )
+            ],
+        ]
     )
-    builder.button(
-        text="🔔 Reminder days",
-        callback_data=SubscriptionAction(action="reminderdays", subscription_id=subscription_id).pack(),
+
+
+def reminder_days_default_label(offsets_text: str) -> str:
+    """``'↺ 1 day before + on the day'`` from the display text of the default offsets."""
+    return f"↺ {offsets_text.replace(', ', ' + ')}"
+
+
+def reminder_days_quick_rows(subscription_id: int, offsets_text: str) -> list[list[InlineKeyboardButton]]:
+    """The Days prompt's quick value, above its [✖️ Cancel]."""
+    return [
+        [
+            InlineKeyboardButton(
+                text=reminder_days_default_label(offsets_text),
+                callback_data=f"{REMINDER_DAYS_DEFAULT_PREFIX}{subscription_id}",
+            )
+        ]
+    ]
+
+
+def remind_unpaid_label(count: int) -> str:
+    return f"{REMIND_UNPAID_TEXT} ({count})"
+
+
+def reminder_send_person_label(person: Dict[str, object]) -> str:
+    """``'⚠️ Alice Smith · unpaid'`` / ``'✅ Bob · paid'`` / ``'Carol'``; only the name is cut."""
+    name = " ".join(str(person.get("full_name") or "Unknown").split())
+    status = person.get("status", SEND_STATUS_UNPAID)
+    if status == SEND_STATUS_UNPAID:
+        return fit_label(f"⚠️ {name}", 1, tail=f"{SEP}unpaid")
+    if status == SEND_STATUS_PAID:
+        return fit_label(f"✅ {name}", 1, tail=f"{SEP}paid")
+    return fit_label(name, 1)
+
+
+def reminder_send_empty_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    """Send now with no participants: [👥 Add participants] / [◀️ To reminders]."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_sub_button(ADD_PARTICIPANTS_TEXT, "participants_manage", subscription_id, "primary")],
+            [nav_button(reminders_callback(subscription_id), TO_REMINDERS_TEXT)],
+        ]
     )
-    builder.button(
-        text="📣 Post-due alerts",
-        callback_data=SubscriptionAction(action="reminderloop", subscription_id=subscription_id).pack(),
+
+
+def reminder_send_confirm_keyboard(subscription_id: int, telegram_id: int) -> InlineKeyboardMarkup:
+    """[✖️ Cancel → Send now][📬 Send (red)]; ``telegram_id`` 0 means every unpaid person."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            confirm_row(
+                reminder_send_callback(subscription_id),
+                SEND_TEXT,
+                ReminderSendConfirmAction(subscription_id=subscription_id, telegram_id=telegram_id).pack(),
+            )
+        ]
     )
-    builder.button(
-        text="📬 Send reminders now",
-        callback_data=SubscriptionAction(action="reminders_send", subscription_id=subscription_id).pack(),
-        style="primary",
-    )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+
+
+# Participants subtree (WP5): the Participants screen, the people picker,
+# Amount per user and its prompts. Selection is a ✅ prefix or a 🟢/⚪ toggle,
+# never a colour; the only coloured buttons are the empty-state call to action
+# and the red verb of the Set-all confirmation.
+CHOOSE_PEOPLE_TEXT = "👥 Choose people"
+SHARE_COUNT_TEXT = "➗ Share count"
+AMOUNT_PER_USER_TEXT = "💵 Amount per user"
+SET_ALL_TEXT = "✏️ Set all"
+SET_AMOUNT_MARK = " ✏️"
+PARTICIPANTS_PAGE_SIZE = 20
+PARTICIPANTS_PAGE_PREFIX = "spart_page:"
+USER_AMOUNT_ALL_YES_PREFIX = "sub_user_amount_all_yes:"
+
+
+def _participants_back(subscription_id: int) -> InlineKeyboardButton:
+    return nav_button(SubscriptionAction(action="participants", subscription_id=subscription_id).pack())
 
 
 def participants_settings_keyboard(
     subscription_id: int,
     current_mode: str,
+    *,
+    participant_count: int | None = None,
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text="👥 Manage users",
-            callback_data=SubscriptionAction(action="participants_manage", subscription_id=subscription_id).pack(),
+    """[👥 Choose people] / [✅ Split by shares][Fixed per user] / [➗ Share count | 💵 Amount per user] / [◀️ To card].
+
+    While nobody is in the subscription the first button is the call to action
+    (primary) and reads "👥 Add participants", as on the card. The mode radio keeps ``sub_payment_mode:<id>:<mode>``;
+    a label too wide for half a row gets a row of its own.
+    """
+    mode = (current_mode or PAYMENT_MODE_SPLIT).strip().lower()
+    if mode != PAYMENT_MODE_FIXED:
+        mode = PAYMENT_MODE_SPLIT
+    # Empty: the same CTA as on the card and in Send now, "👥 Add participants".
+    empty = participant_count == 0
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            _sub_button(
+                ADD_PARTICIPANTS_TEXT if empty else CHOOSE_PEOPLE_TEXT,
+                "participants_manage",
+                subscription_id,
+                "primary" if empty else None,
+            )
+        ]
+    ]
+    rows.extend(
+        pair_rows(
+            [
+                InlineKeyboardButton(
+                    text=radio_label(SPLIT_BY_SHARES_LABEL, mode == PAYMENT_MODE_SPLIT),
+                    callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_SPLIT}",
+                ),
+                InlineKeyboardButton(
+                    text=radio_label(FIXED_PER_USER_LABEL, mode == PAYMENT_MODE_FIXED),
+                    callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
+                ),
+            ]
         )
     )
-    normalized_mode = (current_mode or PAYMENT_MODE_SPLIT).strip().lower()
-    if normalized_mode == PAYMENT_MODE_SPLIT:
-        split_button = InlineKeyboardButton(
-            text="Split by shares",
-            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_SPLIT}",
-            style="success",
-        )
+    if mode == PAYMENT_MODE_FIXED:
+        rows.append([_sub_button(AMOUNT_PER_USER_TEXT, "useramounts", subscription_id)])
     else:
-        split_button = InlineKeyboardButton(
-            text="Split by shares",
-            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_SPLIT}",
-        )
-    if normalized_mode == PAYMENT_MODE_FIXED:
-        fixed_button = InlineKeyboardButton(
-            text="Fixed per user",
-            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
-            style="success",
-        )
-    else:
-        fixed_button = InlineKeyboardButton(
-            text="Fixed per user",
-            callback_data=f"sub_payment_mode:{subscription_id}:{PAYMENT_MODE_FIXED}",
-        )
-    builder.row(split_button, fixed_button)
-    if normalized_mode == PAYMENT_MODE_FIXED:
-        builder.row(
-            InlineKeyboardButton(
-                text="💵 Amount per user",
-                callback_data=SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
-            )
-        )
-    else:
-        builder.row(
-            InlineKeyboardButton(
-                text="➗ Shares & split",
-                callback_data=SubscriptionAction(action="share", subscription_id=subscription_id).pack(),
-            )
-        )
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+        rows.append([_sub_button(SHARE_COUNT_TEXT, "share", subscription_id)])
+    rows.append([nav_button(SubscriptionAction(action="open", subscription_id=subscription_id).pack(), TO_CARD_TEXT)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def subscription_more_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="📊 Subscription report",
-        callback_data=SubscriptionAction(action="report", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
-        text="🗂 Open cycles",
-        callback_data=SubscriptionAction(action="cycles", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
-        text="🗑 Delete",
-        callback_data=SubscriptionAction(action="delete", subscription_id=subscription_id).pack(),
-    )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+# Subscription payment info, method and comment (WP7).
+SUB_METHOD_TEXT = "🏦 Method"
+SUB_COMMENT_TEXT = "📝 Comment"
+CLEAR_COMMENT_TEXT = "🗑 Clear comment"
+SUB_PAYMENT_DESTINATION_PREFIX = "sub_payment_destination:"
+DEFAULT_METHOD_OPTION = "Default"
+NO_DEFAULT_METHOD_NAME = "not set"
 
 
 def subscription_payment_info_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="💳 Payment method",
-        callback_data=SubscriptionAction(action="paymentmethod", subscription_id=subscription_id).pack(),
+    """💳 Payment of one subscription: [🏦 Method][📝 Comment] / [◀️ To card]."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _sub_button(SUB_METHOD_TEXT, "paymentmethod", subscription_id),
+                _sub_button(SUB_COMMENT_TEXT, "comment", subscription_id),
+            ],
+            nav_row(SubscriptionAction(action="open", subscription_id=subscription_id).pack(), TO_CARD_TEXT),
+        ]
     )
-    builder.button(
-        text="📝 Comment",
-        callback_data=SubscriptionAction(action="comment", subscription_id=subscription_id).pack(),
-    )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+
+
+def _destination_id(item: Dict[str, object]) -> int | None:
+    try:
+        return int(item.get("id"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def subscription_method_option_label(
+    item: Dict[str, object],
+    *,
+    selected: bool,
+    is_default: bool,
+) -> str:
+    """``'✅ ⭐ Sber · RUB'``: the title is cut to the row, the currency is kept whole."""
+    title = " ".join(str(item.get("title") or "").split())
+    currency = str(item.get("currency") or "").strip().upper()
+    head = radio_label(f"{DEFAULT_METHOD_MARK if is_default else ''}{title}", selected)
+    return fit_label(head, 1, tail=f"{SEP}{currency}" if currency else "")
 
 
 def subscription_payment_destination_keyboard(
@@ -1089,44 +1372,48 @@ def subscription_payment_destination_keyboard(
     selected_destination_id: int | None,
     default_destination_id: int | None,
 ) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    default_label = "Default"
-    if default_destination_id is not None:
-        default_target = next(
-            (item for item in destinations if int(item.get("id") or 0) == default_destination_id),
-            None,
-        )
-        if default_target:
-            default_label = f"Default ({default_target['title']} · {default_target['currency']})"
-    rows.append(
+    """🏦 Payment method picker: [✅ Default (⭐ Sber · RUB)] / one row per method (⭐ = default) / [◀️ To payment].
+
+    The current choice carries "✅ " (Default when ``selected_destination_id``
+    is None or names a method that no longer exists). With no methods at all
+    only the way back is left: Default would mean nothing. Callbacks are the
+    old ``sub_payment_destination:<sub>:default|<id>``.
+    """
+    back = nav_row(SubscriptionAction(action="paymentinfo", subscription_id=subscription_id).pack(), TO_PAYMENT_TEXT)
+    if not destinations:
+        return InlineKeyboardMarkup(inline_keyboard=[back])
+    known_ids = {_destination_id(item) for item in destinations}
+    uses_default = selected_destination_id is None or selected_destination_id not in known_ids
+    default_target = next(
+        (item for item in destinations if default_destination_id is not None and _destination_id(item) == default_destination_id),
+        None,
+    )
+    default_label = default_method_option_label(default_target, uses_default)
+    rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
                 text=default_label,
-                callback_data=f"sub_payment_destination:{subscription_id}:default",
-                style="success" if selected_destination_id is None else None,
+                callback_data=f"{SUB_PAYMENT_DESTINATION_PREFIX}{subscription_id}:default",
             )
         ]
-    )
+    ]
     for item in destinations:
-        destination_id = int(item["id"])
+        destination_id = _destination_id(item)
+        if destination_id is None:
+            continue
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{item['title']} ({item['currency']})",
-                    callback_data=f"sub_payment_destination:{subscription_id}:{destination_id}",
-                    style="success" if selected_destination_id == destination_id else None,
+                    text=subscription_method_option_label(
+                        item,
+                        selected=not uses_default and selected_destination_id == destination_id,
+                        is_default=destination_id == default_destination_id,
+                    ),
+                    callback_data=f"{SUB_PAYMENT_DESTINATION_PREFIX}{subscription_id}:{destination_id}",
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=SubscriptionAction(action="paymentinfo", subscription_id=subscription_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
-    )
+    rows.append(back)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1134,56 +1421,34 @@ def subscription_reminder_time_keyboard(
     subscription_id: int,
     current_time: str,
     default_time: str,
+    *,
+    has_override: bool | None = None,
 ) -> InlineKeyboardMarkup:
-    presets = ("09:00", "12:00", "16:00", "20:00")
-    normalized_current = current_time.strip()
-    normalized_default = default_time.strip()
-    default_active = normalized_current == normalized_default
-    rows: list[list[InlineKeyboardButton]] = []
-    preset_buttons: list[InlineKeyboardButton] = []
+    """[✅ Default (10:00)] / presets two per row / [✏️ Other time] / [◀️ To reminders].
 
-    for time_value in presets:
-        is_active = (time_value == normalized_current) and not default_active
-        if is_active:
-            preset_buttons.append(
-                InlineKeyboardButton(
-                    text=time_value,
-                    callback_data=f"sub_remindertime:{subscription_id}:{time_value}",
-                    style="success",
-                )
-            )
-        else:
-            preset_buttons.append(
-                InlineKeyboardButton(
-                    text=time_value,
-                    callback_data=f"sub_remindertime:{subscription_id}:{time_value}",
-                )
-            )
-    for index in range(0, len(preset_buttons), 2):
-        rows.append(preset_buttons[index : index + 2])
-
-    rows.append([InlineKeyboardButton(text="Other", callback_data=f"sub_remindertime_other:{subscription_id}")])
-    if default_active:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data=SubscriptionAction(action="remindertime_default", subscription_id=subscription_id).pack(),
-            style="success",
-        )
-    else:
-        default_button = InlineKeyboardButton(
-            text="Default",
-            callback_data=SubscriptionAction(action="remindertime_default", subscription_id=subscription_id).pack(),
-        )
-    rows.append([default_button])
-    rows.append(
-        [
+    Default is selected only while the subscription has no own time
+    (``has_override`` False), even when an own time equals the default; a
+    preset is selected when it is that own time. ``has_override=None``
+    guesses from ``current != default`` (old call shape).
+    """
+    current = (current_time or "").strip()
+    default = (default_time or "").strip()
+    if has_override is None:
+        has_override = current != default
+    rows: list[list[InlineKeyboardButton]] = [
+        [_sub_button(radio_label(f"Default ({default})", not has_override), "remindertime_default", subscription_id)]
+    ]
+    rows.extend(
+        pair_rows(
             InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
+                text=radio_label(value, has_override and value == current),
+                callback_data=f"sub_remindertime:{subscription_id}:{value}",
+            )
+            for value in TIME_PRESETS
+        )
     )
+    rows.append([InlineKeyboardButton(text=OTHER_TIME_TEXT, callback_data=f"sub_remindertime_other:{subscription_id}")])
+    rows.append([nav_button(reminders_callback(subscription_id), TO_REMINDERS_TEXT)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1254,29 +1519,40 @@ def reminder_send_targets_keyboard(
     subscription_id: int,
     participants: Sequence[Dict[str, object]],
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="📬 All",
-        callback_data=ReminderSendAction(subscription_id=subscription_id, telegram_id=0).pack(),
-        style="primary",
-    )
-    for person in participants:
-        builder.button(
-            text=str(person.get("full_name") or "Unknown"),
-            callback_data=ReminderSendAction(
-                subscription_id=subscription_id,
-                telegram_id=int(person["telegram_id"]),
-            ).pack(),
+    """[📬 Remind unpaid (2)] (primary, only when someone is unpaid) / one row per person / [◀️ To reminders].
+
+    ``participants`` carry ``full_name``, ``telegram_id`` and ``status``
+    (SEND_STATUS_UNPAID — the default —, SEND_STATUS_PAID, or None when the
+    person is in no open cycle). People without a Telegram id are left out.
+    Every button opens the confirmation; a paid row only answers with a toast.
+    """
+    people = [person for person in participants if int(person.get("telegram_id") or 0) > 0]
+    unpaid = sum(1 for person in people if person.get("status", SEND_STATUS_UNPAID) == SEND_STATUS_UNPAID)
+    rows: list[list[InlineKeyboardButton]] = []
+    if unpaid:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=remind_unpaid_label(unpaid),
+                    callback_data=ReminderSendAction(subscription_id=subscription_id, telegram_id=0).pack(),
+                    style="primary",
+                )
+            ]
         )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="reminders", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+    for person in people:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=reminder_send_person_label(person),
+                    callback_data=ReminderSendAction(
+                        subscription_id=subscription_id,
+                        telegram_id=int(person["telegram_id"]),
+                    ).pack(),
+                )
+            ]
+        )
+    rows.append([nav_button(reminders_callback(subscription_id), TO_REMINDERS_TEXT)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def settings_tests_keyboard(
@@ -1317,6 +1593,12 @@ def settings_tests_keyboard(
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+OTHER_CURRENCY_TEXT = "✏️ Other currency"
+SUBSCRIPTION_CURRENCY_OPTIONS = CURRENCY_OPTIONS
+SHOWN_IN_CURRENCY_OPTIONS = CURRENCY_OPTIONS
+MOVE_CYCLE_TEXT = "🔀 Move cycle"
+NEW_CYCLE_TEXT = "🆕 New cycle"
+
 
 def tests_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -1328,37 +1610,53 @@ def tests_menu_keyboard() -> InlineKeyboardMarkup:
     )
     return builder.as_markup()
 
+
 def pricing_settings_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="💰 Amount",
-        callback_data=SubscriptionAction(action="amount", subscription_id=subscription_id).pack(),
+    """[💰 Amount][💱 Currency] / [🌐 Shown in][📅 Next charge] / [🔁 Period] / [◀️ To card]."""
+
+    def action(label: str, name: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text=label,
+            callback_data=SubscriptionAction(action=name, subscription_id=subscription_id).pack(),
+        )
+
+    rows = pair_rows(
+        [
+            action("💰 Amount", "amount"),
+            action("💱 Currency", "currency"),
+            action(SHOWN_IN_TEXT, "basecurrency"),
+            action("📅 Next charge", "duedate"),
+            action("🔁 Period", "period"),
+        ]
     )
-    builder.button(
-        text="💱 Currency",
-        callback_data=SubscriptionAction(action="currency", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
-        text="🌐 Convert currency",
-        callback_data=SubscriptionAction(action="basecurrency", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
-        text="📅 Next charge",
-        callback_data=SubscriptionAction(action="duedate", subscription_id=subscription_id).pack(),
-    )
-    builder.button(
-        text="🔁 Period",
-        callback_data=SubscriptionAction(action="period", subscription_id=subscription_id).pack(),
-    )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="open", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
+    rows.append([nav_button(SubscriptionAction(action="open", subscription_id=subscription_id).pack(), TO_CARD_TEXT)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def user_amount_button_label(person: Dict[str, object], subscription_amount: float) -> str:
+    """``'Alice Smith · 10.00 ✏️'`` (a set amount) / ``'Bob · 15.99'`` / ``'Boris · 10.00 ×2'``.
+
+    The amount is what one share costs that person; ``×N`` is their weight, so
+    the row reads as what they pay (the card shows the product). The name is
+    cut to the row, the tail is kept whole.
+    """
+    name = " ".join(str(person.get("full_name") or "Unknown").split())
+    weight = int(person.get("share_weight") or 1)  # type: ignore[arg-type]
+    fixed_amount = person.get("fixed_amount")
+    is_set = False
+    try:
+        value = float(fixed_amount) if fixed_amount is not None else float(subscription_amount)  # type: ignore[arg-type]
+        is_set = fixed_amount is not None and value >= 0
+    except (TypeError, ValueError):
+        value = float(subscription_amount)
+    if value < 0:
+        value, is_set = float(subscription_amount), False
+    tail = f"{SEP}{format_number(value)}"
+    if weight > 1:
+        tail += f" ×{weight}"
+    if is_set:
+        tail += SET_AMOUNT_MARK
+    return fit_label(name, 1, tail=tail)
 
 
 def subscription_user_amounts_keyboard(
@@ -1367,155 +1665,167 @@ def subscription_user_amounts_keyboard(
     currency: str,
     subscription_amount: float,
 ) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for person in participants:
-        name = str(person.get("full_name") or "Unknown")
-        weight = int(person.get("share_weight") or 1)
-        fixed_amount = person.get("fixed_amount")
-        try:
-            base_value = float(fixed_amount) if fixed_amount is not None else float(subscription_amount)
-        except (TypeError, ValueError):
-            base_value = float(subscription_amount)
-        if weight > 1:
-            amount_text = f"{base_value:.2f} (x{weight}) {currency.upper()}"
-        else:
-            amount_text = f"{base_value:.2f} {currency.upper()}"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{name} — {amount_text}",
-                    callback_data=f"sub_user_amount:{subscription_id}:{int(person['id'])}",
-                )
-            ]
-        )
-    rows.append(
+    """One person per row, then [✏️ Set all] (only with people), then [◀️ Back] (to Participants). No colour."""
+    rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text="✏️ Set all",
-                callback_data=f"sub_user_amount_all:{subscription_id}",
-                style="primary",
+                text=user_amount_button_label(person, subscription_amount),
+                callback_data=f"sub_user_amount:{subscription_id}:{int(person['id'])}",  # type: ignore[call-overload]
             )
         ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
-    )
+        for person in participants
+    ]
+    if participants:
+        rows.append([InlineKeyboardButton(text=SET_ALL_TEXT, callback_data=f"sub_user_amount_all:{subscription_id}")])
+    else:
+        # Never a dead end: the way forward is to add people.
+        rows.append([_sub_button(ADD_PARTICIPANTS_TEXT, "participants_manage", subscription_id, "primary")])
+    rows.append([_participants_back(subscription_id)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def user_amount_clear_keyboard(
     subscription_id: int,
     friend_id: int,
-    *,
-    force_reply: bool = True,
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="Clear",
-        callback_data=f"sub_user_amount_clear:{subscription_id}:{friend_id}",
-        style="danger",
+    """The per-user amount prompt with a set amount: one row [✖️ Cancel][↺ Use default] (no colour).
+
+    "Use default" keeps the old ``sub_user_amount_clear:<id>:<friend>`` callback.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                dialog_cancel_inline_button(),
+                InlineKeyboardButton(
+                    text=USE_DEFAULT_TEXT,
+                    callback_data=f"sub_user_amount_clear:{subscription_id}:{friend_id}",
+                ),
+            ]
+        ],
     )
-    builder.adjust(1)
-    builder.row(dialog_cancel_inline_button())
-    return _prompt_markup(builder, force_reply)
+
+
+def user_amount_all_confirm_keyboard(subscription_id: int, cents: int) -> InlineKeyboardMarkup:
+    """[✖️ Cancel] back to Amount per user, [✏️ Set all] (red) applying the amount in the question."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            confirm_row(
+                SubscriptionAction(action="useramounts", subscription_id=subscription_id).pack(),
+                SET_ALL_TEXT,
+                f"{USER_AMOUNT_ALL_YES_PREFIX}{int(subscription_id)}:{int(cents)}",
+            )
+        ]
+    )
 
 
 def subscription_base_currency_keyboard(
     subscription_id: int,
     current_currency: str,
 ) -> InlineKeyboardMarkup:
-    options = ("USD", "EUR", "RUB")
-    builder = InlineKeyboardBuilder()
-    for code in options:
-        is_active = code == current_currency.upper()
-        text = f"{'✅ ' if is_active else ''}{code}"
-        if is_active:
-            builder.button(
-                text=text,
-                callback_data=f"sub_base_currency:{subscription_id}:{code}",
-                style="success",
-            )
-        else:
-            builder.button(
-                text=text,
-                callback_data=f"sub_base_currency:{subscription_id}:{code}",
-            )
-    builder.button(
-        text="Other",
-        callback_data=SubscriptionAction(action="basecurrency_other", subscription_id=subscription_id).pack(),
-    )
-    builder.adjust(3, 1)
-    builder.row(
+    """'🌐 Shown in' picker: [✅ RUB][USD] / [EUR][TRY] / [✏️ Other currency] / [◀️ Back] (to Pricing)."""
+    current = (current_currency or "").strip().upper()
+    buttons = [
         InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
-
-
-def build_participants_keyboard(friends: Sequence[Dict[str, object]], subscription_id: int) -> InlineKeyboardMarkup:
-    rows = []
-    for friend in friends:
-        prefix = "✅" if friend["is_member"] else "☐"
-        if friend["is_member"]:
-            toggle_button = InlineKeyboardButton(
-                text=f"{prefix} {friend['full_name']}",
-                callback_data=ParticipantAction(
-                    action="toggle",
-                    subscription_id=subscription_id,
-                    friend_id=friend["id"],
-                ).pack(),
-                style="success",
-            )
-        else:
-            toggle_button = InlineKeyboardButton(
-                text=f"{prefix} {friend['full_name']}",
-                callback_data=ParticipantAction(
-                    action="toggle",
-                    subscription_id=subscription_id,
-                    friend_id=friend["id"],
-                ).pack(),
-            )
-        if friend["is_member"]:
-            weight_value = int(friend.get("share_weight") or 1)
-            weight_button = InlineKeyboardButton(
-                text=f"x{weight_value}",
-                callback_data=ParticipantAction(
-                    action="weight",
-                    subscription_id=subscription_id,
-                    friend_id=friend["id"],
-                ).pack(),
-            )
-            rows.append([toggle_button, weight_button])
-        else:
-            rows.append([toggle_button])
+            text=radio_label(code, code == current),
+            callback_data=f"sub_base_currency:{subscription_id}:{code}",
+        )
+        for code in SHOWN_IN_CURRENCY_OPTIONS
+    ]
+    rows = currency_option_rows(buttons)
     rows.append(
         [
             InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+                text=OTHER_CURRENCY_TEXT,
+                callback_data=SubscriptionAction(action="basecurrency_other", subscription_id=subscription_id).pack(),
+            )
         ]
     )
+    rows.append([nav_button(SubscriptionAction(action="pricing", subscription_id=subscription_id).pack())])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_currency_keyboard(options: Iterable[str], *, force_reply: bool = True) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for code in options:
-        builder.button(text=code.upper(), callback_data=f"currency:{code.upper()}")
-    builder.adjust(3)
-    builder.row(dialog_cancel_inline_button())
-    return _prompt_markup(builder, force_reply)
+def participant_toggle_label(friend: Dict[str, object], buttons_in_row: int = 1) -> str:
+    """``'Alice Smith · 🟢'`` (in the subscription) / ``'Carol · ⚪'``; only the name is cut."""
+    name = " ".join(str(friend.get("full_name") or "Unknown").split())
+    on = bool(friend.get("is_member"))
+    return fit_label(name, buttons_in_row, tail=f"{SEP}{TOGGLE_ON if on else TOGGLE_OFF}")
+
+
+def build_participants_keyboard(
+    friends: Sequence[Dict[str, object]],
+    subscription_id: int,
+    *,
+    payment_mode: str = PAYMENT_MODE_SPLIT,
+    page: int = 1,
+    total_pages: int = 1,
+    close: bool = False,
+) -> InlineKeyboardMarkup:
+    """The people picker: [Alice Smith · 🟢][×2] / [Carol · ⚪], paging, then [◀️ Back] (to Participants).
+
+    ``friends`` is the page to show. The ``×N`` share button sits next to a
+    person who is in, and only in split mode. Callbacks ``spart:*`` are
+    unchanged; paging is ``spart_page:<sub>:<n>``. ``close`` is the copy
+    opened as a new message from a push: it ends in [✖️ Close] instead.
+    """
+    split = (payment_mode or PAYMENT_MODE_SPLIT).strip().lower() != PAYMENT_MODE_FIXED
+    rows: list[list[InlineKeyboardButton]] = []
+    for friend in friends:
+        with_weight = split and bool(friend.get("is_member"))
+        toggle_button = InlineKeyboardButton(
+            text=participant_toggle_label(friend, 2 if with_weight else 1),
+            callback_data=ParticipantAction(
+                action="toggle",
+                subscription_id=subscription_id,
+                friend_id=int(friend["id"]),  # type: ignore[call-overload]
+            ).pack(),
+        )
+        if not with_weight:
+            rows.append([toggle_button])
+            continue
+        weight_button = InlineKeyboardButton(
+            text=f"×{int(friend.get('share_weight') or 1)}",  # type: ignore[call-overload]
+            callback_data=ParticipantAction(
+                action="weight",
+                subscription_id=subscription_id,
+                friend_id=int(friend["id"]),  # type: ignore[call-overload]
+            ).pack(),
+        )
+        rows.append([toggle_button, weight_button])
+    if total_pages > 1:
+        rows.append(
+            pagination_row(
+                page,
+                total_pages,
+                previous_callback=f"{PARTICIPANTS_PAGE_PREFIX}{subscription_id}:{page - 1}",
+                next_callback=f"{PARTICIPANTS_PAGE_PREFIX}{subscription_id}:{page + 1}",
+            )
+        )
+    rows.append([nav_button(CLOSE_CALLBACK) if close else _participants_back(subscription_id)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _option_rows(buttons: Sequence[InlineKeyboardButton], *, max_per_row: int = 4) -> list[list[InlineKeyboardButton]]:
+    """Short picker options ``max_per_row`` to a row when every label fits; else in pairs (2×2)."""
+    if all(label_units(button.text) <= row_budget(max_per_row) for button in buttons):
+        return [list(buttons[start:start + max_per_row]) for start in range(0, len(buttons), max_per_row)]
+    return pair_rows(buttons)
+
+
+def build_currency_keyboard(
+    options: Iterable[str],
+    *,
+    selected: str | None = None,
+    cancel_callback: str = CANCEL_CALLBACK,
+) -> InlineKeyboardMarkup:
+    """Currency quick picks (``currency:XXX``, unchanged) above [✖️ Cancel]; the current one gets ✅."""
+    current = (selected or "").strip().upper()
+    buttons = [
+        InlineKeyboardButton(text=radio_label(code.upper(), code.upper() == current), callback_data=f"currency:{code.upper()}")
+        for code in options
+    ]
+    rows = currency_option_rows(buttons)
+    rows.append([cancel_button(cancel_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_settings_keyboard() -> InlineKeyboardMarkup:
@@ -1582,6 +1892,11 @@ def settings_timezone_keyboard(current_timezone: str) -> InlineKeyboardMarkup:
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+OTHER_TIME_TEXT = "✏️ Other time"
+USE_DEFAULT_TEXT = "↺ Use default"
+TIME_PRESETS = ("09:00", "12:00", "16:00", "20:00")
 
 
 def public_settings_keyboard(
@@ -1662,38 +1977,18 @@ def subscription_currency_keyboard(
     subscription_id: int,
     current_currency: str,
 ) -> InlineKeyboardMarkup:
-    options = ("USD", "EUR", "RUB")
-    normalized_current = current_currency.upper()
-    rows: list[list[InlineKeyboardButton]] = []
-    option_buttons: list[InlineKeyboardButton] = []
-    for code in options:
-        is_active = code == normalized_current
-        if is_active:
-            option_buttons.append(
-                InlineKeyboardButton(
-                    text=code,
-                    callback_data=f"sub_currency:{subscription_id}:{code}",
-                    style="success",
-                )
-            )
-        else:
-            option_buttons.append(
-                InlineKeyboardButton(
-                    text=code,
-                    callback_data=f"sub_currency:{subscription_id}:{code}",
-                )
-            )
-    rows.append(option_buttons)
-    rows.append([InlineKeyboardButton(text="Other", callback_data=f"sub_currency_other:{subscription_id}")])
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=SubscriptionAction(action="pricing", subscription_id=subscription_id).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-        ]
-    )
+    """'💱 Currency' picker: [✅ RUB][USD] / [EUR][TRY] / [✏️ Other currency] / [◀️ Back]."""
+    current = (current_currency or "").strip().upper()
+    buttons = [
+        InlineKeyboardButton(
+            text=radio_label(code, code == current),
+            callback_data=f"sub_currency:{subscription_id}:{code}",
+        )
+        for code in SUBSCRIPTION_CURRENCY_OPTIONS
+    ]
+    rows = currency_option_rows(buttons)
+    rows.append([InlineKeyboardButton(text=OTHER_CURRENCY_TEXT, callback_data=f"sub_currency_other:{subscription_id}")])
+    rows.append([nav_button(SubscriptionAction(action="pricing", subscription_id=subscription_id).pack())])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1836,31 +2131,71 @@ def settings_notifications_keyboard(
     return builder.as_markup()
 
 
-def build_period_keyboard(*, force_reply: bool = True) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for days in (7, 14, 30, 90):
-        builder.button(text=f"{days} d", callback_data=f"period:{days}")
-    builder.button(text="Monthly", callback_data="period:month")
-    builder.adjust(2)
-    builder.row(dialog_cancel_inline_button())
-    return _prompt_markup(builder, force_reply)
+PERIOD_PRESET_DAYS = (7, 14, 30, 90)
+MONTHLY_LABEL = "Monthly"
+EVERYONE_LABEL = "Everyone"
+SPLIT_BY_SHARES_LABEL = "Split by shares"
+FIXED_PER_USER_LABEL = "Fixed per user"
 
 
-def build_share_limit_keyboard(*, force_reply: bool = True) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Split across all", callback_data="sharelimit:all")
-    builder.adjust(1)
-    builder.row(dialog_cancel_inline_button())
-    return _prompt_markup(builder, force_reply)
+def build_period_keyboard(
+    *,
+    selected: int | None = None,
+    cancel_callback: str = CANCEL_CALLBACK,
+) -> InlineKeyboardMarkup:
+    """[7 days][14 days] / [30 days][90 days] / [Monthly] / [✖️ Cancel] (``period:N`` / ``period:month``).
+
+    ``selected`` is a day count or ``MONTHLY_PERIOD_SENTINEL``; that option gets ✅.
+    """
+    presets = [
+        InlineKeyboardButton(text=radio_label(format_days(days), selected == days), callback_data=f"period:{days}")
+        for days in PERIOD_PRESET_DAYS
+    ]
+    rows = pair_rows(presets)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=radio_label(MONTHLY_LABEL, selected == MONTHLY_PERIOD_SENTINEL),
+                callback_data="period:month",
+            )
+        ]
+    )
+    rows.append([cancel_button(cancel_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_creation_payment_mode_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Split by shares", callback_data=f"create_payment_mode:{PAYMENT_MODE_SPLIT}")
-    builder.button(text="Fixed per user", callback_data=f"create_payment_mode:{PAYMENT_MODE_FIXED}")
-    builder.adjust(2)
-    builder.row(dialog_cancel_inline_button())
-    return builder.as_markup()
+def build_share_limit_keyboard(
+    *,
+    everyone_selected: bool = False,
+    cancel_callback: str = CANCEL_CALLBACK,
+) -> InlineKeyboardMarkup:
+    """[Everyone] (``sharelimit:all``) above [✖️ Cancel]."""
+    rows = [
+        [InlineKeyboardButton(text=radio_label(EVERYONE_LABEL, everyone_selected), callback_data="sharelimit:all")],
+        [cancel_button(cancel_callback)],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_creation_payment_mode_keyboard(
+    *,
+    selected: str | None = None,
+    cancel_callback: str = CANCEL_CALLBACK,
+) -> InlineKeyboardMarkup:
+    """[Split by shares][Fixed per user] (``create_payment_mode:*``) above [✖️ Cancel]."""
+    buttons = [
+        InlineKeyboardButton(
+            text=radio_label(SPLIT_BY_SHARES_LABEL, selected == PAYMENT_MODE_SPLIT),
+            callback_data=f"create_payment_mode:{PAYMENT_MODE_SPLIT}",
+        ),
+        InlineKeyboardButton(
+            text=radio_label(FIXED_PER_USER_LABEL, selected == PAYMENT_MODE_FIXED),
+            callback_data=f"create_payment_mode:{PAYMENT_MODE_FIXED}",
+        ),
+    ]
+    rows = pair_rows(buttons)
+    rows.append([cancel_button(cancel_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_due_date_change_keyboard(
@@ -1868,28 +2203,19 @@ def build_due_date_change_keyboard(
     old_due: str,
     new_due: str,
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="🔀 Move cycle (keep payments)",
-        callback_data=DueDateChangeAction(
-            action="move",
-            subscription_id=subscription_id,
-            old_due=old_due,
-            new_due=new_due,
-        ).pack(),
+    """[🔀 Move cycle] / [🆕 New cycle] / [✖️ Cancel] (back to Pricing); the text explains both."""
+
+    def choice(label: str, action: str) -> list[InlineKeyboardButton]:
+        data = DueDateChangeAction(action=action, subscription_id=subscription_id, old_due=old_due, new_due=new_due)
+        return [InlineKeyboardButton(text=label, callback_data=data.pack())]
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            choice(MOVE_CYCLE_TEXT, "move"),
+            choice(NEW_CYCLE_TEXT, "new"),
+            [cancel_button(SubscriptionAction(action="pricing", subscription_id=subscription_id).pack())],
+        ]
     )
-    builder.button(
-        text="🆕 New cycle (request payments)",
-        callback_data=DueDateChangeAction(
-            action="new",
-            subscription_id=subscription_id,
-            old_due=old_due,
-            new_due=new_due,
-        ).pack(),
-    )
-    builder.adjust(1)
-    builder.row(dialog_cancel_inline_button())
-    return builder.as_markup()
 
 
 def build_payment_confirmation_keyboard(
@@ -1958,22 +2284,20 @@ def build_test_payment_confirmation_keyboard(
 def comment_edit_keyboard(
     subscription_id: int,
     has_comment: bool,
-    *,
-    force_reply: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Comment prompt keyboard; ``force_reply`` only when sent as a fresh message (never on edit paths)."""
-    builder = InlineKeyboardBuilder()
-    if has_comment:
-        builder.row(
-            InlineKeyboardButton(
-                text="Clear",
-                callback_data=SubscriptionAction(action="comment_clear", subscription_id=subscription_id).pack(),
-            )
-        )
-    builder.row(
-        dialog_cancel_inline_button(),
-    )
-    builder.row(
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return _prompt_markup(builder, force_reply)
+    """The comment prompt: [🗑 Clear comment] (only while there is one) above [✖️ Cancel].
+
+    No "✖️ Close": it deleted the prompt but left the input armed. "🗑 Clear
+    comment" is too wide to share a row with Cancel, so it sits above it like
+    any quick value.
+    """
+    rows = comment_quick_rows(subscription_id, has_comment)
+    rows.append([dialog_cancel_inline_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def comment_quick_rows(subscription_id: int, has_comment: bool) -> list[list[InlineKeyboardButton]]:
+    """The quick value above the comment prompt's Cancel: [🗑 Clear comment] (``sub:comment_clear``)."""
+    if not has_comment:
+        return []
+    return [[_sub_button(CLEAR_COMMENT_TEXT, "comment_clear", subscription_id)]]

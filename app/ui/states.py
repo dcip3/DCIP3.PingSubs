@@ -116,6 +116,13 @@ class ReminderSendAction(CallbackData, prefix="remsend"):
     telegram_id: int
 
 
+class ReminderSendConfirmAction(CallbackData, prefix="remsendok"):
+    """The [📬 Send] of the send-now confirmation; same fields as ReminderSendAction (0 = every unpaid)."""
+
+    subscription_id: int
+    telegram_id: int
+
+
 class TestSendAction(CallbackData, prefix="testsend"):
     telegram_id: int
 

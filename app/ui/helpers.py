@@ -16,11 +16,9 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from app.core.constants import (
-    DEFAULT_CURRENCIES,
     MONTHLY_PERIOD_SENTINEL,
     PAYMENT_MODE_FIXED,
 )
@@ -28,7 +26,6 @@ from app.storage.db import Database
 from app.services import normalize_payment_mode, parse_fixed_amount
 from app.ui.keyboards import (
     build_members_list_keyboard,
-    build_participants_keyboard,
     build_currency_keyboard,
     build_creation_payment_mode_keyboard,
     build_period_keyboard,
@@ -36,27 +33,17 @@ from app.ui.keyboards import (
     public_account_keyboard,
     build_share_limit_keyboard,
     build_subscription_list_keyboard,
-    dialog_cancel_inline_keyboard,
     member_detail_keyboard,
     member_report_keyboard,
-    participants_settings_keyboard,
     pricing_settings_keyboard,
-    subscription_user_amounts_keyboard,
     public_subscription_detail_keyboard,
     public_subscription_report_keyboard,
     public_reply_keyboard,
-    reminder_settings_keyboard,
-    reminder_send_targets_keyboard,
     settings_tests_keyboard,
-    subscription_cycle_actions_keyboard,
-    subscription_open_cycles_keyboard,
-    subscription_more_keyboard,
-    subscription_payment_info_keyboard,
-    subscription_report_keyboard,
     subscription_detail_keyboard,
     tests_menu_keyboard,
 )
-from app.ui.states import Responder, SubscriptionAction
+from app.ui.states import Responder
 from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
@@ -67,11 +54,30 @@ from app.core.reminders import (
     parse_offsets,
     parse_time_string,
     parse_timezone,
-    due_status_html,
     tg_due,
 )
 from app.ui.style import TOAST_MAX_LEN
 from app.ui.text import escape_html, format_display_name
+# Admin subscription list and card (WP3).
+from app.ui.keyboards import (  # noqa: E402
+    CANCEL_CALLBACK as _CANCEL_CALLBACK,
+    CURRENCY_OPTIONS,
+    SUBSCRIPTION_LIST_PAGE_SIZE,
+    payment_method_label,
+)
+from app.ui.style import (  # noqa: E402
+    BULLET,
+    SEP,
+    bullet,
+    cut_visible,
+    expandable,
+    join_blocks,
+    progress_bar,
+    sub_line,
+    title as screen_title,
+    with_banner,
+)
+from app.ui.text import days_left_phrase, format_days, format_money, format_shares  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -290,15 +296,6 @@ def _users_quote(subscription: Dict[str, object], participants: Sequence[Dict[st
             _users_summary_line(subscription, participants, payment_mode),
             _participants_block(subscription, participants, payment_mode),
         ]
-    )
-
-
-def _reminder_summary(reminder_time: str, tz_name: str, subscription: Dict[str, object]) -> str:
-    """Time, timezone, reminder days and the post-due flag on one line (no emoji: each card adds its own)."""
-    offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
-    return (
-        f"{escape_html(reminder_time)} {escape_html(tz_name)} · {escape_html(offsets_text)}"
-        f" · after due: {_on_off(subscription.get('remind_after_due'))}"
     )
 
 
@@ -535,6 +532,42 @@ async def respond_with_markup(
     return shown
 
 
+# Hub cards opened as a NEW message from a push, alert or report end in
+# [✖️ Close] (push-buttons-open-new). Their sub-screens edit that same message
+# and come back through the plain "To card" callbacks, so the copy is
+# remembered by (chat id, message id): a redraw of a remembered message keeps
+# [✖️ Close] instead of offering [◀️ To list] (which would turn the spawned
+# copy into the list). The memory is per process and bounded; after a restart
+# the copy falls back to the list nav.
+_SPAWNED_SCREENS: "OrderedDict[tuple[int, int], None]" = OrderedDict()
+SPAWNED_SCREENS_MAX = 5000
+
+
+def remember_spawned(message: object) -> None:
+    """Remember a card copy just sent as a new message (from a push, alert or report)."""
+    if not isinstance(message, Message):
+        return
+    key = (int(message.chat.id), int(message.message_id))
+    _SPAWNED_SCREENS[key] = None
+    _SPAWNED_SCREENS.move_to_end(key)
+    while len(_SPAWNED_SCREENS) > SPAWNED_SCREENS_MAX:
+        _SPAWNED_SCREENS.popitem(last=False)
+
+
+def is_spawned_screen(chat_id: Optional[int], message_id: Optional[int]) -> bool:
+    if chat_id is None or message_id is None:
+        return False
+    return (int(chat_id), int(message_id)) in _SPAWNED_SCREENS
+
+
+def spawned_screen_of(target: object) -> bool:
+    """True when a tap came from a remembered card copy (or one of its sub-screens)."""
+    message = target.message if isinstance(target, CallbackQuery) else None
+    if message is None:
+        return False
+    return is_spawned_screen(message.chat.id, message.message_id)
+
+
 async def edit_in_place(
     bot: Bot,
     chat_id: int,
@@ -645,12 +678,45 @@ async def stale_redirect(
     await answer_callback_once(callback, toast, alert=alert)
 
 
-def _split_plain_block(block: str, limit: int) -> list[str]:
+def _slice_line(line: str, limit: int) -> list[str]:
+    """Last resort for ONE line longer than the limit: slice it, never inside a tag."""
     parts: list[str] = []
-    remaining = block
-    while remaining:
-        parts.append(remaining[:limit])
-        remaining = remaining[limit:]
+    remaining = line
+    while len(remaining) > limit:
+        cut = limit
+        opening = remaining.rfind("<", 0, cut)
+        if opening > remaining.rfind(">", 0, cut) and opening > 0:
+            cut = opening  # do not end a piece inside '<tag …'
+        parts.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def _split_plain_block(block: str, limit: int) -> list[str]:
+    """Split an oversized block on line boundaries, so no line (and no tag in it) is cut.
+
+    Report lines carry inline tags such as ``<b><tg-time …>…</tg-time></b>``;
+    cutting inside a line would leave both halves with broken HTML. Only a
+    single line longer than the limit is sliced, and never inside a tag.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    size = 0
+    for line in block.split("\n"):
+        extra = len(line) + (1 if current else 0)
+        if current and size + extra > limit:
+            parts.append("\n".join(current))
+            current, size = [], 0
+            extra = len(line)
+        if len(line) > limit:
+            parts.extend(_slice_line(line, limit))
+            continue
+        current.append(line)
+        size += extra
+    if current:
+        parts.append("\n".join(current))
     return parts
 
 
@@ -746,7 +812,7 @@ async def send_chunked_responder_text(
     chunks = split_text_chunks(text)
     if isinstance(target, CallbackQuery):
         if not target.message:
-            await target.answer("Unable to show the report right now.", show_alert=True)
+            await answer_callback_once(target, "Could not show the report. Try again.", alert=True)
             return
         if len(chunks) == 1:
             inline_markup = reply_markup if isinstance(reply_markup, InlineKeyboardMarkup) else None
@@ -764,37 +830,154 @@ async def send_chunked_responder_text(
         await target.answer(chunk, reply_markup=markup)
 
 
-async def send_subscription_list(target: Responder, db: Database) -> None:
+SUBSCRIPTION_GONE_BANNER = "⚠️ That subscription was deleted"
+SUBSCRIPTION_LIST_HINT = "Tap a subscription to manage it."
+SUBSCRIPTION_LIST_EMPTY = "No subscriptions yet."
+
+
+async def _open_cycle_states(
+    db: Database,
+    subscription: Dict[str, object],
+    live_participants: Sequence[Dict[str, object]],
+) -> list[Dict[str, object]]:
+    """Every open cycle of a subscription, oldest first, with who has paid.
+
+    Each item: ``due_value``, ``due`` (a date or None), ``paid``, ``total`` and
+    ``unpaid_names`` (display names, sorted). Cycle participants come from the
+    cycle snapshot, or from the live list while no snapshot exists.
+    """
+    subscription_id = int(subscription["id"])
+    open_cycles = await db.list_open_cycles(subscription_id)
+    if not open_cycles:
+        return []
+    state_map = await db.list_cycle_participants_for_due_dates(subscription_id, open_cycles)
+    paid_by_due: Dict[str, set[int]] = {}
+    for row in await db.list_payments_for_cycles(subscription_id, open_cycles):
+        payer_id = row.get("paid_by_telegram_id")
+        if payer_id is not None:
+            paid_by_due.setdefault(str(row.get("due_date") or ""), set()).add(int(payer_id))
+    states: list[Dict[str, object]] = []
+    for due_value in open_cycles:
+        names_by_id: Dict[int, str] = {}
+        for person in _resolve_report_cycle_participants(state_map.get(due_value) or {}, live_participants):
+            telegram_id = int(person.get("telegram_id") or 0)
+            if telegram_id > 0:
+                names_by_id[telegram_id] = str(person.get("full_name") or f"User {telegram_id}")
+        paid_ids = set(names_by_id) & paid_by_due.get(due_value, set())
+        unpaid_ids = sorted(set(names_by_id) - paid_ids, key=lambda tid: names_by_id[tid].lower())
+        try:
+            due: Optional[date] = datetime.strptime(due_value, "%Y-%m-%d").date()
+        except ValueError:
+            due = None
+        states.append(
+            {
+                "due_value": due_value,
+                "due": due,
+                "paid": len(paid_ids),
+                "total": len(names_by_id),
+                "unpaid_names": [format_display_name(names_by_id[tid]) for tid in unpaid_ids],
+            }
+        )
+    return states
+
+
+def _has_unpaid_due(cycles: Sequence[Dict[str, object]], today: date) -> bool:
+    """A cycle due today or earlier that someone has not paid: the subscription needs attention."""
+    return any(
+        cycle["due"] is not None and cycle["due"] <= today and cycle["unpaid_names"]  # type: ignore[operator]
+        for cycle in cycles
+    )
+
+
+def _build_subscription_list_text(total: int, unpaid: int, no_participants: int) -> str:
+    """``'📋 <b>Subscriptions</b> · 4'``, the attention counts (only when non-zero), the hint."""
+    if total <= 0:
+        return join_blocks(screen_title("📋", "Subscriptions"), SUBSCRIPTION_LIST_EMPTY)
+    attention = [
+        f"⚠️ Unpaid: <b>{unpaid}</b>" if unpaid else None,
+        f"👥 No participants: <b>{no_participants}</b>" if no_participants else None,
+    ]
+    return join_blocks(
+        screen_title("📋", "Subscriptions", total),
+        [line for line in attention if line],
+        SUBSCRIPTION_LIST_HINT,
+    )
+
+
+def _sort_subscription_rows(rows: Sequence[Dict[str, object]]) -> list[Dict[str, object]]:
+    """Unpaid first, then by name."""
+    return sorted(rows, key=lambda row: (0 if row.get("unpaid") else 1, str(row.get("name") or "").lower()))
+
+
+async def send_subscription_list(
+    target: Responder,
+    db: Database,
+    *,
+    page: Optional[int] = None,
+    focus_subscription_id: Optional[int] = None,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """The admin subscription list (a top-level screen: no Back/Close row).
+
+    ``focus_subscription_id`` opens the page that holds that subscription (the
+    way back from its card); ``banner`` puts a result line on top.
+    """
     subs = await db.list_subscriptions()
     if not subs:
-        await respond_with_markup(
+        return await respond_with_markup(
             target,
-            "📋 Subscriptions:\nNo subscriptions yet. Use <code>➕ New subscription</code> below to create one.",
+            with_banner(banner, _build_subscription_list_text(0, 0, 0)),
             reply_markup=build_subscription_list_keyboard([]),
+            toast=toast,
         )
-        return
 
-    lines = [
-        "📋 Subscriptions:",
-        "Choose a subscription to manage:",
-        "",
-    ]
-    for idx, sub in enumerate(subs, 1):
-        audience = int(sub["participant_count"] or 0)
-        if audience == 0:
-            audience_text = "no users"
+    today = datetime.now(parse_timezone(await resolve_report_timezone(db))).date()
+    rows: list[Dict[str, object]] = []
+    for sub in subs:
+        row = dict(sub)
+        if int(sub.get("participant_count") or 0):
+            participants = await db.list_subscription_participants(int(sub["id"]))
+            row["unpaid"] = _has_unpaid_due(await _open_cycle_states(db, sub, participants), today)
         else:
-            audience_text = f"{audience} user" if audience == 1 else f"{audience} users"
-        lines.append(
-            f"{idx}. <b>{escape_html(sub['name'])}</b> — "
-            f"{float(sub['amount']):.2f} {escape_html(sub['currency'])} · {audience_text}"
-        )
+            row["unpaid"] = False
+        rows.append(row)
+    rows = _sort_subscription_rows(rows)
 
-    await respond_with_markup(
-        target,
-        "\n".join(lines),
-        reply_markup=build_subscription_list_keyboard(subs),
+    total_pages = max(1, -(-len(rows) // SUBSCRIPTION_LIST_PAGE_SIZE))
+    if focus_subscription_id is not None and page is None:
+        index = next((i for i, row in enumerate(rows) if int(row["id"]) == int(focus_subscription_id)), 0)
+        page = index // SUBSCRIPTION_LIST_PAGE_SIZE + 1
+    page = min(max(int(page or 1), 1), total_pages)
+    start = (page - 1) * SUBSCRIPTION_LIST_PAGE_SIZE
+
+    text = _build_subscription_list_text(
+        len(rows),
+        sum(1 for row in rows if row["unpaid"]),
+        sum(1 for row in rows if not int(row.get("participant_count") or 0)),
     )
+    return await respond_with_markup(
+        target,
+        with_banner(banner, text),
+        reply_markup=build_subscription_list_keyboard(
+            rows[start:start + SUBSCRIPTION_LIST_PAGE_SIZE],
+            page=page,
+            total_pages=total_pages,
+        ),
+        toast=toast,
+    )
+
+
+async def show_subscription_gone(target: Responder, db: Database) -> None:
+    """A subscription that no longer exists: back to the list, never a dead end.
+
+    A tap redraws the list with the toast 'Subscription was deleted'; a typed
+    message gets the list with the banner '⚠️ That subscription was deleted'.
+    """
+    if isinstance(target, CallbackQuery):
+        await stale_redirect(target, SUBSCRIPTION_GONE, lambda: send_subscription_list(target, db))
+        return
+    await send_subscription_list(target, db, banner=SUBSCRIPTION_GONE_BANNER)
 
 
 async def send_user_subscription_list(message: Message, db: Database, telegram_id: int) -> None:
@@ -992,31 +1175,10 @@ async def send_subscription_payment_report(
     db: Database,
     subscription_id: int,
 ) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
+    """'📊 <b>Reports · Netflix</b>' (WP8, app/ui/report_screens.py)."""
+    from app.ui.report_screens import send_subscription_report  # it imports this module
 
-    participants = await db.list_subscription_participants(subscription_id)
-    if not participants:
-        await respond_with_markup(
-            target,
-        "No users to report yet.",
-            reply_markup=subscription_report_keyboard(subscription_id),
-        )
-        return
-    text = await _build_subscription_payment_report_text(
-        db,
-        subscription,
-        participants,
-        scope="all",
-        tz_name=await resolve_report_timezone(db),
-    )
-    await send_chunked_responder_text(
-        target,
-        assemble_payments_report([text]),
-        reply_markup=subscription_report_keyboard(subscription_id),
-    )
+    await send_subscription_report(target, db, subscription_id)
 
 
 async def send_subscription_open_cycles(
@@ -1024,72 +1186,14 @@ async def send_subscription_open_cycles(
     db: Database,
     subscription_id: int,
     notice: Optional[str] = None,
-) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """'🗂 <b>Open cycles · Netflix</b> · 2' (WP8); ``notice`` is the old name of ``banner``."""
+    from app.ui.report_screens import send_open_cycles  # it imports this module
 
-    open_cycles = await db.list_open_cycles(subscription_id)
-    if not open_cycles:
-        text = "🗂 Open cycles:\nNo open cycles for this subscription."
-        if notice:
-            text = f"{escape_html(notice)}\n\n{text}"
-        await respond_with_markup(
-            target,
-            text,
-            reply_markup=subscription_open_cycles_keyboard(subscription_id),
-        )
-        return
-
-    cycle_state_map = await db.list_cycle_participants_for_due_dates(subscription_id, open_cycles)
-    payments = await db.list_payments_for_cycles(subscription_id, open_cycles)
-    live_participants = await db.list_subscription_participants(subscription_id)
-
-    paid_by_due: dict[str, set[int]] = {}
-    for row in payments:
-        due_value = str(row.get("due_date") or "")
-        payer_id = row.get("paid_by_telegram_id")
-        if payer_id is None:
-            continue
-        paid_by_due.setdefault(due_value, set()).add(int(payer_id))
-
-    tz_name = await resolve_report_timezone(db)
-    today = datetime.now(parse_timezone(tz_name)).date()
-    lines = [
-        "🗂 Open cycles:",
-        f"Subscription: <b>{escape_html(subscription['name'])}</b>",
-        "",
-    ]
-    if notice:
-        lines[0:0] = [escape_html(notice), ""]
-    for idx, due_value in enumerate(open_cycles, 1):
-        summary = _build_open_cycle_summary(
-            subscription,
-            due_value,
-            today,
-            cycle_state_map,
-            live_participants,
-            paid_by_due,
-        )
-
-        lines.extend(
-            [
-                f"{idx}. <b>{tg_due(due_value, tz_name, 'wD')}</b> — {due_status_html(due_value, tz_name, today)}",
-                f"💰 Amount: {_money(float(summary['amount']), summary['currency'])}",
-                f"👥 Users: {int(summary['users_count'])} | "
-                f"✅ Paid: {int(summary['paid_count'])}/{int(summary['users_count'])}",
-                f"📦 Snapshot flags: users={int(bool(summary['snapshot_ready']))} "
-                f"settings={int(bool(summary['settings_snapshot_ready']))}",
-                "",
-            ]
-        )
-
-    await send_chunked_responder_text(
-        target,
-        "\n".join(lines).rstrip(),
-        reply_markup=subscription_open_cycles_keyboard(subscription_id, open_cycles),
-    )
+    return await send_open_cycles(target, db, subscription_id, banner=banner or notice, toast=toast)
 
 
 async def send_subscription_cycle_actions(
@@ -1098,64 +1202,14 @@ async def send_subscription_cycle_actions(
     subscription_id: int,
     due_value: str,
     notice: Optional[str] = None,
-) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """'🗂 <b>Cycle Thu, 01.10 · Netflix</b>' (WP8); ``notice`` is the old name of ``banner``."""
+    from app.ui.report_screens import send_cycle_actions  # it imports this module
 
-    open_cycles = await db.list_open_cycles(subscription_id)
-    if due_value not in open_cycles:
-        await respond_with_markup(
-            target,
-            "This cycle is no longer open.",
-            reply_markup=subscription_open_cycles_keyboard(subscription_id, open_cycles),
-        )
-        return
-
-    cycle_state_map = await db.list_cycle_participants_for_due_dates(subscription_id, [due_value])
-    payments = await db.list_payments_for_cycles(subscription_id, [due_value])
-    live_participants = await db.list_subscription_participants(subscription_id)
-
-    paid_by_due: dict[str, set[int]] = {}
-    for row in payments:
-        payer_id = row.get("paid_by_telegram_id")
-        if payer_id is None:
-            continue
-        paid_by_due.setdefault(str(row.get("due_date") or ""), set()).add(int(payer_id))
-
-    tz_name = await resolve_report_timezone(db)
-    today = datetime.now(parse_timezone(tz_name)).date()
-    summary = _build_open_cycle_summary(
-        subscription,
-        due_value,
-        today,
-        cycle_state_map,
-        live_participants,
-        paid_by_due,
-    )
-    unpaid_count = max(int(summary["users_count"]) - int(summary["paid_count"]), 0)
-
-    body = (
-        "🗂 Open cycle:\n"
-        f"Subscription: <b>{escape_html(subscription['name'])}</b>\n"
-        f"Cycle: <b>{tg_due(due_value, tz_name, 'wD')}</b>\n"
-        f"Status: {due_status_html(due_value, tz_name, today)}\n"
-        f"💰 Amount: {_money(float(summary['amount']), summary['currency'])}\n"
-        f"👥 Users: {int(summary['users_count'])} | "
-        f"✅ Paid: {int(summary['paid_count'])}/{int(summary['users_count'])}\n"
-        f"📦 Snapshot flags: users={int(bool(summary['snapshot_ready']))} "
-        f"settings={int(bool(summary['settings_snapshot_ready']))}\n"
-        "\n"
-        "♻️ Recreate cycle resets this cycle to the current users/settings and clears its payment marks.\n"
-        f"✅ Force close marks <b>{unpaid_count}</b> unpaid user(s) as paid and closes the cycle."
-    )
-    text = body if not notice else f"{escape_html(notice)}\n\n{body}"
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=subscription_cycle_actions_keyboard(subscription_id, due_value),
-    )
+    return await send_cycle_actions(target, db, subscription_id, due_value, banner=banner or notice, toast=toast)
 
 
 async def send_public_subscription_payment_report(
@@ -1249,11 +1303,14 @@ async def resolve_report_timezone(db: Database) -> str:
     ) or DEFAULT_REMINDER_TIMEZONE
 
 
-def payments_report_header(attention_count: int) -> str:
-    if attention_count <= 0:
-        return "📊 Reports"
-    verb = "needs" if attention_count == 1 else "need"
-    return f"📊 Reports · <b>{attention_count} {verb} attention</b>"
+def payments_report_header(attention_count: int, title: str = "Reports") -> str:
+    """``'📊 <b>Reports</b> · 1 needs attention'``; ``title`` (HTML) names the scope:
+    ``'Reports · Netflix'`` or ``'Reports · Anna Petrova'``."""
+    fact = ""
+    if attention_count > 0:
+        verb = "needs" if attention_count == 1 else "need"
+        fact = f"{attention_count} {verb} attention"
+    return screen_title("📊", title, fact)
 
 
 def _is_attention_block(block: str) -> bool:
@@ -1303,11 +1360,8 @@ def assemble_payments_report(
 
 
 def _format_due_distance(due_date: date, today: date) -> str:
-    if due_date > today:
-        return f"in {(due_date - today).days} d"
-    if due_date == today:
-        return "today"
-    return f"{(today - due_date).days} d overdue"
+    """``'in 2 days'`` | ``'tomorrow'`` | ``'today'`` | ``'overdue by 31 days'``."""
+    return days_left_phrase((due_date - today).days)
 
 
 def _format_report_distance(due_value: str, due_date: date, today: date, tz_name: Optional[str]) -> str:
@@ -1426,7 +1480,7 @@ async def _build_subscription_payment_report_text(
             next_charge,
             today,
             tz_name,
-            extra=" ✅" if upcoming_paid else "",
+            extra=f"{SEP}✅ paid" if upcoming_paid else "",
         )
         if schedule_line:
             lines.append(schedule_line)
@@ -1453,7 +1507,7 @@ async def _build_subscription_payment_report_text(
             if participant_ids:
                 paid_count = len(participant_ids & paid_by_due.get(next_value, set()))
                 if paid_count:
-                    paid_progress = f" · {paid_count}/{len(participant_ids)} paid"
+                    paid_progress = f"{SEP}{paid_count} of {len(participant_ids)} paid"
 
     unpaid_lines: list[str] = []
     for due_value in open_cycles:
@@ -1479,7 +1533,8 @@ async def _build_subscription_payment_report_text(
             escape_html(format_display_name(names_by_id[telegram_id]))
             for telegram_id in sorted(unpaid_ids, key=lambda tid: names_by_id[tid].lower())
         )
-        unpaid_lines.append(f"⚠️ {_format_report_due(due_value, due, today, tz_name)}: {names}")
+        distance = "due today" if due == today else _format_due_distance(due, today)
+        unpaid_lines.append(f"⚠️ <b>{tg_due(due_value, tz_name, 'wd')}</b>{SEP}{distance}: {names}")
 
     lines = [f"{'🔴' if unpaid_lines else '🟢'} <b>{safe_name}</b>"]
     schedule_line = _build_report_schedule_line(
@@ -1495,25 +1550,208 @@ async def _build_subscription_payment_report_text(
     return "\n".join(lines)
 
 
-def _share_details(
+# --------------------------------------------------- admin subscription card
+#
+# Block layout: a header line, then one block per section ('📅 <b>Schedule</b>'
+# plus indented 'Label: value' lines). A block that does not apply is left out.
+
+CARD_FOLD_MIN = 6  # participants / unpaid names fold into an expandable quote above 5
+CARD_FOLD_BUDGET = 1200  # UTF-16 units per folded list, so the card stays far below 4096
+CARD_COMMENT_FOLD_LEN = 500
+# The admin card shows only the start of the requisites and the link; “💳 Payment” has them in full.
+CARD_DETAIL_SHOWN_MAX = 60
+CARD_LINK_SHOWN_MAX = 80
+PAYMENT_INFO_BUTTON_TEXT = "💳 Payment"
+
+
+def _ordinal(day: int) -> str:
+    """``1st``, ``2nd``, ``3rd``, ``4th``, ``11th``, ``21st``, ``22nd``, ``31st``."""
+    if 10 <= day % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
+def _period_days_of(subscription: Dict[str, object]) -> int:
+    try:
+        return int(subscription.get("period_days") or 30)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 30
+
+
+def _cadence_short(subscription: Dict[str, object]) -> str:
+    """``'monthly'`` or ``'every 30 days'`` (the header fact)."""
+    period = _period_days_of(subscription)
+    if period == MONTHLY_PERIOD_SENTINEL:
+        return "monthly"
+    return f"every {format_days(period)}"
+
+
+def _repeats_text(subscription: Dict[str, object]) -> str:
+    """``'every month on the 15th'`` or ``'every 30 days'``."""
+    period = _period_days_of(subscription)
+    if period != MONTHLY_PERIOD_SENTINEL:
+        return f"every {format_days(period)}"
+    anchor = normalize_monthly_anchor_day(subscription.get("monthly_anchor_day"))
+    if anchor is None:
+        try:
+            anchor = datetime.strptime(str(subscription.get("next_charge_at")), "%Y-%m-%d").day
+        except (TypeError, ValueError):
+            return "every month"
+    return f"every month on the {_ordinal(anchor)}"
+
+
+def _due_phrase_html(due_value: str, tz_name: str, today: date, *, bold: bool = False) -> str:
+    """``'<tg-time …> (in 5 days)'`` / ``'(today)'`` / ``'(tomorrow)'`` / ``'(overdue by 9 days)'``.
+
+    Two or more days ahead the relative part is a live entity; today, tomorrow
+    and overdue stay plain words, so no client renders "in 3 hours".
+    """
+    date_html = tg_due(due_value, tz_name, "wD")
+    if bold:
+        date_html = f"<b>{date_html}</b>"
+    try:
+        due = datetime.strptime(due_value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return date_html
+    days = (due - today).days
+    phrase = days_left_phrase(days)
+    if days >= 2:
+        phrase = tg_due(due_value, tz_name, "r", phrase)
+    return f"{date_html} ({phrase})"
+
+
+def _card_schedule_block(subscription: Dict[str, object], tz_name: str, today: date) -> list[str]:
+    currency = str(subscription.get("currency") or "").strip().upper()
+    shown_in = str(subscription.get("base_currency") or currency).strip().upper() or currency
+    next_charge = _due_phrase_html(str(subscription.get("next_charge_at")), tz_name, today, bold=True)
+    lines = [
+        f"Next charge: {next_charge}",
+        f"Repeats: {_repeats_text(subscription)}",
+        f"Shown to members in: {escape_html(shown_in)}" if shown_in != currency else None,
+    ]
+    return ["📅 <b>Schedule</b>", *(sub_line(line) for line in lines if line)]
+
+
+def _card_participants_block(
     subscription: Dict[str, object],
     participants: Sequence[Dict[str, object]],
-) -> tuple[int, str]:
-    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
-    if payment_mode == PAYMENT_MODE_FIXED:
-        return 1, "fixed per user"
-
-    share_limit = int(subscription.get("share_limit") or 0)
-    if share_limit:
-        return share_limit, f"split into {share_limit} share(s)"
-
+) -> list[str]:
     if not participants:
-        return 1, "waiting for users"
+        return ["👥 <b>Participants</b>", sub_line("No one yet — nobody gets reminders.")]
+    currency = str(subscription.get("currency") or "").strip().upper()
+    amount = float(subscription.get("amount") or 0.0)  # type: ignore[arg-type]
+    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
+    per_share = amount / _split_share_base(subscription, participants)
+    if payment_mode == PAYMENT_MODE_FIXED:
+        total = _sum_users_total(subscription, participants)
+        summary = f"Fixed per user{SEP}total <b>{format_money(total, currency)}</b>"
+    else:
+        share_base = _split_share_base(subscription, participants)
+        summary = f"Split by shares{SEP}{format_shares(share_base)} × <b>≈ {format_money(per_share, currency)}</b>"
+    rows: list[str] = []
+    for person in participants:
+        weight = int(person.get("share_weight") or 1)  # type: ignore[arg-type]
+        weight_text = f" ×{weight}" if weight > 1 else ""
+        if payment_mode == PAYMENT_MODE_FIXED:
+            value = _effective_fixed_amount(amount, person.get("fixed_amount")) * weight
+            amount_text = f"<b>{format_money(value, currency)}</b>"
+        else:
+            amount_text = f"<b>≈ {format_money(per_share * weight, currency)}</b>"
+        rows.append(f"{escape_html(str(person.get('full_name') or 'Unknown'))}{weight_text} — {amount_text}")
+    lines = [f"👥 <b>Participants: {len(participants)}</b>", sub_line(summary)]
+    if len(rows) >= CARD_FOLD_MIN:
+        lines.append(expandable([f"{BULLET} {row}" for row in rows], CARD_FOLD_BUDGET, "participant"))
+    else:
+        lines.extend(bullet(row) for row in rows)
+    return lines
 
-    total_shares = sum(int(p.get("share_weight") or 1) for p in participants)
-    if total_shares == len(participants):
-        return total_shares, f"split across {len(participants)} user(s)"
-    return total_shares, f"split across {total_shares} share(s) across {len(participants)} user(s)"
+
+def _card_cycle_block(
+    current_cycle: Optional[Dict[str, object]],
+    open_cycles_count: int,
+    tz_name: str,
+    today: date,
+) -> Optional[list[str]]:
+    """The oldest open cycle: due date, payment progress, who has not paid."""
+    if not current_cycle:
+        return None
+    paid = int(current_cycle.get("paid") or 0)  # type: ignore[arg-type]
+    total = int(current_cycle.get("total") or 0)  # type: ignore[arg-type]
+    unpaid_names = [escape_html(name) for name in current_cycle.get("unpaid_names") or []]  # type: ignore[union-attr]
+    due_html = _due_phrase_html(str(current_cycle["due_value"]), tz_name, today)
+    lines = ["🧾 <b>Current cycle</b>", sub_line(f"Due: {due_html}")]
+    if total:
+        progress = "all paid" if paid >= total else f"{paid} of {total} paid"
+        lines.append(sub_line(f"{progress_bar(paid, total)} {progress}"))
+    if unpaid_names and len(unpaid_names) < CARD_FOLD_MIN:
+        lines.append(sub_line(f"Unpaid: {', '.join(unpaid_names)}"))
+    elif unpaid_names:
+        lines.append(sub_line(f"Unpaid: <b>{len(unpaid_names)}</b>"))
+        lines.append(expandable([f"{BULLET} {name}" for name in unpaid_names], CARD_FOLD_BUDGET, "user"))
+    if open_cycles_count > 1:
+        lines.append(sub_line(f"Open cycles: <b>{open_cycles_count}</b>"))
+    return lines
+
+
+def _card_reminders_block(subscription: Dict[str, object], reminder_time: str) -> list[str]:
+    offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
+    from app.ui.keyboards import after_due_line
+
+    return [
+        "🔔 <b>Reminders</b>",
+        sub_line(
+            f"<b>{escape_html(reminder_time)}</b> in each member's timezone"
+            f"{SEP}{escape_html(offsets_text)}{SEP}{after_due_line(bool(subscription.get('remind_after_due')))}"
+        ),
+    ]
+
+
+def _card_payment_block(
+    payment_label: str,
+    payment_details: str,
+    payment_link: str,
+    comment_value: str,
+) -> list[str]:
+    """Method, the first requisites line, the link and the comment (skipped when it repeats the requisites).
+
+    The card is a hub, not the place for the full requisites: the first line
+    and the link are cut short (the full text is in “💳 Payment”), so long
+    one-line requisites never push the card over Telegram's limit.
+    """
+    lines = ["💳 <b>Payment</b>", sub_line(f"Payment method: {escape_html(payment_label)}")]
+    detail_lines = [line.strip() for line in payment_details.splitlines() if line.strip()]
+    if detail_lines:
+        first_detail = cut_visible(detail_lines[0], CARD_DETAIL_SHOWN_MAX)
+        line = f"<code>{escape_html(first_detail)}</code>"
+        if first_detail != detail_lines[0] or len(detail_lines) > 1:
+            line += f" (more in “{PAYMENT_INFO_BUTTON_TEXT}”)"
+        lines.append(sub_line(line))
+    if payment_link:
+        lines.append(sub_line(f"🔗 Link: {escape_html(cut_visible(payment_link, CARD_LINK_SHOWN_MAX))}"))
+    comment = " ".join(comment_value.split())
+    if comment and comment != " ".join(payment_details.split()):
+        if len(comment) > CARD_COMMENT_FOLD_LEN:
+            lines.append(sub_line("📝 Comment"))
+            lines.append(expandable([escape_html(comment)], CARD_FOLD_BUDGET, "line"))
+        else:
+            lines.append(sub_line(f"📝 {escape_html(comment)}"))
+    return lines
+
+
+def card_payment_method_label(
+    destination: Optional[Dict[str, object]],
+    default_destination_id: Optional[int],
+) -> str:
+    """``'⭐ Sber · RUB'`` for the default method, ``'Sber · RUB'`` otherwise, ``'not set'`` without one."""
+    if not destination:
+        return "not set"
+    try:
+        is_default = default_destination_id is not None and int(destination.get("id")) == int(default_destination_id)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        is_default = False
+    return payment_method_label(destination.get("title"), destination.get("currency"), default=is_default)
 
 
 def _build_subscription_detail_text(
@@ -1525,65 +1763,127 @@ def _build_subscription_detail_text(
     payment_label: str,
     payment_details: str,
     payment_link: str,
+    *,
+    current_cycle: Optional[Dict[str, object]] = None,
+    today: Optional[date] = None,
 ) -> str:
-    """Admin card: title, then one blockquote per section and the open-cycle count."""
-    comment_value = (subscription.get("comment") or "").strip()
-    today = datetime.now(parse_timezone(base_timezone)).date()
-    override_time = normalize_time_string(subscription.get("reminder_time"))
-    reminder_time = override_time or base_time
+    """Admin card: '🏷️ <b>Netflix</b> · <b>15.99 USD</b> · monthly', then the blocks.
 
-    quotes = [
-        _quote(
-            [
-                _amount_line(subscription),
-                f"📅 Next charge: {_next_charge_line(str(subscription['next_charge_at']), base_timezone, today)}",
-                f"🔁 {_cadence_text(subscription)}",
-            ]
+    Schedule, Participants, Current cycle (only with an open cycle), Reminders
+    and Payment. ``payment_label`` is the method as shown ('⭐ Sber · RUB').
+    """
+    today = today or datetime.now(parse_timezone(base_timezone)).date()
+    currency = str(subscription.get("currency") or "").strip().upper()
+    try:
+        amount: Optional[float] = float(subscription.get("amount"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        amount = None
+    header = screen_title(
+        "🏷️",
+        escape_html(str(subscription.get("name") or "")),
+        f"<b>{format_money(amount, currency)}</b>",
+        _cadence_short(subscription),
+    )
+    reminder_time = normalize_time_string(subscription.get("reminder_time")) or base_time
+    return join_blocks(
+        header,
+        _card_schedule_block(subscription, base_timezone, today),
+        _card_participants_block(subscription, participants),
+        _card_cycle_block(current_cycle, open_cycles_count, base_timezone, today),
+        _card_reminders_block(subscription, reminder_time),
+        _card_payment_block(
+            payment_label,
+            payment_details,
+            payment_link,
+            str(subscription.get("comment") or "").strip(),
         ),
-        _users_quote(subscription, participants),
-        _quote([f"🔔 {_reminder_summary(reminder_time, base_timezone, subscription)}"]),
-        _quote(_payment_info_lines(payment_label, payment_details, payment_link, comment_value, compact=True)),
-    ]
-    return "\n".join(
-        [
-            f"<b>🏷️ {escape_html(subscription['name'])}</b>",
-            "",
-            *quotes,
-            f"🗂 Open cycles: <b>{open_cycles_count}</b>",
-        ]
     )
 
 
-async def send_subscription_detail(target: Responder, db: Database, subscription_id: int) -> None:
+async def build_subscription_card(
+    db: Database,
+    subscription_id: int,
+    *,
+    banner: Optional[str] = None,
+    close: bool = False,
+) -> Optional[Tuple[str, InlineKeyboardMarkup]]:
+    """The admin card's text and keyboard, or ``None`` when the subscription is gone.
+
+    ``close=True`` is the card opened as a new message from a push or report.
+    """
     subscription = await db.get_subscription(subscription_id)
     if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
-
+        return None
     participants = await db.list_subscription_participants(subscription_id)
-    open_cycles = await db.list_open_cycles(subscription_id)
-    payment_destination = await db.get_effective_subscription_payment_destination(subscription_id)
+    destination = await db.get_effective_subscription_payment_destination(subscription_id)
+    default_destination_id = await db.get_default_payment_destination_id()
     base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
-    base_timezone = normalize_timezone_name(
-        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
-        DEFAULT_REMINDER_TIMEZONE,
-    ) or DEFAULT_REMINDER_TIMEZONE
+    base_timezone = await resolve_report_timezone(db)
+    today = datetime.now(parse_timezone(base_timezone)).date()
+    cycles = await _open_cycle_states(db, subscription, participants)
     text = _build_subscription_detail_text(
         subscription,
         participants,
         base_time,
         base_timezone,
-        len(open_cycles),
-        _subscription_payment_label(subscription, payment_destination),
-        str(payment_destination.get("details") or "").strip() if payment_destination else "",
-        str(payment_destination.get("payment_link") or "").strip() if payment_destination else "",
+        len(cycles),
+        card_payment_method_label(destination, default_destination_id),
+        str(destination.get("details") or "").strip() if destination else "",
+        str(destination.get("payment_link") or "").strip() if destination else "",
+        current_cycle=cycles[0] if cycles else None,
+        today=today,
     )
+    markup = subscription_detail_keyboard(subscription_id, participant_count=len(participants), close=close)
+    return with_banner(banner, text), markup
 
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=subscription_detail_keyboard(subscription_id),
-    )
+
+async def show_card_after_prompt(
+    message: Message,
+    db: Database,
+    subscription_id: int,
+    flow_data: Dict[str, object],
+    *,
+    banner: str,
+) -> None:
+    """A typed value was saved: edit the card the prompt came from, with a result banner.
+
+    Call after ``prompts.finish_prompt`` (it returns ``flow_data``). When the
+    origin screen cannot be edited, the card is sent as a new message.
+    """
+    from app.ui.prompts import origin_of  # prompts imports this module
+
+    origin = origin_of(flow_data)
+    close = origin is not None and is_spawned_screen(*origin)
+    card = await build_subscription_card(db, subscription_id, banner=banner, close=close)
+    if card is None:
+        await send_subscription_list(message, db, banner=SUBSCRIPTION_GONE_BANNER)
+        return
+    text, markup = card
+    if origin is not None and message.bot is not None:
+        if await edit_in_place(message.bot, origin[0], origin[1], text, markup):
+            return
+    await message.answer(text, reply_markup=markup)
+
+
+async def send_subscription_detail(
+    target: Responder,
+    db: Database,
+    subscription_id: int,
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """Show the admin card: edit on a tap, a new message for a typed message.
+
+    A deleted subscription redraws the list instead (``show_subscription_gone``).
+    The copy opened from a push (``remember_spawned``) keeps its [✖️ Close].
+    """
+    card = await build_subscription_card(db, subscription_id, banner=banner, close=spawned_screen_of(target))
+    if card is None:
+        await show_subscription_gone(target, db)
+        return None
+    text, markup = card
+    return await respond_with_markup(target, text, reply_markup=markup, toast=toast)
 
 
 async def send_member_list(
@@ -1748,93 +2048,45 @@ async def send_member_report(target: Responder, db: Database, friend_id: int) ->
     )
 
 
-async def send_reminder_settings(target: Responder, db: Database, subscription_id: int) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
+async def send_reminder_settings(
+    target: Responder,
+    db: Database,
+    subscription_id: int,
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """🔔 Reminders (WP6, app/ui/reminder_screens.py); a deleted subscription shows the list."""
+    from app.ui.reminder_screens import send_reminders_screen  # it imports this module
 
-    base_time = parse_time_string(await db.get_effective_base_reminder_time()).strftime("%H:%M")
-    base_timezone = normalize_timezone_name(
-        await db.get_effective_base_timezone(DEFAULT_REMINDER_TIMEZONE),
-        DEFAULT_REMINDER_TIMEZONE,
-    ) or DEFAULT_REMINDER_TIMEZONE
-    override_time = normalize_time_string(subscription.get("reminder_time"))
-    if override_time:
-        reminder_line = (
-            f"<code>{escape_html(override_time)}</code> ({escape_html(base_timezone)}, subscription override)"
-        )
-    else:
-        reminder_line = f"default (<code>{escape_html(base_time)}</code> {escape_html(base_timezone)})"
-    offsets_text = format_offsets_for_display(parse_offsets(subscription.get("reminder_offsets")))
-    text = (
-        "🔔 Reminders:\n\n"
-        f"⏰ Time: {reminder_line}\n"
-        f"🔔 Days: {escape_html(offsets_text)}\n"
-        f"📣 Post-due alerts: {_on_off(subscription.get('remind_after_due'))}"
-    )
-
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=reminder_settings_keyboard(subscription_id),
-    )
+    return await send_reminders_screen(target, db, subscription_id, banner=banner, toast=toast)
 
 
-async def send_participants_settings(target: Responder, db: Database, subscription_id: int) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
+async def send_participants_settings(
+    target: Responder,
+    db: Database,
+    subscription_id: int,
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """👥 Participants (WP5, app/ui/participant_screens.py); a deleted subscription shows the list."""
+    from app.ui.participant_screens import send_participants_screen  # it imports this module
 
-    participants = await db.list_subscription_participants(subscription_id)
-    payment_mode = normalize_payment_mode(subscription.get("payment_mode"))
-    total_shares = sum(int(person.get("share_weight") or 1) for person in participants)
-    if payment_mode == PAYMENT_MODE_FIXED:
-        mode_details = "per-user amounts"
-    else:
-        _, share_text = _share_details(subscription, participants)
-        mode_details = share_text
-
-    text = (
-        "👥 Participants:\n\n"
-        f"💳 Payment mode: {'Fixed per user' if payment_mode == PAYMENT_MODE_FIXED else 'Split by shares'}\n"
-        f"👥 Users: {len(participants)}\n"
-        f"➗ Shares: {total_shares}\n"
-        f"ℹ️ Mode details: {escape_html(mode_details)}"
-    )
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=participants_settings_keyboard(subscription_id, payment_mode),
-    )
+    return await send_participants_screen(target, db, subscription_id, banner=banner, toast=toast)
 
 
-async def send_reminder_send_menu(target: Responder, db: Database, subscription_id: int) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
+async def send_reminder_send_menu(
+    target: Responder,
+    db: Database,
+    subscription_id: int,
+    *,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """📬 Send now (WP6, app/ui/reminder_screens.py); a deleted subscription shows the list."""
+    from app.ui.reminder_screens import send_send_now_screen  # it imports this module
 
-    participants = await db.list_subscription_participants(subscription_id)
-    if not participants:
-        await respond_with_markup(
-            target,
-            "📬 Send reminders now:\nNo users are assigned yet. Add them via <code>📋 Subscriptions</code>.",
-            reply_markup=reminder_settings_keyboard(subscription_id),
-        )
-        return
-
-    text = (
-        f"📬 Send reminders now:\n🏷️ Name: <b>{escape_html(subscription['name'])}</b>\n"
-        "\n"
-        "Choose who should receive the reminder."
-    )
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=reminder_send_targets_keyboard(subscription_id, participants),
-    )
+    return await send_send_now_screen(target, db, subscription_id, toast=toast)
 
 
 async def send_settings_tests_menu(target: Responder, db: Database) -> None:
@@ -1888,130 +2140,146 @@ async def send_test_user_list(
     )
 
 
-async def send_pricing_settings(target: Responder, db: Database, subscription_id: int) -> None:
+# ------------------------------------------------- Pricing & schedule (WP4)
+#
+# '💰 <b>Pricing · Netflix</b>' with Amount, Shown to members in, Next charge
+# and Repeats. Every sub-screen (currency pickers, typed prompts, the
+# next-charge conflict question) comes back here with a result banner.
+
+
+def subscription_currency_of(subscription: Dict[str, object]) -> str:
+    return str(subscription.get("currency") or "").strip().upper()
+
+
+def subscription_shown_in_of(subscription: Dict[str, object]) -> str:
+    """The currency members see their share in: ``base_currency``, else the subscription's."""
+    currency = subscription_currency_of(subscription)
+    return str(subscription.get("base_currency") or currency).strip().upper() or currency
+
+
+def pricing_text(subscription: Dict[str, object], tz_name: str, today: date) -> str:
+    currency = subscription_currency_of(subscription)
+    try:
+        amount: Optional[float] = float(subscription.get("amount"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        amount = None
+    next_charge = _due_phrase_html(str(subscription.get("next_charge_at")), tz_name, today, bold=True)
+    return join_blocks(
+        screen_title("💰", f"Pricing{SEP}{escape_html(str(subscription.get('name') or ''))}"),
+        [
+            f"Amount: <b>{format_money(amount, currency)}</b>",
+            f"Shown to members in: {escape_html(subscription_shown_in_of(subscription))}",
+            f"Next charge: {next_charge}",
+            f"Repeats: {_repeats_text(subscription)}",
+        ],
+    )
+
+
+async def build_pricing_screen(
+    db: Database,
+    subscription_id: int,
+    *,
+    banner: Optional[str] = None,
+) -> Optional[Tuple[str, InlineKeyboardMarkup]]:
+    """Pricing's text and keyboard, or ``None`` when the subscription is gone."""
     subscription = await db.get_subscription(subscription_id)
     if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
-    if subscription["period_days"] == MONTHLY_PERIOD_SENTINEL:
-        cadence = "every month"
-    else:
-        cadence = f"every {subscription['period_days']} days"
+        return None
     tz_name = await resolve_report_timezone(db)
-    text = (
-        "💰 Pricing & schedule:\n\n"
-        f"💰 Amount: {_money(float(subscription['amount']), subscription['currency'])}\n"
-        f"🌐 Convert currency: {escape_html(str(subscription.get('base_currency') or subscription['currency']).upper())}\n"
-        f"📅 Next charge: {tg_due(str(subscription['next_charge_at']), tz_name, 'wD')}\n"
-        f"🔁 Period: {escape_html(cadence)}"
-    )
-
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=pricing_settings_keyboard(subscription_id),
-    )
+    today = datetime.now(parse_timezone(tz_name)).date()
+    text = with_banner(banner, pricing_text(subscription, tz_name, today))
+    return text, pricing_settings_keyboard(subscription_id)
 
 
-async def send_subscription_more(target: Responder, db: Database, subscription_id: int) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
+async def send_pricing_settings(
+    target: Responder,
+    db: Database,
+    subscription_id: int,
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """Show Pricing (edit on a tap); a deleted subscription redraws the list instead."""
+    screen = await build_pricing_screen(db, subscription_id, banner=banner)
+    if screen is None:
+        await show_subscription_gone(target, db)
+        return None
+    text, markup = screen
+    return await respond_with_markup(target, text, reply_markup=markup, toast=toast)
+
+
+async def show_pricing_after_prompt(
+    message: Message,
+    db: Database,
+    subscription_id: int,
+    flow_data: Dict[str, object],
+    *,
+    banner: str,
+) -> None:
+    """A typed value was saved: edit the screen the prompt came from into Pricing with a banner.
+
+    Call after ``prompts.finish_prompt``. When that screen cannot be edited,
+    Pricing is sent as a new message; a deleted subscription shows the list.
+    """
+    from app.ui.prompts import origin_of  # prompts imports this module
+
+    screen = await build_pricing_screen(db, subscription_id, banner=banner)
+    if screen is None:
+        await send_subscription_list(message, db, banner=SUBSCRIPTION_GONE_BANNER)
         return
+    text, markup = screen
+    origin = origin_of(flow_data)
+    if origin is not None and message.bot is not None:
+        if await edit_in_place(message.bot, origin[0], origin[1], text, markup):
+            return
+    await message.answer(text, reply_markup=markup)
 
-    open_cycles = await db.list_open_cycles(subscription_id)
-    text = (
-        "📊 Reports:\n\n"
-        f"🗂 Open cycles: {len(open_cycles)}"
-    )
 
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=subscription_more_keyboard(subscription_id),
-    )
+async def send_subscription_more(target: Responder, db: Database, subscription_id: int) -> Optional[Message]:
+    """The legacy 'more' screen is gone (Delete and Reports are on the card): redraw the card."""
+    return await send_subscription_detail(target, db, subscription_id)
 
 
 async def send_subscription_payment_info(
     target: Responder,
     db: Database,
     subscription_id: int,
-) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
-    payment_destination = await db.get_effective_subscription_payment_destination(subscription_id)
-    payment_label = _subscription_payment_label(subscription, payment_destination)
-    payment_details = str(payment_destination.get("details") or "").strip() if payment_destination else ""
-    payment_link = str(payment_destination.get("payment_link") or "").strip() if payment_destination else ""
-    comment_value = str(subscription.get("comment") or "").strip()
-    text = "\n".join(_payment_info_lines(payment_label, payment_details, payment_link, comment_value))
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=subscription_payment_info_keyboard(subscription_id),
-    )
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """💳 Payment of one subscription (WP7, app/ui/subscription_payment_screens.py)."""
+    from app.ui.subscription_payment_screens import send_payment_info_screen  # it imports this module
+
+    return await send_payment_info_screen(target, db, subscription_id, banner=banner, toast=toast)
 
 
 async def send_subscription_user_amounts(
     target: Responder,
     db: Database,
     subscription_id: int,
-) -> None:
-    subscription = await db.get_subscription(subscription_id)
-    if not subscription:
-        await respond_with_markup(target, "This subscription no longer exists.")
-        return
-    participants = await db.list_subscription_participants(subscription_id)
-    assigned_total = _sum_users_total(subscription, participants)
-    text = (
-        "👥 Amount per user:\n"
-        f"Subscription: {_money(float(subscription['amount']), subscription['currency'])}\n"
-        f"Assigned total: {_money(assigned_total, subscription['currency'])}\n"
-        "\n"
-        "Select a user to set or clear their fixed amount.\n"
-        "Use <code>Set all</code> to apply one amount to everyone."
-    )
-    await respond_with_markup(
-        target,
-        text,
-        reply_markup=subscription_user_amounts_keyboard(
-            subscription_id,
-            participants,
-            str(subscription["currency"]),
-            float(subscription.get("amount") or 0.0),
-        ),
-    )
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """💵 Amount per user (WP5, app/ui/participant_screens.py); a deleted subscription shows the list."""
+    from app.ui.participant_screens import send_user_amounts_screen  # it imports this module
+
+    return await send_user_amounts_screen(target, db, subscription_id, banner=banner, toast=toast)
 
 
-async def send_participants_editor(callback: CallbackQuery, db: Database, subscription_id: int) -> None:
-    friends = await db.list_friends_with_membership(subscription_id)
-    if not friends:
-        builder = InlineKeyboardBuilder()
-        builder.button(
-            text="⬅️ Back",
-            callback_data=SubscriptionAction(action="participants", subscription_id=subscription_id).pack(),
-        )
-        await callback.message.edit_text(
-            "👥 Users:\nNo users in the database yet. Add someone first with <code>👥 Manage users</code>.",
-            reply_markup=builder.as_markup(),
-        )
-        await callback.answer()
-        return
+async def send_participants_editor(
+    callback: CallbackQuery,
+    db: Database,
+    subscription_id: int,
+    *,
+    page: int = 1,
+    toast: Optional[str] = None,
+) -> Optional[Message]:
+    """👥 Choose people, the participant picker (WP5, app/ui/participant_screens.py)."""
+    from app.ui.participant_screens import send_picker_screen  # it imports this module
 
-    keyboard = build_participants_keyboard(friends, subscription_id)
-    selected = sum(1 for friend in friends if friend["is_member"])
-    total_shares = sum(int(friend.get("share_weight") or 1) for friend in friends if friend["is_member"])
-    text = (
-        "👥 Users:\n"
-        f"Selected: {selected}\n"
-        f"Total shares: {total_shares}\n"
-        "\n"
-        "Tap <code>xN</code> to change share weight (1-5)."
-    )
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
+    return await send_picker_screen(callback, db, subscription_id, page=page, toast=toast)
 
 
 async def start_subscription_edit_flow(
@@ -2021,12 +2289,37 @@ async def start_subscription_edit_flow(
     next_state: State,
     prompt: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
-) -> None:
-    await state.set_state(next_state)
-    await state.update_data(edit_subscription_id=int(subscription_id))
-    await callback.answer()
-    markup = reply_markup or dialog_cancel_inline_keyboard()
-    await callback.message.answer(prompt, reply_markup=markup)
+    *,
+    origin_screen: Optional[str] = None,
+    extra_rows: Sequence[Sequence[object]] = (),
+    data: Optional[Dict[str, object]] = None,
+) -> Optional[Message]:
+    """Ask for a typed value of a subscription field through ``prompts.ask``.
+
+    The prompt is a new '✏️ …' message with quick-value rows above a single
+    [✖️ Cancel]; the previous flow is wound down first. ``reply_markup`` (old
+    call shape) contributes its rows except its Cancel. ``origin_screen``
+    names the screen to redraw on success ('pricing:<id>', 'participants:<id>',
+    'reminders:<id>', 'payment:<id>'; default 'card:<id>'); the tapped message
+    is the origin. ``edit_subscription_id`` is stored for the input handler.
+    """
+    from app.ui.prompts import ask  # prompts imports this module
+
+    rows = [list(row) for row in extra_rows if row]
+    if reply_markup is not None:
+        for row in reply_markup.inline_keyboard:
+            kept = [button for button in row if button.callback_data != _CANCEL_CALLBACK]
+            if kept:
+                rows.append(kept)
+    return await ask(
+        callback,
+        state,
+        next_state,
+        prompt,
+        origin_screen=origin_screen or f"card:{int(subscription_id)}",
+        extra_rows=rows,
+        data={**dict(data or {}), "edit_subscription_id": int(subscription_id)},
+    )
 
 
 async def get_edit_subscription_id(state: FSMContext) -> Optional[int]:
@@ -2050,29 +2343,77 @@ async def require_edit_subscription_id(message: Message, state: FSMContext) -> O
     return subscription_id
 
 
-def currency_prompt() -> Tuple[str, InlineKeyboardMarkup]:
+# Questions shared by the creation wizard and the field-edit prompts. A
+# ``current`` value is named in the question and marked ✅ on its button.
+PROMPT_CURRENCIES = CURRENCY_OPTIONS
+PERIOD_MONTHLY_NOTE = "Monthly = the same day each month."
+PAYMENT_MODE_LINES = (
+    "Split by shares — the amount is divided by weights.",
+    "Fixed per user — everyone pays a set amount (by default the full amount).",
+)
+
+
+def _period_label(period: Optional[int]) -> str:
+    if period == MONTHLY_PERIOD_SENTINEL:
+        return "monthly"
+    return f"every {format_days(int(period or 0))}"
+
+
+def currency_prompt(
+    current: Optional[str] = None,
+    *,
+    cancel_callback: str = _CANCEL_CALLBACK,
+) -> Tuple[str, InlineKeyboardMarkup]:
+    now = f" Now {escape_html(current.upper())}." if current else ""
+    options = PROMPT_CURRENCIES  # the one currency option list (keyboards.CURRENCY_OPTIONS)
     return (
-        "💱 Currency:\nChoose a currency or type your own (3 letters).",
-        build_currency_keyboard(DEFAULT_CURRENCIES),
+        f"✏️ Currency?{now} Tap one or type three letters.",
+        build_currency_keyboard(options, selected=current, cancel_callback=cancel_callback),
     )
 
 
-def period_prompt() -> Tuple[str, InlineKeyboardMarkup]:
+def period_prompt(
+    current: Optional[int] = None,
+    *,
+    suggested: Optional[int] = None,
+    cancel_callback: str = _CANCEL_CALLBACK,
+) -> Tuple[str, InlineKeyboardMarkup]:
+    """'✏️ How often?' with day presets and Monthly.
+
+    ``current`` (days or MONTHLY_PERIOD_SENTINEL) is named in the question and
+    marked ✅; without it, ``suggested`` is marked ✅ (the wizard suggests Monthly).
+    """
+    now = f" Now {_period_label(current)}." if current is not None else ""
+    selected = current if current is not None else suggested
     return (
-        "🔁 Period:\nRepeat period in days (default 30). Choose a preset or send your own number.",
-        build_period_keyboard(),
+        f"✏️ How often?{now} Tap one or send a number of days.\n{PERIOD_MONTHLY_NOTE}",
+        build_period_keyboard(selected=selected, cancel_callback=cancel_callback),
     )
 
 
-def share_limit_prompt() -> Tuple[str, InlineKeyboardMarkup]:
+def share_limit_prompt(
+    *,
+    everyone_selected: bool = False,
+    cancel_callback: str = _CANCEL_CALLBACK,
+) -> Tuple[str, InlineKeyboardMarkup]:
     return (
-        "➗ Split limit:\nSend the number of users who split this subscription or tap “Split across all”.",
-        build_share_limit_keyboard(),
+        "✏️ How many people share it? Tap “Everyone” to split among all participants.",
+        build_share_limit_keyboard(
+            everyone_selected=everyone_selected,
+            cancel_callback=cancel_callback,
+        ),
     )
 
 
-def payment_mode_prompt() -> Tuple[str, InlineKeyboardMarkup]:
+def payment_mode_prompt(
+    current: Optional[str] = None,
+    *,
+    cancel_callback: str = _CANCEL_CALLBACK,
+) -> Tuple[str, InlineKeyboardMarkup]:
     return (
-        "💳 Payment mode:\nChoose how user amounts will be calculated.",
-        build_creation_payment_mode_keyboard(),
+        "\n".join(["✏️ How are amounts split?", *PAYMENT_MODE_LINES]),
+        build_creation_payment_mode_keyboard(
+            selected=current,
+            cancel_callback=cancel_callback,
+        ),
     )

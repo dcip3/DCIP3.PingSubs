@@ -29,11 +29,6 @@ from app.ui.keyboards import (
     settings_timezone_keyboard,
 )
 from app.ui.helpers import (
-    ADMIN_REPORT_COLLAPSE_MIN_GREEN,
-    _build_subscription_payment_report_text,
-    assemble_payments_report,
-    resolve_report_timezone,
-    send_chunked_responder_text,
     send_public_account_detail,
     send_public_subscription_detail,
     send_public_subscription_payment_report,
@@ -1166,37 +1161,15 @@ async def handle_dialog_cancel_callback(
 
 
 
-@admin_router.message(F.text.in_({"📊 Reports", "📊 Payments report"}))
 async def handle_payments_report(message: Message, db: Database) -> None:
-    subscriptions = await db.list_subscriptions()
-    if not subscriptions:
-        await message.answer("No subscriptions yet.", reply_markup=admin_reply_keyboard())
-        return
+    """The admin's 📊 Reports (WP8, app/ui/report_screens.py): a top-level screen, no nav row.
 
-    tz_name = await resolve_report_timezone(db)
-    blocks: list[str] = []
-    for sub in subscriptions:
-        participants = await db.list_subscription_participants(sub["id"])
-        if not participants:
-            continue
-        block = await _build_subscription_payment_report_text(
-            db,
-            sub,
-            participants,
-            scope="all",
-            tz_name=tz_name,
-        )
-        blocks.append(block)
+    Reached through handle_public_payments_report ('📊 Reports' and the old
+    '📊 Payments report'), which serves admins and members alike.
+    """
+    from app.ui.report_screens import send_admin_report  # it imports app.ui.helpers
 
-    if not blocks:
-        await message.answer("No users to report yet.", reply_markup=admin_reply_keyboard())
-        return
-
-    await send_chunked_responder_text(
-        message,
-        assemble_payments_report(blocks, collapse_min_green=ADMIN_REPORT_COLLAPSE_MIN_GREEN),
-        reply_markup=admin_reply_keyboard(),
-    )
+    await send_admin_report(message, db)
 
 
 async def _settings_menu_text(settings: Settings) -> str:

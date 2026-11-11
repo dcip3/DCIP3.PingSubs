@@ -30,17 +30,19 @@ TODAY = date(2026, 9, 17)
 
 class ScheduleLineTests(unittest.TestCase):
     def test_future_next_charge_uses_live_date_and_relative_entity(self):
-        line = _build_report_schedule_line("2026-09-01", date(2026, 10, 1), TODAY, TZ, extra=" · 1/3 paid")
+        line = _build_report_schedule_line("2026-09-01", date(2026, 10, 1), TODAY, TZ, extra=" · 1 of 3 paid")
         self.assertEqual(
             line,
             f"Paid {tg_due('2026-09-01', TZ, 'wd')} → next {tg_due('2026-10-01', TZ, 'wd')} "
-            f"({tg_due('2026-10-01', TZ, 'r', 'in 14 d')}) · 1/3 paid",
+            f"({tg_due('2026-10-01', TZ, 'r', 'in 14 days')}) · 1 of 3 paid",
         )
         self.assertNotIn("<code>", line)
 
     def test_overdue_next_charge_keeps_server_side_overdue_text(self):
         line = _build_report_schedule_line("2026-08-15", date(2026, 9, 15), TODAY, TZ)
-        self.assertTrue(line.endswith("</tg-time> (2 d overdue)"))
+        self.assertTrue(line.endswith("</tg-time> (overdue by 2 days)"))
+        one_day = _build_report_schedule_line(None, date(2026, 9, 16), TODAY, TZ)
+        self.assertTrue(one_day.endswith("</tg-time> (overdue by 1 day)"), one_day)
         self.assertNotIn('format="r"', line)
 
     def test_today_and_partial_lines(self):
@@ -51,22 +53,26 @@ class ScheduleLineTests(unittest.TestCase):
 
 class AssembleReportTests(unittest.TestCase):
     def test_header_wording(self):
-        self.assertEqual(payments_report_header(0), "📊 Reports")
-        self.assertEqual(payments_report_header(1), "📊 Reports · <b>1 needs attention</b>")
-        self.assertEqual(payments_report_header(2), "📊 Reports · <b>2 need attention</b>")
+        self.assertEqual(payments_report_header(0), "📊 <b>Reports</b>")
+        self.assertEqual(payments_report_header(1), "📊 <b>Reports</b> · 1 needs attention")
+        self.assertEqual(payments_report_header(2), "📊 <b>Reports</b> · 2 need attention")
+        self.assertEqual(
+            payments_report_header(1, "Reports · Netflix"), "📊 <b>Reports · Netflix</b> · 1 needs attention"
+        )
+        self.assertEqual(payments_report_header(0, "Reports · Anna Petrova"), "📊 <b>Reports · Anna Petrova</b>")
 
     def test_red_blocks_come_first_and_all_green_never_collapses(self):
         text = assemble_payments_report(["🟢 <b>A</b>", "🔴 <b>B</b>", "🟢 <b>C</b>"])
-        self.assertEqual(text, "📊 Reports · <b>1 needs attention</b>\n\n🔴 <b>B</b>\n\n🟢 <b>A</b>\n\n🟢 <b>C</b>")
+        self.assertEqual(text, "📊 <b>Reports</b> · 1 needs attention\n\n🔴 <b>B</b>\n\n🟢 <b>A</b>\n\n🟢 <b>C</b>")
         all_green = assemble_payments_report(["🟢 <b>A</b>", "🟢 <b>B</b>", "🟢 <b>C</b>"], collapse_min_green=1)
-        self.assertEqual(all_green, "📊 Reports\n\n🟢 <b>A</b>\n\n🟢 <b>B</b>\n\n🟢 <b>C</b>")
+        self.assertEqual(all_green, "📊 <b>Reports</b>\n\n🟢 <b>A</b>\n\n🟢 <b>B</b>\n\n🟢 <b>C</b>")
 
     def test_admin_threshold_collapses_three_green_blocks_next_to_a_red_one(self):
         blocks = ["🔴 <b>B</b>", "🟢 <b>A</b>", "🟢 <b>C</b>", "🟢 <b>D</b>"]
         text = assemble_payments_report(blocks, collapse_min_green=ADMIN_REPORT_COLLAPSE_MIN_GREEN)
         self.assertEqual(
             text,
-            "📊 Reports · <b>1 needs attention</b>\n\n🔴 <b>B</b>\n\n"
+            "📊 <b>Reports</b> · 1 needs attention\n\n🔴 <b>B</b>\n\n"
             f"{BLOCKQUOTE_OPEN}🟢 <b>A</b>\n\n🟢 <b>C</b>\n\n🟢 <b>D</b>{BLOCKQUOTE_CLOSE}",
         )
         short = assemble_payments_report(blocks[:3], collapse_min_green=ADMIN_REPORT_COLLAPSE_MIN_GREEN)
@@ -150,14 +156,14 @@ class ReportBuilderTests(unittest.IsolatedAsyncioTestCase):
         overdue_value = overdue.isoformat()
         upcoming_value = upcoming.isoformat()
         expected = (
-            "📊 Reports · <b>1 needs attention</b>\n\n"
+            "📊 <b>Reports</b> · 1 needs attention\n\n"
             "🔴 <b>Netflix Premium</b>\n"
             f"Paid {tg_due((overdue - timedelta(days=30)).isoformat(), TZ, 'wd')} → "
-            f"next {tg_due(overdue_value, TZ, 'wd')} (2 d overdue) · 1/3 paid\n"
-            f"⚠️ <b>{tg_due(overdue_value, TZ, 'wd')}</b> (2 d overdue): Anna K., Dmitry S.\n\n"
+            f"next {tg_due(overdue_value, TZ, 'wd')} (overdue by 2 days) · 1 of 3 paid\n"
+            f"⚠️ <b>{tg_due(overdue_value, TZ, 'wd')}</b> · overdue by 2 days: Anna K., Dmitry S.\n\n"
             "🟢 <b>Spotify Family</b>\n"
             f"Paid {tg_due((upcoming - timedelta(days=30)).isoformat(), TZ, 'wd')} → "
-            f"next {tg_due(upcoming_value, TZ, 'wd')} ({tg_due(upcoming_value, TZ, 'r', 'in 14 d')}) · 1/3 paid"
+            f"next {tg_due(upcoming_value, TZ, 'wd')} ({tg_due(upcoming_value, TZ, 'r', 'in 14 days')}) · 1 of 3 paid"
         )
         self.assertEqual(text, expected)
         self.assertNotIn("<code>", text)
@@ -174,9 +180,11 @@ class ReportBuilderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(blocks), 2)
         late, fine = blocks
         self.assertTrue(late.startswith("🔴 <b>Late one</b>\n"))
-        self.assertIn(f"⚠️ Unpaid: <b>{tg_due(overdue.isoformat(), TZ, 'wd')}</b> (3 d overdue)", late)
+        self.assertIn(f"⚠️ Unpaid: <b>{tg_due(overdue.isoformat(), TZ, 'wd')}</b> (overdue by 3 days)", late)
         self.assertTrue(fine.startswith("🟢 <b>Paid one</b>\n"))
-        self.assertIn(f"({tg_due(upcoming.isoformat(), TZ, 'r', 'in 5 d')}) ✅", fine)
+        self.assertIn(f"({tg_due(upcoming.isoformat(), TZ, 'r', 'in 5 days')}) · ✅ paid", fine)
+        for short_unit in (" d)", " d ", "/1 paid"):
+            self.assertNotIn(short_unit, late + fine)
         self.assertNotIn("<code>", late + fine)
 
 
