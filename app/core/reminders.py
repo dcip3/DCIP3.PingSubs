@@ -7,6 +7,7 @@ from typing import Iterable, List, Sequence
 from zoneinfo import ZoneInfo
 
 from app.core.constants import DATE_INPUT_FORMAT, MONTHLY_PERIOD_SENTINEL
+from app.ui.text import days_left_phrase, format_days
 
 DEFAULT_REMINDER_TIME = "16:00"
 DEFAULT_REMINDER_TIMEZONE = "Europe/Moscow"
@@ -116,11 +117,11 @@ def format_offsets_for_display(offsets: Iterable[int]) -> str:
     parts = []
     for value in normalized:
         if value == 0:
-            parts.append("same day")
+            parts.append("on the day")
         elif value < 0:
-            parts.append(f"{abs(value)} day(s) before")
+            parts.append(f"{format_days(abs(value))} before")
         else:
-            parts.append(f"{value} day(s) after")
+            parts.append(f"{format_days(value)} after")
     return ", ".join(parts)
 
 
@@ -185,20 +186,21 @@ def tg_clock(
 
 
 def due_status_html(due_value: str, tz_name: str | None, today: date) -> str:
-    """Render ``Due in N day(s)`` / ``Due today`` / ``Overdue by N day(s)``.
+    """Render ``Due today`` / ``Due tomorrow`` / ``Due in 3 days`` / ``Overdue by 5 days``.
 
     The relative part is a live entity on new clients (``in 3 days``,
     ``2 days ago``) while the status word stays outside it so the meaning is
     never lost; the due day itself is static text because a relative entity
-    would read as ``in 5 hours``.
+    would read as ``in 5 hours``. The entity fallbacks use the same wording as
+    ``days_left_phrase``.
     """
     try:
         due = datetime.strptime(due_value, "%Y-%m-%d").date()
     except (TypeError, ValueError):
         return "Unknown date"
-    if due == today:
+    days = (due - today).days
+    if days == 0:
         return "Due today"
-    days = abs((due - today).days)
-    if due > today:
-        return "Due " + tg_due(due_value, tz_name, "r", f"in {days} day(s)")
-    return "Overdue " + tg_due(due_value, tz_name, "r", f"by {days} day(s)")
+    if days > 0:
+        return "Due " + tg_due(due_value, tz_name, "r", days_left_phrase(days))
+    return "Overdue " + tg_due(due_value, tz_name, "r", f"by {format_days(-days)}")

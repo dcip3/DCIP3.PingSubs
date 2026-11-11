@@ -30,11 +30,16 @@ class TgTimeTests(unittest.TestCase):
         today = date(2026, 9, 17)
         future = due_status_html("2026-09-20", "UTC", today)
         self.assertTrue(future.startswith("Due <tg-time "))
-        self.assertIn('format="r">in 3 day(s)</tg-time>', future)
+        self.assertIn('format="r">in 3 days</tg-time>', future)
         past = due_status_html("2026-09-15", "UTC", today)
         self.assertTrue(past.startswith("Overdue <tg-time "))
-        self.assertIn('format="r">by 2 day(s)</tg-time>', past)
+        self.assertIn('format="r">by 2 days</tg-time>', past)
         self.assertEqual(due_status_html("2026-09-17", "UTC", today), "Due today")
+        tomorrow = due_status_html("2026-09-18", "UTC", today)
+        self.assertTrue(tomorrow.startswith("Due <tg-time "))
+        self.assertTrue(tomorrow.endswith('format="r">tomorrow</tg-time>'))
+        yesterday = due_status_html("2026-09-16", "UTC", today)
+        self.assertTrue(yesterday.endswith('format="r">by 1 day</tg-time>'))
         self.assertEqual(due_status_html("garbage", "UTC", today), "Unknown date")
 
 

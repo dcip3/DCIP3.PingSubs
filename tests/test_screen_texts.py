@@ -268,7 +268,7 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
             "👥 <b>3 users</b> · split by shares, 3 shares × <b>≈ 400.00 RUB</b>\n"
             "• Anna &lt;K&gt; — <b>≈ 400.00 RUB</b>\n• Boris — <b>≈ 400.00 RUB</b>\n• Dmitry — <b>≈ 400.00 RUB</b>",
         )
-        self.assertEqual(sections[2], "🔔 10:15 UTC · 1 day(s) before, same day · after due: <b>on</b>")
+        self.assertEqual(sections[2], "🔔 10:15 UTC · 1 day before, on the day · after due: <b>on</b>")
         self.assertEqual(
             sections[3],
             "💳 Default (Card (RUB))\n<code>2200 1234</code>\n🔗 Link: https://pay.example/x\n📝 Pay &lt;early&gt;",
@@ -373,7 +373,7 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
             "💰 Amount: <b>1200.00 RUB</b>\n👥 Users: 3 | ✅ Paid: 0/3\n📦 Snapshot flags: users=0 settings=0",
             text,
         )
-        self.assertIn(f"2. <b>{tg_due(upcoming_value, TZ, 'wD')}</b> — Due {tg_due(upcoming_value, TZ, 'r', 'in 14 day(s)')}", text)
+        self.assertIn(f"2. <b>{tg_due(upcoming_value, TZ, 'wD')}</b> — Due {tg_due(upcoming_value, TZ, 'r', 'in 14 days')}", text)
         self.assertIn("✅ Paid: 1/3", text)
 
         actions = await self._render(send_subscription_cycle_actions, self.db, self.netflix, overdue_value)
@@ -491,7 +491,7 @@ class ScreenTextTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(sections[2], f"⚠️ Overdue\n• <b>{tg_due(self.overdue.isoformat(), TZ, 'wD')}</b>")
         self.assertEqual(
-            sections[3], "⏰ <code>10:15</code> (UTC) · default · 1 day(s) before, same day · after due: <b>on</b>"
+            sections[3], "⏰ <code>10:15</code> (UTC) · default · 1 day before, on the day · after due: <b>on</b>"
         )
         self.assertEqual(sections[4], self.PAYMENT_SECTION)
 
