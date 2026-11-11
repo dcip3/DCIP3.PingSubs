@@ -1884,9 +1884,7 @@ async def _send_test_reminder(
     amount_currency = "RUB"
     if default_destination:
         amount_currency = str(default_destination.get("currency") or "RUB").upper()
-        payment_label = (
-            f"Default ({default_destination['title']} · {amount_currency})"
-        )
+        payment_label = f"{default_destination['title']} · {amount_currency}"
         payment_details = str(default_destination.get("details") or "").strip()
         payment_link = str(default_destination.get("payment_link") or "").strip()
 
@@ -1923,28 +1921,36 @@ async def _send_test_reminder(
         except Exception:  # noqa: BLE001
             converted_amount = None
         if converted_amount is not None:
+            # The admin rounding setting, like a real reminder (WP15).
             converted_text = format_converted_amount(
                 converted_amount,
                 target_currency,
-                "precise",
+                (await db.get_setting("currency_rounding")) or "precise",
             )
 
+    from app.ui.keyboards import extract_copyable_requisite
+    from app.ui.push_screens import TEST_FOOTER
+    from app.ui.text import format_money
+
     status_text, due_date_text = _format_status_and_date(today, today)
+    # '🧪 <b>Test · Sample subscription · due today</b>': the real reminder builder.
     text = _build_reminder_message(
         person_name=full_name,
-        subscription_name="Test subscription",
+        subscription_name="Sample subscription",
         status_text=status_text,
         due_date_text=due_date_text,
-        amount_text=f"{test_amount_value:.2f} {test_amount_currency}",
+        amount_text=format_money(test_amount_value, test_amount_currency),
         converted_text=converted_text,
         payment_label=payment_label,
         payment_details=payment_details,
         payment_link=payment_link,
         comment="Test comment",
-        footer="This is a test reminder. Tapping “Paid” will not record anything.",
+        footer=TEST_FOOTER,
         due_value=today.isoformat(),
         tz_name=recipient_timezone,
         today=today,
+        copyable=extract_copyable_requisite(payment_details) is not None,
+        test=True,
     )
     sent_message_id = await _send_message_with_retry(
         bot,

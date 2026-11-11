@@ -64,9 +64,11 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         self.bot.send_message.assert_awaited_once()
         call = self.bot.send_message.await_args
         self.assertEqual(call.args[0], 123)
-        self.assertIn("Test &lt;User&gt;", call.args[1])
-        self.assertIn("Plan &lt;A&gt;", call.args[1])
-        self.assertIn("50.00 RUB", call.args[1])
+        # No greeting line (WP15): the push opens with the bill and its status.
+        self.assertNotIn("Test &lt;User&gt;", call.args[1])
+        self.assertTrue(call.args[1].startswith("🔔 <b>Plan &lt;A&gt; · due today</b>\n\n📅 "), call.args[1])
+        self.assertIn("💵 Your share: <b>50.00\u00a0RUB</b>", call.args[1])
+        self.assertTrue(call.args[1].endswith("Tap “✅ Paid” once you have paid."))
         callbacks = [button.callback_data for row in call.kwargs["reply_markup"].inline_keyboard for button in row]
         self.assertIn(f"remind:{subscription_id}:2026-09-17", callbacks)
 
@@ -76,11 +78,14 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.send_reminders(), 1)
         self.bot.send_message.assert_awaited_once()
         call = self.bot.send_message.await_args
-        self.assertIn("Split plan", call.args[1])
-        self.assertIn("Fixed plan", call.args[1])
-        self.assertIn("50.00 RUB", call.args[1])
-        self.assertIn("30.00 RUB", call.args[1])
-        self.assertIn("80.00 RUB", call.args[1])
+        self.assertTrue(
+            call.args[1].startswith("🔔 <b>2 bills due</b> · total <b>80.00\u00a0RUB</b>\n\n"), call.args[1]
+        )
+        self.assertIn("<b>Split plan</b> · due today", call.args[1])
+        self.assertIn("<b>Fixed plan</b> · due today", call.args[1])
+        self.assertIn("Your share: <b>50.00\u00a0RUB</b>", call.args[1])
+        self.assertIn("Your share: <b>30.00\u00a0RUB</b>", call.args[1])
+        self.assertTrue(call.args[1].endswith("Tap the button of each bill you have paid."))
         callbacks = [button.callback_data for row in call.kwargs["reply_markup"].inline_keyboard for button in row]
         self.assertIn(f"remind:{split_id}:2026-09-17", callbacks)
         self.assertIn(f"remind:{fixed_id}:2026-09-17", callbacks)

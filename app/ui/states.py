@@ -165,6 +165,16 @@ class PaymentDestinationAction(CallbackData, prefix="paydest"):
 
 
 class TopUpAction(CallbackData, prefix="topup"):
+    """Top-up buttons (handlers in app/handlers/topups.py); ``request_id`` is 0 when unused.
+
+    Member: start (the picker on 👤 Account), start_new (the picker as a NEW
+    message, from pushes), submit (✅ I paid), cancel (drops the unsent
+    request screen). The picker's methods use the raw 'topup_destination:<id>'.
+    Admin: admin_list (📥 Pending top-ups), admin_open (a review from the list),
+    review (the push redrawn after Keep), approve, reject (now asks first),
+    reject_yes (rejects).
+    """
+
     action: str
     request_id: int
 

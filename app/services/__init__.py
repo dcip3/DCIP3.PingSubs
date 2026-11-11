@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 
 import aiohttp
 from aiogram import Bot
@@ -29,7 +29,6 @@ from app.core.constants import (
 from app.core.reminders import (
     DEFAULT_REMINDER_TIMEZONE,
     calculate_next_charge_date,
-    due_status_html,
     format_due_date,
     normalize_monthly_anchor_day,
     normalize_time_string,
@@ -37,9 +36,26 @@ from app.core.reminders import (
     parse_offsets,
     parse_time_string,
     parse_timezone,
-    tg_due,
 )
-from app.ui.text import escape_html
+from app.ui.text import days_left_phrase, format_money
+from app.ui.keyboards import (
+    balance_receipt_keyboard,
+    no_participants_push_keyboard,
+    payment_method_label,
+    subscription_push_keyboard,
+)
+from app.ui.push_screens import (
+    BATCH_HINT,
+    PAID_HINT,
+    balance_receipt_text,
+    batch_reminder_parts,
+    batch_reminder_text,
+    cycle_closed_text,
+    details_lines,
+    no_participants_text,
+    reminder_text,
+    reminders_sent_text,
+)
 from app.storage.db import Database
 
 
@@ -117,8 +133,9 @@ def parse_fixed_amount(raw_value: object) -> Optional[float]:
 
 
 def format_converted_amount(amount: float, currency: str, rounding_mode: str) -> str:
+    """A converted amount in the admin rounding mode: ``'1 234.50 RUB'`` or ``'1 235 RUB'``."""
     if rounding_mode == "precise":
-        return f"{amount:.2f} {currency}"
+        return format_money(amount, currency)
     value = Decimal(str(amount))
     if rounding_mode == "floor":
         rounded = value.to_integral_value(rounding=ROUND_FLOOR)
@@ -126,54 +143,53 @@ def format_converted_amount(amount: float, currency: str, rounding_mode: str) ->
         rounded = value.to_integral_value(rounding=ROUND_CEILING)
     else:
         rounded = value.to_integral_value(rounding=ROUND_HALF_UP)
-    return f"{int(rounded)} {currency}"
+    return format_money(int(rounded), currency, decimals=0)
 
 
 def _parse_due_date(raw_value: str) -> date:
     return datetime.strptime(raw_value, "%Y-%m-%d").date()
 
 
-def _format_context_text(due_date: date, today: date, tz_name: Optional[str] = None) -> str:
-    """HTML status line for admin notes: live relative status plus the due date."""
-    due_value = due_date.isoformat()
-    return f"{due_status_html(due_value, tz_name, today)} ({tg_due(due_value, tz_name)})."
-
-
 def _format_status_and_date(due_date: date, today: date) -> tuple[str, str]:
+    """Plain fallbacks: ``('Due in 3 days', '20.09.2026')`` / ``'Due today'`` / ``'Overdue by 5 days'``."""
     due_display = format_due_date(due_date.isoformat())
-    if due_date > today:
-        days_left = (due_date - today).days
-        return f"Due in {days_left} day(s)", due_display
-    if due_date == today:
-        return "Due today", due_display
-    days_overdue = (today - due_date).days
-    return f"Overdue by {days_overdue} day(s)", due_display
+    days = (due_date - today).days
+    phrase = days_left_phrase(days)
+    if days < 0:
+        return f"Overdue {phrase[len('overdue '):]}", due_display
+    return f"Due {phrase}", due_display
 
 
 def _build_reminder_message(
     *,
-    person_name: str,
     subscription_name: str,
-    status_text: str,
-    due_date_text: str,
     amount_text: str,
-    converted_text: Optional[str],
-    payment_label: str,
-    payment_details: str,
-    payment_link: str,
-    comment: str,
-    footer: str,
+    person_name: str = "",
+    status_text: str = "",
+    due_date_text: str = "",
+    converted_text: Optional[str] = None,
+    payment_label: str = "",
+    payment_details: str = "",
+    payment_link: str = "",
+    comment: str = "",
+    footer: Optional[str] = PAID_HINT,
     due_value: Optional[str] = None,
     tz_name: Optional[str] = None,
     today: Optional[date] = None,
     copyable: bool = False,
+    balance_used_text: Optional[str] = None,
+    left_to_pay_text: Optional[str] = None,
+    full_share_text: Optional[str] = None,
+    test: bool = False,
 ) -> str:
-    blocks: list[list[str]] = [[f"{escape_html(person_name)},"]]
-    blocks += _build_subscription_blocks(
-        index=None,
+    """One bill as a push: '🔔 <b>Netflix · due tomorrow</b>' (no greeting; ``person_name`` is unused).
+
+    ``copyable`` says that the keyboard of this very message carries a copy
+    button for the details; they are then folded into an expandable quote.
+    ``test`` gives the '🧪 <b>Test · …</b>' title of the admin's test reminder.
+    """
+    return reminder_text(
         subscription_name=subscription_name,
-        status_text=status_text,
-        due_date_text=due_date_text,
         amount_text=amount_text,
         converted_text=converted_text,
         payment_label=payment_label,
@@ -183,15 +199,19 @@ def _build_reminder_message(
         due_value=due_value,
         tz_name=tz_name,
         today=today,
+        status_text=status_text,
+        due_date_text=due_date_text,
+        balance_used_text=balance_used_text,
+        left_to_pay_text=left_to_pay_text,
+        full_share_text=full_share_text,
         copyable=copyable,
+        footer=footer,
+        test=test,
     )
-    if footer:
-        blocks.append([footer])
-    return "\n\n".join("\n".join(block) for block in blocks)
 
 
 def _render_payment_details_lines(payment_details: str, *, copyable: bool = False) -> list[str]:
-    """Single place that renders the payment details block of a reminder.
+    """Single place that renders payment details in a push or request screen.
 
     ``copyable`` says that the keyboard of this very message carries a copy
     button for these details (card number or IBAN); then the details are
@@ -200,128 +220,46 @@ def _render_payment_details_lines(payment_details: str, *, copyable: bool = Fals
     select and copy by hand. The caller decides, because only it knows which
     keyboard (if any) goes with the text.
     """
-    if not payment_details:
-        return []
-    safe_details = escape_html(payment_details)
-    if copyable:
-        return [f"<blockquote expandable>{safe_details}</blockquote>"]
-    return [f"<pre>{safe_details}</pre>"]
-
-
-def _build_subscription_blocks(
-    *,
-    index: Optional[int],
-    subscription_name: str,
-    status_text: str,
-    due_date_text: str,
-    amount_text: str,
-    converted_text: Optional[str],
-    payment_label: str,
-    payment_details: str,
-    payment_link: str,
-    comment: str,
-    due_value: Optional[str] = None,
-    tz_name: Optional[str] = None,
-    today: Optional[date] = None,
-    details_shown_above: bool = False,
-    copyable: bool = False,
-) -> list[list[str]]:
-    """Render one subscription of a reminder as blank-line separated blocks.
-
-    ``status_text``/``due_date_text`` are the plain fallbacks (also used for
-    button labels). When ``due_value`` (ISO ``YYYY-MM-DD``) is given, the status
-    and date lines become live Telegram date-time entities localized to the
-    reader, with ``today`` taken in ``tz_name`` unless passed explicitly.
-    ``details_shown_above`` skips the payment details because an earlier item
-    of the same message already rendered the identical text. ``copyable``
-    marks details that the message keyboard offers via a copy button.
-    """
-    safe_name = escape_html(subscription_name)
-    if index is None:
-        title = f"<b>🔔 {safe_name}</b>"
-    else:
-        title = f"<b>{index}. {safe_name}</b>"
-    if due_value:
-        if today is None:
-            today = datetime.now(parse_timezone(tz_name)).date()
-        status_html = due_status_html(due_value, tz_name, today)
-        date_html = tg_due(due_value, tz_name, "wD")
-    else:
-        status_html = escape_html(status_text)
-        date_html = escape_html(due_date_text)
-    safe_amount = escape_html(amount_text)
-    safe_converted = escape_html(converted_text) if converted_text else None
-    safe_payment_label = escape_html(payment_label) if payment_label else "not set"
-    safe_payment_link = escape_html(payment_link) if payment_link else ""
-    safe_comment = escape_html(comment) if comment else ""
-    amount_line = f"💵 My amount: <b>{safe_amount}</b>"
-    if safe_converted:
-        amount_line += f" ≈ <b>{safe_converted}</b>"
-    method_line = f"🏦 Method: {safe_payment_label}"
-    if details_shown_above and payment_details:
-        method_line += " <i>(details above)</i>"
-    blocks: list[list[str]] = [
-        [
-            title,
-            f"⏳ Status: <b>{status_html}</b>",
-            f"📅 Date: <b>{date_html}</b>",
-        ],
-        [
-            "💳 Payment:",
-            amount_line,
-            method_line,
-        ],
-    ]
-    if not details_shown_above:
-        blocks[-1] += _render_payment_details_lines(payment_details, copyable=copyable)
-    if safe_payment_link:
-        blocks[-1].append(f"🔗 Link: {safe_payment_link}")
-    if safe_comment:
-        blocks.append([f"<blockquote>📝 {safe_comment}</blockquote>"])
-    return blocks
+    return details_lines(payment_details, copyable=copyable)
 
 
 def _build_batch_reminder_message(
     *,
-    person_name: str,
     items: list[dict[str, object]],
     total_text: Optional[str],
-    footer: str,
+    person_name: str = "",
+    footer: Optional[str] = BATCH_HINT,
     tz_name: Optional[str] = None,
     today: Optional[date] = None,
 ) -> str:
-    blocks: list[list[str]] = [[f"{escape_html(person_name)},"]]
-    rendered_details: set[str] = set()
-    for idx, item in enumerate(items, 1):
-        item_due_value = item.get("due_value")
-        item_today = item.get("today")
-        item_details = str(item.get("payment_details") or "").strip()
-        details_shown_above = bool(item_details) and item_details in rendered_details
-        if item_details:
-            rendered_details.add(item_details)
-        blocks += _build_subscription_blocks(
-            index=idx,
-            subscription_name=str(item["subscription_name"]),
-            status_text=str(item["status_text"]),
-            due_date_text=str(item["due_date_text"]),
-            amount_text=str(item["amount_text"]),
-            converted_text=item.get("converted_text"),
-            payment_label=str(item.get("payment_label") or ""),
-            payment_details=str(item.get("payment_details") or ""),
-            payment_link=str(item.get("payment_link") or ""),
-            comment=str(item.get("comment") or ""),
-            due_value=str(item_due_value) if item_due_value else None,
-            tz_name=str(item.get("tz_name") or tz_name or "") or None,
-            today=item_today if isinstance(item_today, date) else today,
-            details_shown_above=details_shown_above,
-            copyable=bool(item.get("copyable")),
-        )
-    if total_text:
-        blocks.append([f"💰 <b>Total: {escape_html(total_text)}</b>"])
-    if footer:
-        blocks.append([footer])
-    return "\n\n".join("\n".join(block) for block in blocks)
+    """Several bills: '🔔 <b>2 bills due</b> · total <b>…</b>', one block per bill, the hint last.
 
+    Identical requisites are rendered once (later bills say '(details above)');
+    an item's ``copyable`` folds its details into an expandable quote.
+    """
+    prepared = []
+    for item in items:
+        entry = dict(item)
+        if tz_name and not entry.get("tz_name"):
+            entry["tz_name"] = tz_name
+        if today is not None and not isinstance(entry.get("today"), date):
+            entry["today"] = today
+        prepared.append(entry)
+    return batch_reminder_text(prepared, total_text, footer=footer)
+
+
+def _build_batch_reminder_parts(
+    *,
+    items: list[dict[str, object]],
+    total_text: Optional[str],
+    footer: Optional[str] = BATCH_HINT,
+) -> list[tuple[list[Mapping[str, object]], str]]:
+    """``[(bills, text), …]``: the batch push, split only when one message cannot hold it."""
+    return batch_reminder_parts(items, total_text, footer=footer)
+
+
+# reminder_logs offset that marks "the no-participants alert went out for this cycle".
+NO_PARTICIPANTS_LOG_OFFSET = -999_999
 
 SEND_BLOCKED = "blocked"
 SEND_ERROR = "error"
@@ -441,6 +379,10 @@ async def _send_message_with_retry(
             return None
 
 
+# Pushes outside the reminder pass (top-up decisions, admin alerts) use the same retries.
+send_message_with_retry = _send_message_with_retry
+
+
 async def _ensure_open_cycles(
     db: Database,
     subscription: Dict[str, object],
@@ -492,9 +434,11 @@ async def _close_fully_paid_cycles(
     subscription: Dict[str, object],
     open_cycles: list[date],
     participants_by_cycle: dict[date, list[dict[str, object]]],
-) -> None:
+) -> list[date]:
+    """Close every open cycle that everyone has paid; returns the closed due dates."""
+    closed: list[date] = []
     if not open_cycles:
-        return
+        return closed
 
     subscription_id = int(subscription["id"])
     due_values = [due.isoformat() for due in open_cycles]
@@ -525,11 +469,13 @@ async def _close_fully_paid_cycles(
             continue
 
         await db.close_cycle(subscription_id, cycle_due)
+        closed.append(cycle_due)
         if next_charge_value == due_value:
             next_due = calculate_next_charge_date(cycle_due, period_days, monthly_anchor_day)
             await db.update_subscription_fields(subscription_id, next_charge_at=next_due)
             next_charge_value = next_due.isoformat()
             subscription["next_charge_at"] = next_charge_value
+    return closed
 
 
 async def _run_reminder_pass(
@@ -572,6 +518,12 @@ async def _run_reminder_pass(
     sent_count = 0
     pending: dict[tuple[int, str], list[dict[str, object]]] = {}
     auto_paid_notifications: list[dict[str, object]] = []
+    # One paid-from-balance receipt per (subscription, due, user) in a pass.
+    auto_paid_keys: set[tuple[int, str, int]] = set()
+    every_admin_id: set[int] = set(await db.list_admin_ids())
+    notify_admin_closed = await db.get_setting_bool("notify_admin_closed", True)
+    closed_admin_ids: set[int] = every_admin_id if notify_admin_closed else set()
+    no_participants_alerted: set[tuple[int, date]] = set()
 
     subscriptions = await db.fetch_subscriptions_for_reminders()
     for item in subscriptions:
@@ -583,24 +535,16 @@ async def _run_reminder_pass(
         raw_payment_mode = normalize_payment_mode(item.get("payment_mode"))
         raw_comment = str(item.get("comment", "")).strip()
         current_payment_destination = await db.get_effective_subscription_payment_destination(int(item["id"]))
-        payment_destination_raw_id = item.get("payment_destination_id")
-        try:
-            current_payment_destination_id = (
-                int(payment_destination_raw_id) if payment_destination_raw_id is not None else None
-            )
-        except (TypeError, ValueError):
-            current_payment_destination_id = None
-        current_payment_label = "not set"
+        current_payment_label = ""
         current_payment_details = ""
         current_payment_link = ""
         if current_payment_destination:
-            label_base = f"{current_payment_destination['title']} · {current_payment_destination['currency']}"
-            current_payment_label = (
-                label_base if current_payment_destination_id is not None else f"Default ({label_base})"
+            # 'Sber · RUB', also for the default method (no 'Default (…)' in a push).
+            current_payment_label = payment_method_label(
+                current_payment_destination["title"], current_payment_destination["currency"]
             )
             current_payment_details = str(current_payment_destination.get("details") or "").strip()
             current_payment_link = str(current_payment_destination.get("payment_link") or "").strip()
-        safe_name = escape_html(raw_name)
         default_subscription_override_time = normalize_time_string(item.get("reminder_time"))
         default_offsets = parse_offsets(item.get("reminder_offsets"))
         default_remind_after_due = bool(item.get("remind_after_due"))
@@ -956,7 +900,7 @@ async def _run_reminder_pass(
                     converted_value: Optional[float] = None
                     converted_display: Optional[str] = None
                     base_amount_value: Optional[float] = None
-                    amount_text = f"{remaining_amount_value:.2f} {cycle_currency}"
+                    amount_text = format_money(remaining_amount_value, cycle_currency)
                     if not is_fully_paid_from_balance:
                         converted_cache_key = (
                             source_currency,
@@ -995,39 +939,37 @@ async def _run_reminder_pass(
                         if base_amount_value is None and source_currency == target_currency:
                             base_amount_value = float(remaining_amount_value)
 
-                    effective_comment = cycle_comment
+                    # "From balance: 2.00 USD · left to pay 2.17 USD" is its own line, not the comment.
+                    # "Your share" stays the full share (as on the member card); the rest is in that line.
+                    balance_used_text: Optional[str] = None
+                    left_to_pay_text: Optional[str] = None
+                    full_share_text: Optional[str] = None
                     if spent_source_amount > 0 and remaining_amount_value > 0:
-                        balance_note = (
-                            f"Balance used: {spent_source_amount:.2f} {cycle_currency}. "
-                            f"Top up: {remaining_amount_value:.2f} {cycle_currency}."
-                        )
-                        effective_comment = (
-                            f"{balance_note}\n{cycle_comment}" if cycle_comment else balance_note
-                        )
+                        balance_used_text = format_money(spent_source_amount, cycle_currency)
+                        left_to_pay_text = format_money(remaining_amount_value, cycle_currency)
+                        full_share_text = format_money(person_amount_value, cycle_currency)
                     status_text, due_date_text = _format_status_and_date(cycle_due, local_today)
                     for event_offset in ready_offsets:
                         if is_fully_paid_from_balance:
+                            auto_paid_key = (int(item["id"]), due_key, telegram_id)
+                            if auto_paid_key in auto_paid_keys:
+                                continue
+                            auto_paid_keys.add(auto_paid_key)
                             await db.log_payment(int(item["id"]), cycle_due, telegram_id)
                             paid_map.add((due_key, telegram_id))
+                            balance_left = max(float(balance_after), 0.0)
                             auto_paid_notifications.append(
                                 {
                                     "telegram_id": telegram_id,
-                                    "person_name": str(person.get("full_name") or f"User {telegram_id}"),
                                     "subscription_name": raw_name,
-                                    "status_text": status_text,
-                                    "due_date_text": due_date_text,
                                     "due_value": cycle_due.isoformat(),
                                     "tz_name": effective_timezone,
-                                    "today": local_today,
-                                    "amount_text": f"{person_amount_value:.2f} {cycle_currency}",
-                                    "payment_label": cycle_payment_label,
-                                    "payment_details": cycle_payment_details,
-                                    "payment_link": cycle_payment_link,
-                                    "comment": cycle_comment,
-                                    "footer": (
-                                        "Paid automatically from your balance.\n"
-                                        f"Used: {spent_balance_amount:.2f} {balance_currency}\n"
-                                        f"Balance left: {balance_after:.2f} {balance_currency}"
+                                    "amount_text": format_money(person_amount_value, cycle_currency),
+                                    "balance_left_text": format_money(balance_left, balance_currency),
+                                    # [➕ Top up] only when the balance will not cover this share again.
+                                    "low_balance": (
+                                        required_balance_amount is not None
+                                        and balance_left + 0.005 < float(required_balance_amount)
                                     ),
                                 }
                             )
@@ -1058,7 +1000,10 @@ async def _run_reminder_pass(
                                 "payment_label": cycle_payment_label,
                                 "payment_details": cycle_payment_details,
                                 "payment_link": cycle_payment_link,
-                                "comment": effective_comment,
+                                "comment": cycle_comment,
+                                "balance_used_text": balance_used_text,
+                                "left_to_pay_text": left_to_pay_text,
+                                "full_share_text": full_share_text,
                                 "share_amount_value": remaining_amount_value,
                                 "share_currency": cycle_currency,
                                 "converted_value": converted_value,
@@ -1067,13 +1012,11 @@ async def _run_reminder_pass(
                                 "sent_on": local_today,
                             }
                         )
-                        queued_events_for_admin[(cycle_due, event_offset)] = {
-                            "count": len(cycle_participants),
-                            "amount": cycle_amount,
-                            "currency": cycle_currency,
-                            "payment_label": cycle_payment_label,
-                            "comment": cycle_comment,
-                        }
+                        queued_event = queued_events_for_admin.setdefault(
+                            (cycle_due, event_offset),
+                            {"reminded": set(), "amount": cycle_amount, "currency": cycle_currency},
+                        )
+                        queued_event["reminded"].add(telegram_id)  # type: ignore[union-attr]
 
             if admin_ids and queued_events_for_admin:
                 for (due_date_value, event_offset), details in sorted(queued_events_for_admin.items()):
@@ -1084,19 +1027,20 @@ async def _run_reminder_pass(
                             event_offset,
                         ):
                             continue
-                    queued_count = int(details.get("count") or 0)
-                    safe_currency = escape_html(str(details.get("currency") or raw_currency))
-                    total_amount = float(details.get("amount") or item["amount"])
-                    admin_comment_value = str(details.get("comment") or "").strip()
-                    admin_comment = f"\nComment: {escape_html(admin_comment_value)}" if admin_comment_value else ""
-                    context_text = _format_context_text(due_date_value, today, admin_timezone_name)
-                    admin_note = (
-                        f"🔔 {safe_name}\n"
-                        f"{context_text}\n"
-                        f"Total: {total_amount:.2f} {safe_currency} | Users: {queued_count}"
-                        f"{admin_comment}"
-                    )
+                    event_due_key = due_date_value.isoformat()
                     event_participant_ids = participant_ids_by_cycle.get(due_date_value, set())
+                    admin_note = reminders_sent_text(
+                        raw_name,
+                        event_due_key,
+                        admin_timezone_name,
+                        today,
+                        format_money(
+                            float(details.get("amount") or item["amount"]),  # type: ignore[arg-type]
+                            str(details.get("currency") or raw_currency).upper(),
+                        ),
+                        len(details.get("reminded") or ()),  # type: ignore[arg-type]
+                        sum(1 for pid in event_participant_ids if (event_due_key, pid) in paid_map),
+                    )
                     for admin_id in admin_ids:
                         if admin_id in event_participant_ids:
                             continue
@@ -1104,18 +1048,40 @@ async def _run_reminder_pass(
                             bot,
                             admin_id,
                             admin_note,
-                            reply_markup=None,
+                            reply_markup=subscription_push_keyboard(int(item["id"])),
                             logger=logger,
                         )
                         if sent is not None:
                             sent_count += 1
             if target_telegram_id is None:
-                await _close_fully_paid_cycles(
+                closed_dues = await _close_fully_paid_cycles(
                     db,
                     item,
                     open_cycles,
                     participants_by_cycle,
                 )
+                # Closed by the pass (balance auto-pay, admins marked paid): same push as a Paid tap.
+                for closed_due in closed_dues if closed_admin_ids else ():
+                    closed_meta = cycle_meta_by_due.get(closed_due, {})
+                    closed_note = cycle_closed_text(
+                        raw_name,
+                        format_money(
+                            float(closed_meta.get("amount") or item["amount"]),  # type: ignore[arg-type]
+                            str(closed_meta.get("currency") or raw_currency).upper(),
+                        ),
+                        str(item.get("next_charge_at") or "") or None,
+                        admin_timezone_name,
+                    )
+                    for admin_id in closed_admin_ids:
+                        sent = await _send_message_with_retry(
+                            bot,
+                            admin_id,
+                            closed_note,
+                            reply_markup=subscription_push_keyboard(int(item["id"])),
+                            logger=logger,
+                        )
+                        if sent is not None:
+                            sent_count += 1
             continue
 
         if not admin_ids:
@@ -1149,22 +1115,27 @@ async def _run_reminder_pass(
                     await db.freeze_cycle_snapshot(int(item["id"]), cycle_due)
                     if not await db.register_reminder_if_new(int(item["id"]), cycle_due, event_offset):
                         continue
-                safe_currency = escape_html(cycle_currency)
-                admin_comment = f"\nComment: {escape_html(cycle_comment)}" if cycle_comment else ""
-                context_text = _format_context_text(cycle_due, today, admin_timezone_name)
-                admin_note = (
-                    f"🔔 {safe_name}\n"
-                    f"{context_text}\n"
-                    f"Total: {cycle_amount:.2f} {safe_currency}\n"
-                    "No users are assigned yet. Add them via 📋 Subscriptions."
-                    f"{admin_comment}"
+                    # At most once per cycle: a marker row in the reminder log.
+                    if not await db.register_reminder_if_new(
+                        int(item["id"]), cycle_due, NO_PARTICIPANTS_LOG_OFFSET
+                    ):
+                        continue
+                alert_key = (int(item["id"]), cycle_due)
+                if alert_key in no_participants_alerted:
+                    continue
+                no_participants_alerted.add(alert_key)
+                admin_note = no_participants_text(
+                    raw_name,
+                    cycle_due.isoformat(),
+                    admin_timezone_name,
+                    format_money(cycle_amount, cycle_currency),
                 )
                 for admin_id in admin_ids:
                     sent = await _send_message_with_retry(
                         bot,
                         admin_id,
                         admin_note,
-                        reply_markup=None,
+                        reply_markup=no_participants_push_keyboard(int(item["id"])),
                         logger=logger,
                     )
                     if sent is not None:
@@ -1172,30 +1143,25 @@ async def _run_reminder_pass(
 
     for notice in auto_paid_notifications:
         telegram_id = int(notice["telegram_id"])
-        message_text = _build_reminder_message(
-            person_name=str(notice["person_name"]),
-            subscription_name=str(notice["subscription_name"]),
-            status_text=str(notice["status_text"]),
-            due_date_text=str(notice["due_date_text"]),
-            amount_text=str(notice["amount_text"]),
-            converted_text=None,
-            payment_label=str(notice.get("payment_label") or ""),
-            payment_details=str(notice.get("payment_details") or ""),
-            payment_link=str(notice.get("payment_link") or ""),
-            comment=str(notice.get("comment") or ""),
-            footer=str(notice["footer"]),
-            due_value=str(notice["due_value"]),
-            tz_name=str(notice["tz_name"]),
-            today=notice["today"],
-            # No keyboard goes with an auto-paid notice, so nothing to copy.
-            copyable=False,
+        # A receipt, not a reminder: no requisites; [➕ Top up] only when the balance runs short.
+        message_text = balance_receipt_text(
+            str(notice["subscription_name"]),
+            str(notice["due_value"]),
+            str(notice["tz_name"]),
+            str(notice["amount_text"]),
+            str(notice["balance_left_text"]),
+        )
+        receipt_markup = (
+            balance_receipt_keyboard()
+            if notice.get("low_balance") and telegram_id not in every_admin_id
+            else None
         )
         notice_failures: list[str] = []
         sent = await _send_message_with_retry(
             bot,
             telegram_id,
             message_text,
-            reply_markup=None,
+            reply_markup=receipt_markup,
             logger=logger,
             failures=notice_failures,
         )
@@ -1224,10 +1190,13 @@ async def _run_reminder_pass(
                 payment_details=item_details,
                 payment_link=str(item.get("payment_link") or ""),
                 comment=str(item.get("comment") or ""),
-                footer="Tap “Paid” when the bill is covered.",
+                footer=PAID_HINT,
                 due_value=str(item["due_value"]),
                 tz_name=str(item["tz_name"]),
                 today=item["today"],
+                balance_used_text=item.get("balance_used_text"),  # type: ignore[arg-type]
+                left_to_pay_text=item.get("left_to_pay_text"),  # type: ignore[arg-type]
+                full_share_text=item.get("full_share_text"),  # type: ignore[arg-type]
                 # The keyboard below carries the copy row for exactly these details.
                 copyable=extract_copyable_requisite(item_details) is not None,
             )
@@ -1304,26 +1273,26 @@ async def _run_reminder_pass(
                 and extract_copyable_requisite(str(item.get("payment_details") or "")) == batch_requisite
             )
         batch_link = next((str(item.get("payment_link") or "") for item in items if item.get("payment_link")), "")
-        message_text = _build_batch_reminder_message(
-            person_name=person_name,
-            items=items,
-            total_text=total_text,
-            footer="Tap “Paid” when the bill is covered.",
-        )
-        keyboard = build_batch_payment_confirmation_keyboard(
-            items,
-            payment_details=batch_details,
-            payment_link=batch_link,
-        )
+        # Normally one push; a batch too long for one message is split into
+        # parts, each with the Paid buttons of its own bills.
         batch_failures: list[str] = []
-        message_id = await _send_message_with_retry(
-            bot,
-            telegram_id,
-            message_text,
-            reply_markup=keyboard,
-            logger=logger,
-            failures=batch_failures,
-        )
+        message_id = None
+        for part_items, message_text in _build_batch_reminder_parts(items=items, total_text=total_text):
+            keyboard = build_batch_payment_confirmation_keyboard(
+                part_items,  # type: ignore[arg-type]
+                payment_details=batch_details,
+                payment_link=batch_link,
+            )
+            part_id = await _send_message_with_retry(
+                bot,
+                telegram_id,
+                message_text,
+                reply_markup=keyboard,
+                logger=logger,
+                failures=batch_failures,
+            )
+            if part_id is not None and message_id is None:
+                message_id = part_id
         if message_id is None and stats is not None:
             stats.undelivered(telegram_id, batch_failures)
         if message_id is not None:

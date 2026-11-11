@@ -681,5 +681,15 @@ class ReportFlowTests(_MemberCase):
         self.assertNotIn(NO_ACCESS, self._answers())
 
 
+class PushPaidStillWorksTests(_MemberCase):
+    async def test_reminder_paid_uses_the_shared_service(self):
+        await self.feed(self.callback(f"remind:{self.netflix}:{self.overdue.isoformat()}", self._screen(7006)))
+        self.assertEqual(await self._paid_ids(self.overdue), {USER_ID})
+        self.assertEqual(self._answers(), ["✅ Payment recorded"])
+        self.assertTrue(
+            any(call.text.startswith("💸 <b>") and "paid Netflix</b>" in call.text for call in self.bot.of(SendMessage))
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

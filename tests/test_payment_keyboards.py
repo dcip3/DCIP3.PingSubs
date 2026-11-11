@@ -112,7 +112,9 @@ class PaymentKeyboardTests(unittest.TestCase):
         self.assertEqual(test_markup.inline_keyboard[0][0].copy_text.text, IBAN_DETAILS)
         self.assertEqual(test_markup.inline_keyboard[-1][0].callback_data, "testpaid:0:2026-09-17")
         topup = topup_request_submit_keyboard(5, CARD_DETAILS, "https://pay.example/t")
-        self.assertEqual([row[0].callback_data for row in topup.inline_keyboard[2:]], ["topup:submit:5", "menu:close"])
+        # The request screen ends with ✖️ Cancel (drops the unsent request), not a bare Close.
+        self.assertEqual([row[0].callback_data for row in topup.inline_keyboard[2:]], ["topup:submit:5", "topup:cancel:5"])
+        self.assertEqual([row[0].text for row in topup.inline_keyboard[2:]], ["✅ I paid", "✖️ Cancel"])
 
 
 class MarkPaidButtonTests(unittest.TestCase):
@@ -121,7 +123,8 @@ class MarkPaidButtonTests(unittest.TestCase):
         markup = build_batch_payment_confirmation_keyboard(items, payment_details=CARD_DETAILS, payment_link="https://pay.example/a")
         updated, remaining = mark_paid_button(markup, "remind:2:2026-09-20")
         rows = updated.model_dump(exclude_none=True)["inline_keyboard"]
-        self.assertEqual(rows[3], [{"text": "☑️ Paid · Spotify · 20.09.2026", "disabled": {}}])
+        # The batch label carries the short date (WP15), so the greyed one does too.
+        self.assertEqual(rows[3], [{"text": "☑️ Paid · Spotify · 20.09", "disabled": {}}])
         self.assertEqual(rows[0][0]["copy_text"], {"text": "2202203212345678"})
         self.assertEqual(rows[1][0]["url"], "https://pay.example/a")
         self.assertEqual(rows[2][0]["callback_data"], "remind:1:2026-09-17")
@@ -156,7 +159,8 @@ class PaymentDetailsRenderingTests(unittest.TestCase):
             footer="",
         )
         with_card = _build_reminder_message(payment_details="card <2202 2032 1234 5678>", copyable=True, **kwargs)
-        self.assertIn("<blockquote expandable>card &lt;2202 2032 1234 5678&gt;</blockquote>", with_card)
+        # Each requisites line is <code> inside the fold, so a long press copies it (as on the card).
+        self.assertIn("<blockquote expandable><code>card &lt;2202 2032 1234 5678&gt;</code></blockquote>", with_card)
         self.assertNotIn("<pre>", with_card)
         plain = _build_reminder_message(payment_details=PHONE_DETAILS, **kwargs)
         self.assertIn(f"<pre>{PHONE_DETAILS}</pre>", plain)
@@ -178,7 +182,8 @@ class PaymentDetailsRenderingTests(unittest.TestCase):
         mixed[1]["copyable"] = True
         collapsed = _build_batch_reminder_message(person_name="Anna", items=mixed, total_text=None, footer="")
         self.assertEqual(collapsed.count("<blockquote expandable>"), 1)
-        self.assertIn(f"<blockquote expandable>{CARD_DETAILS}</blockquote>", collapsed)
+        coded = "\n".join(f"<code>{line}</code>" for line in CARD_DETAILS.splitlines())
+        self.assertIn(f"<blockquote expandable>{coded}</blockquote>", collapsed)
         self.assertIn(f"<pre>{PHONE_DETAILS}</pre>", collapsed)
         self.assertIn(f"<pre>{other_card}</pre>", collapsed)
 
@@ -192,7 +197,7 @@ class PaymentDetailsRenderingTests(unittest.TestCase):
             item["copyable"] = True
         text = _build_batch_reminder_message(person_name="Anna", items=items, total_text=None, footer="")
         self.assertEqual(text.count("<blockquote expandable>"), 1)
-        self.assertEqual(text.count("🏦 Method: Sber <i>(details above)</i>"), 1)
+        self.assertEqual(text.count("Pay to: Sber (details above)"), 1)
         self.assertIn(f"<pre>{PHONE_DETAILS}</pre>", text)
         self.assertLess(text.index("<blockquote expandable>"), text.index("(details above)"))
 

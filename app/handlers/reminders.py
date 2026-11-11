@@ -1,13 +1,27 @@
+"""Reminder pushes: the Paid tap, the test Paid tap and the admin payment pushes (WP15).
+
+* ``remind:<sub>:<due>`` (✅ Paid, guarded): a single reminder becomes the
+  receipt '✅ <b>Paid · Netflix</b>' with no buttons; in a batch the tapped
+  button greys to '☑️ Paid · Netflix · 17.09' and the push becomes
+  '✅ <b>All paid</b>' once every bill is paid. A closed cycle greys its
+  button to '🔒 …' with the toast 'This cycle is already closed'.
+* ``testpaid:*``: the alert 'Test only: nothing recorded.' and '☑️ Paid (test)'.
+* Admin pushes after a payment: '💸 <b>Ivan Petrov paid Netflix</b>' (+ the
+  cycle-closed line), or '🔒 <b>Netflix cycle closed</b>' alone.
+* ``sub:participants_manage_new``: the people picker as a NEW message with
+  [✖️ Close] (from the 'has no participants' push).
+"""
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional
 
-from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
-from aiogram.types import CallbackQuery, DisabledButton, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram import Bot, F
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.types import CallbackQuery, DisabledButton, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.core.constants import PAYMENT_MODE_FIXED
 from app.core.reminders import (
@@ -17,25 +31,62 @@ from app.core.reminders import (
     normalize_timezone_name,
 )
 from app.services import calculate_share_base, normalize_payment_mode, parse_fixed_amount
-from app.ui.guards import guarded, pay_cycle_key
-from app.ui.keyboards import subscription_push_keyboard
-from app.ui.push_screens import cycle_closed_text, payment_recorded_text
-from app.ui.states import ReminderAction, TestPaidAction
 from app.storage.db import Database
+from app.ui.guards import guarded, pay_cycle_key
+from app.ui.helpers import CYCLE_CLOSED, NO_ACCESS, SUBSCRIPTION_GONE, answer_callback_once, is_not_modified_error
+from app.ui.keyboard_fit import fit_label
+from app.ui.keyboards import (
+    CYCLE_CLOSED_GREYED_TEXT,
+    PAID_PREFIX,
+    TEST_PAID_GREYED_TEXT,
+    subscription_push_keyboard,
+)
+from app.ui.participant_screens import build_picker_screen
+from app.ui.push_screens import (
+    ALREADY_PAID_TOAST,
+    PAID_TOAST,
+    TEST_PAID_ALERT,
+    batch_receipt_text,
+    cycle_closed_text,
+    paid_receipt_text,
+    payment_recorded_text,
+)
+from app.ui.states import ReminderAction, SubscriptionAction, TestPaidAction
+from app.ui.style import SEP
 from app.ui.text import format_money
 
-from . import public_router
+from . import admin_router, public_router
 
 logger = logging.getLogger(__name__)
 
-PAID_BUTTON_PREFIX = "✅ "
+PAID_BUTTON_PREFIX = PAID_PREFIX
+PAID_GREYED_PREFIX = "☑️ Paid"
+CLOSED_GREYED_PREFIX = "🔒 Closed"
+SINGLE_PAID_LABELS = ("✅ Paid", "Paid")
+_TOTAL_RE = re.compile(r"total\s+(.+?)\s*$")
 
 
-def mark_paid_button(
+# ------------------------------------------------------------ greyed buttons
+
+
+def _greyed_label(label: str, prefix: str, single_text: str) -> str:
+    """``'☑️ Paid'`` for a lone Paid; ``'☑️ Paid · Netflix · 17.09'`` (name cut to fit) in a batch."""
+    if label.startswith(PAID_BUTTON_PREFIX):
+        label = label[len(PAID_BUTTON_PREFIX):]
+    if label == "Paid":
+        return single_text
+    name, sep, tail = label.rpartition(SEP)
+    if not sep:
+        return fit_label(f"{prefix}{SEP}{label.rstrip('…').rstrip()}", 1)
+    return fit_label(f"{prefix}{SEP}{name.rstrip('…').rstrip()}", 1, tail=f"{SEP}{tail}")
+
+
+def grey_button(
     markup: InlineKeyboardMarkup | None,
     tapped_callback_data: str | None,
+    label_for: Callable[[str], str],
 ) -> tuple[InlineKeyboardMarkup | None, int]:
-    """Grey out the tapped "Paid" button and keep every other row as it is.
+    """Replace the tapped button with a disabled one labelled ``label_for(old_label)``.
 
     Returns the rebuilt markup (``None`` when the tapped button is not in the
     keyboard) and the number of callback buttons still waiting for a tap. Only
@@ -51,11 +102,7 @@ def mark_paid_button(
         new_row: list[InlineKeyboardButton] = []
         for button in row:
             if not found and button.callback_data == tapped_callback_data:
-                label = button.text
-                if label.startswith(PAID_BUTTON_PREFIX):
-                    label = label[len(PAID_BUTTON_PREFIX):]
-                paid_text = "☑️ Paid" if label == "Paid" else f"☑️ Paid · {label}"
-                new_row.append(InlineKeyboardButton(text=paid_text, disabled=DisabledButton()))
+                new_row.append(InlineKeyboardButton(text=label_for(button.text), disabled=DisabledButton()))
                 found = True
                 continue
             if button.callback_data:
@@ -65,6 +112,60 @@ def mark_paid_button(
     if not found:
         return None, remaining
     return InlineKeyboardMarkup(inline_keyboard=rows), remaining
+
+
+def mark_paid_button(
+    markup: InlineKeyboardMarkup | None,
+    tapped_callback_data: str | None,
+) -> tuple[InlineKeyboardMarkup | None, int]:
+    """Grey out the tapped "Paid" button ('☑️ Paid' / '☑️ Paid · Netflix · 17.09'), keep every other row."""
+    return grey_button(
+        markup,
+        tapped_callback_data,
+        lambda label: _greyed_label(label, PAID_GREYED_PREFIX, PAID_GREYED_PREFIX),
+    )
+
+
+def mark_closed_button(
+    markup: InlineKeyboardMarkup | None,
+    tapped_callback_data: str | None,
+) -> tuple[InlineKeyboardMarkup | None, int]:
+    """Grey out a Paid whose cycle is closed: '🔒 Cycle closed' / '🔒 Closed · Netflix · 17.09'."""
+    return grey_button(
+        markup,
+        tapped_callback_data,
+        lambda label: _greyed_label(label, CLOSED_GREYED_PREFIX, CYCLE_CLOSED_GREYED_TEXT),
+    )
+
+
+def _tapped_label(markup: InlineKeyboardMarkup | None, data: str | None) -> Optional[str]:
+    for row in (markup.inline_keyboard if markup else []):
+        for button in row:
+            if data and button.callback_data == data:
+                return button.text
+    return None
+
+
+def _paid_labels(markup: InlineKeyboardMarkup) -> tuple[list[str], bool]:
+    """Bills greyed as paid (``'Netflix · 17.09'``) and whether some bill was greyed as closed."""
+    paid: list[str] = []
+    closed = False
+    for row in markup.inline_keyboard:
+        for button in row:
+            if button.disabled is None:
+                continue
+            if button.text.startswith(f"{PAID_GREYED_PREFIX}{SEP}"):
+                paid.append(button.text[len(PAID_GREYED_PREFIX) + len(SEP):])
+            elif button.text.startswith("🔒"):
+                closed = True
+    return paid, closed
+
+
+def batch_total_from_text(text: Optional[str]) -> Optional[str]:
+    """The total from a batch push's first line ('🔔 2 bills due · total 680.50 RUB')."""
+    first = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    match = _TOTAL_RE.search(first)
+    return match.group(1) if match else None
 
 
 # ------------------------------------------------------------ the mark-paid service
@@ -209,6 +310,13 @@ async def _admin_timezone(db: Database) -> str:
     ) or DEFAULT_REMINDER_TIMEZONE
 
 
+async def _user_timezone(db: Database, user_id: int) -> str:
+    return normalize_timezone_name(
+        await db.get_effective_user_timezone(user_id, DEFAULT_REMINDER_TIMEZONE),
+        DEFAULT_REMINDER_TIMEZONE,
+    ) or DEFAULT_REMINDER_TIMEZONE
+
+
 async def _payer_name(db: Database, user_id: int, fallback: str) -> str:
     """The stored user name (as admins know them), not the Telegram profile name."""
     friend = await db.get_friend_by_telegram(user_id)
@@ -280,17 +388,66 @@ async def notify_admins_about_payment(
             logger.warning("Cannot notify admin %s about a payment: %s", admin_id, exc)
 
 
-@public_router.callback_query(ReminderAction.filter())
-async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderAction, db: Database) -> None:
-    user_id = callback.from_user.id if callback.from_user else None
-    subscription = await db.get_subscription(callback_data.subscription_id)
-    if not subscription or user_id is None:
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
-        return
+# ------------------------------------------------------------------ Paid tap
 
-    due_value = callback_data.due_date
-    # Authorize before touching cycle state so that a forged callback can neither
-    # freeze snapshots nor probe which subscriptions and cycles exist.
+
+async def _edit_markup(message: Message, markup: InlineKeyboardMarkup) -> None:
+    try:
+        await message.edit_reply_markup(reply_markup=markup)
+    except TelegramAPIError as exc:
+        if not (isinstance(exc, TelegramBadRequest) and is_not_modified_error(exc)):
+            logger.warning("Cannot update the buttons of reminder %s: %s", message.message_id, exc)
+
+
+async def _edit_text(message: Message, text: str) -> bool:
+    """Turn the push into its final text with no buttons; False when it cannot be edited."""
+    try:
+        await message.edit_text(text, reply_markup=None)
+    except TelegramAPIError as exc:
+        if isinstance(exc, TelegramBadRequest) and is_not_modified_error(exc):
+            return True
+        logger.warning("Cannot turn reminder %s into a receipt: %s", message.message_id, exc)
+        return False
+    return True
+
+
+async def _show_paid(
+    callback: CallbackQuery,
+    db: Database,
+    payment: RecordedPayment,
+    user_id: int,
+) -> None:
+    """Close the done screen: the single reminder becomes a receipt, a batch greys the bill."""
+    message = callback.message
+    if not isinstance(message, Message):
+        return
+    markup = message.reply_markup
+    label = _tapped_label(markup, callback.data)
+    if label is None:
+        return
+    if label in SINGLE_PAID_LABELS:
+        amount_text, _ = await paid_amount_texts(db, payment, user_id, message.message_id)
+        receipt = paid_receipt_text(
+            str(payment.subscription.get("name") or ""),
+            payment.due_value,
+            await _user_timezone(db, user_id),
+            amount_text,
+            datetime.now(timezone.utc),
+        )
+        if await _edit_text(message, receipt):
+            return
+    updated, remaining = mark_paid_button(markup, callback.data)
+    if updated is None:
+        return
+    paid_labels, some_closed = _paid_labels(updated)
+    if label not in SINGLE_PAID_LABELS and remaining == 0 and not some_closed:
+        if await _edit_text(message, batch_receipt_text(batch_total_from_text(message.text), paid_labels)):
+            return
+    await _edit_markup(message, updated)
+
+
+async def _can_pay(db: Database, subscription: Dict[str, Any], due_value: str, user_id: int) -> bool:
+    """A participant of that cycle (or an admin). Checked before touching any cycle state."""
     known_state = (await db.list_cycle_participants_for_due_dates(subscription["id"], [due_value])).get(
         due_value
     ) or {}
@@ -300,44 +457,54 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
     known_ids = {
         int(person["telegram_id"]) for person in known_participants if person.get("telegram_id") is not None
     }
-    if user_id not in known_ids and not await db.is_admin(user_id):
-        await callback.answer("You don't have access to this subscription.", show_alert=True)
+    return user_id in known_ids or await db.is_admin(user_id)
+
+
+async def _already_paid(db: Database, subscription_id: int, due_value: str, user_id: int) -> bool:
+    rows = await db.list_payments_for_cycles(subscription_id, [due_value])
+    return any(int(row.get("paid_by_telegram_id") or 0) == user_id for row in rows)
+
+
+@public_router.callback_query(ReminderAction.filter())
+async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderAction, db: Database) -> None:
+    """✅ Paid under a reminder (guarded): record, close the done screen, then tell the admins."""
+    user_id = callback.from_user.id if callback.from_user else None
+    subscription = await db.get_subscription(callback_data.subscription_id)
+    due_value = callback_data.due_date
+    # Authorize before touching cycle state so that a forged callback can neither
+    # freeze snapshots nor probe which subscriptions and cycles exist.
+    if not subscription:
+        await answer_callback_once(callback, SUBSCRIPTION_GONE)
+        return
+    if user_id is None or not await _can_pay(db, subscription, due_value, user_id):
+        await answer_callback_once(callback, NO_ACCESS)
         return
 
+    payment: Optional[RecordedPayment] = None
     async with guarded(callback, pay_cycle_key(subscription["id"], due_value, user_id)) as acquired:
         if not acquired:
             return
+        message = callback.message if isinstance(callback.message, Message) else None
+        if await _already_paid(db, subscription["id"], due_value, user_id):
+            # Paid meanwhile (member card, another tap): close the screen, record nothing.
+            settled = await _settled_payment(db, subscription, due_value)
+            await _show_paid(callback, db, settled, user_id)
+            await answer_callback_once(callback, ALREADY_PAID_TOAST)
+            return
         # Do not recreate the cycle here: a stale "Paid" button (after the cycle was
         # moved, reset, or closed) must not resurrect a ghost cycle at the old date.
-        open_cycles = await db.list_open_cycles(subscription["id"])
-        if due_value not in open_cycles:
-            await callback.answer("This payment cycle is already closed.", show_alert=True)
+        if due_value not in await db.list_open_cycles(subscription["id"]):
+            if message is not None:
+                updated, _ = mark_closed_button(message.reply_markup, callback.data)
+                if updated is not None:
+                    await _edit_markup(message, updated)
+            await answer_callback_once(callback, CYCLE_CLOSED)
             return
         payment = await record_cycle_payment(db, subscription, due_value, user_id)
-        await callback.answer("Payment recorded. Thank you!")
-        if callback.message:
-            updated_markup, remaining_buttons = mark_paid_button(
-                getattr(callback.message, "reply_markup", None),
-                callback.data,
-            )
-            if updated_markup is not None:
-                try:
-                    await callback.message.edit_reply_markup(reply_markup=updated_markup)
-                except TelegramAPIError as exc:
-                    logger.warning(
-                        "Cannot grey out the Paid button for user %s (message %s): %s",
-                        user_id,
-                        callback.message.message_id,
-                        exc,
-                    )
-                else:
-                    logger.debug(
-                        "Paid button greyed out for user %s; %s callback button(s) left",
-                        user_id,
-                        remaining_buttons,
-                    )
+        await _show_paid(callback, db, payment, user_id)
+        await answer_callback_once(callback, PAID_TOAST)
 
-    if callback.bot is not None:
+    if payment is not None and callback.bot is not None:
         payer = callback.from_user.full_name if callback.from_user else "Someone"
         await notify_admins_about_payment(
             callback.bot,
@@ -349,6 +516,58 @@ async def handle_reminder_paid(callback: CallbackQuery, callback_data: ReminderA
         )
 
 
+async def _settled_payment(db: Database, subscription: Dict[str, Any], due_value: str) -> RecordedPayment:
+    """The cycle as it is, for the receipt of a bill that was already paid (nothing is recorded)."""
+    state = (await db.list_cycle_participants_for_due_dates(subscription["id"], [due_value])).get(due_value) or {}
+    participants = list(state.get("participants") or [])
+    if not participants and not bool(state.get("snapshot_ready")):
+        participants = await db.list_subscription_participants(subscription["id"])
+    snapshot_ready = bool(state.get("settings_snapshot_ready"))
+    try:
+        amount = float(state.get("amount") or subscription["amount"])
+    except (TypeError, ValueError):
+        amount = float(subscription["amount"])
+    return RecordedPayment(
+        subscription=subscription,
+        due_value=due_value,
+        cycle_closed=False,
+        cycle_state=state,
+        cycle_participants=participants,
+        cycle_amount=amount,
+        cycle_currency=str(state.get("currency") or subscription["currency"]),
+        cycle_share_limit=state.get("share_limit") if snapshot_ready else subscription.get("share_limit"),
+        settings_snapshot_ready=snapshot_ready,
+    )
+
+
 @public_router.callback_query(TestPaidAction.filter())
 async def handle_test_reminder_paid(callback: CallbackQuery, callback_data: TestPaidAction) -> None:
-    await callback.answer("Test only: no payment recorded.", show_alert=True)
+    """✅ Paid under a test reminder: records nothing; the button greys to '☑️ Paid (test)'."""
+    message = callback.message
+    if isinstance(message, Message):
+        updated, _ = grey_button(message.reply_markup, callback.data, lambda _label: TEST_PAID_GREYED_TEXT)
+        if updated is not None:
+            await _edit_markup(message, updated)
+    await answer_callback_once(callback, TEST_PAID_ALERT, alert=True)
+
+
+# ------------------------------------------------ picker from the admin push
+
+
+@admin_router.callback_query(SubscriptionAction.filter(F.action == "participants_manage_new"))
+async def handle_participants_manage_new(
+    callback: CallbackQuery,
+    callback_data: SubscriptionAction,
+    db: Database,
+) -> None:
+    """[👥 Add participants] under 'Netflix has no participants': the picker as a NEW message with [✖️ Close]."""
+    screen = await build_picker_screen(db, callback_data.subscription_id, close=True)
+    if screen is None:
+        await answer_callback_once(callback, SUBSCRIPTION_GONE)
+        return
+    text, new_markup = screen
+    if isinstance(callback.message, Message):
+        await callback.message.answer(text, reply_markup=new_markup)
+    elif callback.bot is not None:
+        await callback.bot.send_message(callback.from_user.id, text, reply_markup=new_markup)
+    await answer_callback_once(callback)

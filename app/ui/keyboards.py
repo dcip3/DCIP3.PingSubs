@@ -819,73 +819,177 @@ def payment_link_clear_rows(destination_id: int) -> list[list[InlineKeyboardButt
     return [[InlineKeyboardButton(text=CLEAR_LINK_TEXT, callback_data=_paydest_callback("clear_link", destination_id))]]
 
 
+# Top-up flow (WP14): the member's picker and request, the admin's review and list.
+I_PAID_TEXT = "✅ I paid"
+APPROVE_TEXT = "✅ Approve"
+REJECT_TEXT = "❌ Reject"
+CARD_TEXT = "👤 Card"
+ACCOUNT_BUTTON_TEXT = "👤 Account"
+TOPUP_ADMIN_LIST_CALLBACK = TopUpAction(action="admin_list", request_id=0).pack()
+# The pending list shows at most this many request buttons (Telegram caps a keyboard at 100).
+PENDING_TOPUPS_BUTTONS_MAX = 40
+
+
+def _topup_callback(action: str, request_id: int = 0) -> str:
+    return TopUpAction(action=action, request_id=request_id).pack()
+
+
+def topup_moment(request: Dict[str, object]) -> datetime | None:
+    """When a top-up request was sent (``submitted_at``, else ``created_at``), as aware UTC."""
+    from datetime import timezone
+
+    for key in ("submitted_at", "created_at"):
+        raw = str(request.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def topup_method_button_label(item: Dict[str, object]) -> str:
+    """``'Sber · RUB'`` for the member's picker (no ⭐: members do not see the default mark)."""
+    destination_id = int(item.get("id") or 0)
+    name = str(item.get("title") or "").strip() or f"Method {destination_id}"
+    currency = str(item.get("currency") or "").strip().upper()
+    return fit_label(name, 1, tail=f"{SEP}{currency}" if currency else "")
+
+
+def topup_destination_keyboard(
+    destinations: Sequence[Dict[str, object]],
+    default_destination_id: int | None = None,
+    *,
+    close: bool = False,
+) -> InlineKeyboardMarkup:
+    """The member's top-up picker: one 'Sber · RUB' per method / [◀️ Back] to 👤 Account.
+
+    The caller orders the methods (the member's own or the default first);
+    ``default_destination_id`` is kept for old call sites and not shown.
+    ``close`` ends with [✖️ Close] instead, for the picker opened as a new message.
+    """
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=topup_method_button_label(item),
+                callback_data=f"topup_destination:{int(item['id'])}",
+            )
+        ]
+        for item in destinations
+    ]
+    rows.append(nav_row(CLOSE_CALLBACK if close else PUBLIC_ACCOUNT_SHOW_CALLBACK))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def topup_request_submit_keyboard(
     request_id: int,
     payment_details: str = "",
     payment_link: str = "",
 ) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for row in payment_requisite_rows(payment_details, payment_link):
-        builder.row(*row)
-    builder.row(
-        InlineKeyboardButton(
-            text="✅ I paid",
-            callback_data=TopUpAction(action="submit", request_id=request_id).pack(),
-            style="success",
-        )
-    )
-    builder.row(InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"))
-    return builder.as_markup()
-
-
-def topup_pending_requests_keyboard(requests: Sequence[Dict[str, object]]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for item in requests:
-        request_id = int(item["id"])
-        title = str(item.get("full_name") or f"User {item.get('friend_id')}")
-        amount = float(item.get("amount") or 0.0)
-        currency = str(item.get("currency") or "RUB")
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{title} · {amount:.2f} {currency}",
-                    callback_data=TopUpAction(action="admin_open", request_id=request_id).pack(),
-                )
-            ]
-        )
+    """Copy/link rows / [✅ I paid] (success) / [✖️ Cancel] (drops the request screen)."""
+    rows = payment_requisite_rows(payment_details, payment_link)
     rows.append(
         [
             InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=PaymentDestinationAction(action="menu", destination_id=0).pack(),
-            ),
-            InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
+                text=I_PAID_TEXT,
+                callback_data=_topup_callback("submit", request_id),
+                style="success",
+            )
         ]
     )
+    rows.append([cancel_button(_topup_callback("cancel", request_id))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def topup_request_review_keyboard(request_id: int) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✅ Approve",
-        callback_data=TopUpAction(action="approve", request_id=request_id).pack(),
-        style="success",
+def _topup_amount_short(amount: object, currency: object) -> str:
+    """``'1 000 RUB'`` for whole amounts, ``'12.50 RUB'`` otherwise (button-sized)."""
+    try:
+        value = float(amount)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        value = float("nan")
+    whole = value == value and abs(value - round(value)) < 0.005
+    return format_money(value, str(currency or "").strip().upper(), decimals=0 if whole else 2)
+
+
+def topup_pending_button_label(item: Dict[str, object], now: datetime | None = None) -> str:
+    """``'Ivan Petrov · 1 000 RUB · 2h'``: the name is cut, amount and age are kept."""
+    from app.ui.text import short_relative
+
+    name = str(item.get("full_name") or "").strip() or f"User {item.get('friend_id')}"
+    tail = f"{SEP}{_topup_amount_short(item.get('amount'), item.get('currency'))}"
+    moment = topup_moment(item)
+    if moment is not None:
+        tail += f"{SEP}{short_relative(moment, now)}"
+    return fit_label(name, 1, tail=tail)
+
+
+def topup_pending_requests_keyboard(
+    requests: Sequence[Dict[str, object]],
+    now: datetime | None = None,
+) -> InlineKeyboardMarkup:
+    """📥 Pending top-ups: one request per row (oldest first) / [◀️ Back] to 💳 Payment."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=topup_pending_button_label(item, now),
+                callback_data=_topup_callback("admin_open", int(item["id"])),
+            )
+        ]
+        for item in list(requests)[:PENDING_TOPUPS_BUTTONS_MAX]
+    ]
+    rows.append(nav_row(_paydest_callback("menu")))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def topup_request_review_keyboard(
+    request_id: int,
+    *,
+    friend_id: int | None = None,
+    from_list: bool = False,
+    can_approve: bool = True,
+) -> InlineKeyboardMarkup:
+    """[✅ Approve (success)][❌ Reject] / [👤 Card] (push only) / [◀️ To pending] (list only).
+
+    The push has no way back: its decision turns it into the final state.
+    Approve is hidden while the member's balance is in another currency.
+    """
+    decision = [InlineKeyboardButton(text=REJECT_TEXT, callback_data=_topup_callback("reject", request_id))]
+    if can_approve:
+        decision.insert(
+            0,
+            InlineKeyboardButton(
+                text=APPROVE_TEXT,
+                callback_data=_topup_callback("approve", request_id),
+                style="success",
+            ),
+        )
+    rows = [decision]
+    if from_list:
+        rows.append(nav_row(TOPUP_ADMIN_LIST_CALLBACK, TO_PENDING_TEXT))
+    elif friend_id:
+        rows.append([InlineKeyboardButton(text=CARD_TEXT, callback_data=_member_callback("open_new", friend_id))])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def topup_reject_confirm_keyboard(request_id: int, *, from_list: bool = False) -> InlineKeyboardMarkup:
+    """[Keep][❌ Reject (danger)]: Keep returns to the review it came from (list or push)."""
+    keep = _topup_callback("admin_open" if from_list else "review", request_id)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            confirm_row(keep, REJECT_TEXT, _topup_callback("reject_yes", request_id), cancel_text=KEEP_BUTTON_TEXT)
+        ]
     )
-    builder.button(
-        text="✖️ Reject",
-        callback_data=TopUpAction(action="reject", request_id=request_id).pack(),
-        style="danger",
+
+
+def topup_approved_push_keyboard() -> InlineKeyboardMarkup:
+    """[👤 Account] under the approved push: opens 👤 Account as a NEW message."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=ACCOUNT_BUTTON_TEXT, callback_data=PUBLIC_ACCOUNT_SHOW_NEW_CALLBACK)]]
     )
-    builder.adjust(1)
-    builder.row(
-        InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=TopUpAction(action="admin_list", request_id=0).pack(),
-        ),
-        InlineKeyboardButton(text="✖️ Close", callback_data="menu:close"),
-    )
-    return builder.as_markup()
 
 
 # Member 👤 Account (WP10).
@@ -898,26 +1002,6 @@ PUBLIC_ACCOUNT_SHOW_CALLBACK = "public_account:show"
 PUBLIC_ACCOUNT_SHOW_NEW_CALLBACK = "public_account:show_new"
 # Own 📊 Reports: at most this many '🔴 Netflix' buttons under the report.
 OWN_REPORT_BUTTONS_MAX = 8
-
-
-def topup_destination_keyboard(
-    destinations: Sequence[Dict[str, object]],
-    default_destination_id: int | None,
-) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for item in destinations:
-        destination_id = int(item["id"])
-        prefix = "⭐ " if default_destination_id == destination_id else ""
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{prefix}{item['title']} ({item['currency']})",
-                    callback_data=f"topup_destination:{destination_id}",
-                )
-            ]
-        )
-    rows.append([InlineKeyboardButton(text="✖️ Close", callback_data="menu:close")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def public_account_keyboard(*, close: bool = False) -> InlineKeyboardMarkup:
@@ -2324,22 +2408,34 @@ def build_batch_payment_confirmation_keyboard(
     payment_details: str = "",
     payment_link: str = "",
 ) -> InlineKeyboardMarkup:
+    """Copy/link rows, then one '✅ Netflix · 17.09' per bill (callbacks ``remind:*`` unchanged).
+
+    The name is cut by ``fit_label`` and the short date kept. With several
+    bills no button is coloured (one styled button per screen); a lone bill
+    keeps the green success style.
+    """
     builder = InlineKeyboardBuilder()
     for row in payment_requisite_rows(payment_details, payment_link):
         builder.row(*row)
+    style = "success" if len(items) == 1 else None
     for item in items:
         due_date = item.get("due_date")
         due_str = due_date if isinstance(due_date, str) else due_date.isoformat()
-        label = str(item.get("subscription_label") or item.get("subscription_name") or "Subscription")
-        due_hint = str(item.get("due_date_text") or due_str)
         builder.row(
             InlineKeyboardButton(
-                text=f"✅ {label} · {due_hint}",
+                text=batch_paid_button_label(item, due_str),
                 callback_data=ReminderAction(subscription_id=int(item["subscription_id"]), due_date=due_str).pack(),
-                style="success",
+                style=style,
             )
         )
     return builder.as_markup()
+
+
+def batch_paid_button_label(item: Dict[str, object], due_value: str) -> str:
+    """``'✅ Netflix · 17.09'``: the name is cut to fit, the short date stays whole."""
+    name = " ".join(str(item.get("subscription_label") or item.get("subscription_name") or "Subscription").split())
+    short = _short_date(due_value) or due_value
+    return fit_label(f"{PAID_PREFIX}{name}", 1, tail=f"{SEP}{short}")
 
 
 def build_test_payment_confirmation_keyboard(
@@ -2362,13 +2458,40 @@ def build_test_payment_confirmation_keyboard(
     return builder.as_markup()
 
 
+# Reminder and payment pushes (WP15). Buttons under a push never edit the push:
+# they open their screen as a NEW message that ends with [✖️ Close].
+PAID_PREFIX = "✅ "
 OPEN_SUBSCRIPTION_TEXT = "📋 Open subscription"
+TEST_PAID_GREYED_TEXT = "☑️ Paid (test)"
+CYCLE_CLOSED_GREYED_TEXT = "🔒 Cycle closed"
 
 
 def subscription_push_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
     """[📋 Open subscription] under an admin push: the card as a new message (``sub:open_new``)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[_sub_button(OPEN_SUBSCRIPTION_TEXT, "open_new", subscription_id)]]
+    )
+
+
+def no_participants_push_keyboard(subscription_id: int) -> InlineKeyboardMarkup:
+    """[👥 Add participants] under 'Netflix has no participants': the picker as a new message."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[_sub_button(ADD_PARTICIPANTS_TEXT, "participants_manage_new", subscription_id, "primary")]]
+    )
+
+
+def balance_receipt_keyboard() -> InlineKeyboardMarkup:
+    """[➕ Top up] under a paid-from-balance receipt: the top-up picker as a new message."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=TOP_UP_TEXT,
+                    callback_data=TopUpAction(action="start_new", request_id=0).pack(),
+                    style="primary",
+                )
+            ]
+        ]
     )
 
 

@@ -260,10 +260,15 @@ class PaginationRowTests(unittest.TestCase):
 class InviteCopyLinkTests(unittest.TestCase):
     def test_copy_link_button(self):
         link = "https://t.me/pingsubs_bot?start=join_abc"
-        dumped = _dump(invite_link_keyboard(link))
+        dumped = _dump(invite_link_keyboard(link, 5))
         self.assertEqual(
             dumped,
-            {"inline_keyboard": [[{"text": "📋 Copy link", "style": "primary", "copy_text": {"text": link}}]]},
+            {
+                "inline_keyboard": [
+                    [{"text": "📋 Copy link", "style": "primary", "copy_text": {"text": link}}],
+                    [{"text": "◀️ To card", "callback_data": "member:open:5"}],
+                ]
+            },
         )
 
     def test_copy_text_is_trimmed_to_telegram_limit(self):

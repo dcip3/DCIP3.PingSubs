@@ -1,192 +1,197 @@
+"""Top-ups (WP14) plus the admin's 💳 Payment menu entry and the member payment method picker.
+
+Member flow: “👤 Account” → “➕ Top up” edits the account into the method
+picker (skipped when only one method fits the balance currency), the amount
+prompt asks how much, and the screen the prompt came from becomes the request
+with the transfer details and [✅ I paid] / [✖️ Cancel]. ✅ I paid turns it into
+'⏳ sent for approval' (no buttons) and alerts every admin.
+
+Admin flow: the review push (or a review opened from 📥 Pending top-ups)
+offers [✅ Approve][❌ Reject]; Reject asks first. A decision on the push turns
+it into its final state; from the list it redraws the list with a banner.
+Decisions run under a double-tap guard and re-check the status, because every
+admin gets the same push. The member is told through the retrying sender.
+
+Screens live in app/ui/topup_screens.py; the 💳 Payment root and its methods
+in app/handlers/payment_methods.py.
+"""
 from __future__ import annotations
 
-import math
-import contextlib
-from datetime import datetime, timezone
-from typing import Optional
+import logging
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Any, Mapping, Optional
 
-from aiogram import F
+from aiogram import Bot, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
-from app.core.constants import DATE_INPUT_FORMAT
-from app.core.reminders import tg_time
+from app.services import send_message_with_retry
 from app.storage.db import Database
-from app.ui.helpers import DEAD_BUTTON, METHOD_GONE, answer_callback_once, respond_with_markup
-from app.ui.keyboards import (
-    dialog_cancel_inline_keyboard,
-    public_reply_keyboard,
-    topup_destination_keyboard,
-    topup_pending_requests_keyboard,
-    topup_request_review_keyboard,
-    topup_request_submit_keyboard,
+from app.ui.guards import guarded
+from app.ui.helpers import (
+    DEAD_BUTTON,
+    METHOD_GONE,
+    REQUEST_HANDLED,
+    answer_callback_once,
+    delete_quietly,
+    is_not_modified_error,
+    is_uneditable_error,
+    resolve_report_timezone,
+    respond_with_markup,
+    stale_redirect,
 )
+from app.ui.keyboards import (
+    CLOSE_CALLBACK,
+    TOPUP_ADMIN_LIST_CALLBACK,
+    admin_reply_keyboard,
+    guest_reply_keyboard,
+    topup_approved_push_keyboard,
+    topup_reject_confirm_keyboard,
+)
+from app.ui.member_account import ACCOUNT_REOPEN_ALERT, NOT_SET_UP_ALERT, NOT_SET_UP_TEXT
 from app.ui.member_screens import (
+    balance_of,
+    default_balance_currency,
+    first_name_of,
     member_payment_method_screen,
     payment_method_banner,
     send_member_detail,
     show_user_gone,
 )
-from app.ui.states import MemberAction, TopUpAction, TopUpForm
+from app.ui.prompts import ask, finish_prompt, note_typo, origin_of, reset_flow_state, wind_down
+from app.ui.shell import ADMIN_TOPUP_TEXT, NO_IDENTITY_TEXT
+from app.ui.states import MemberAction, Responder, TopUpAction, TopUpForm
 from app.ui.style import toast_from_html
-from app.ui.text import escape_html
+from app.ui.text import parse_amount
+from app.ui.topup_screens import (
+    AMOUNT_HINT,
+    AMOUNT_TEXT_HINT,
+    APPROVED_TOAST,
+    CREATE_FAILED_TEXT,
+    METHOD_GONE_TOAST,
+    MISMATCH_TOAST,
+    NOT_YOURS_ALERT,
+    REJECTED_TOAST,
+    SENT_TOAST,
+    SUBMIT_FAILED_ALERT,
+    TOPUP_CANCELLED_TOAST,
+    TopUpPicker,
+    admin_already_toast,
+    amount_prompt_text,
+    approved_push_text,
+    decided_banner,
+    member_already_toast,
+    member_request_final_text,
+    method_mismatch_toast,
+    pending_list_screen,
+    reject_confirm_text,
+    rejected_push_text,
+    review_final_text,
+    review_screen,
+    rounded_banner,
+    submitted_text,
+    topup_picker,
+    topup_picker_screen,
+    topup_request_screen,
+)
 
 from . import admin_router, public_router
 from .payment_methods import show_payment_root as _send_payment_destinations_menu
 
+logger = logging.getLogger(__name__)
+
 DEAD_MEMBER_BUTTON_TOAST = DEAD_BUTTON
+# FSM data of the amount prompt.
+TOPUP_DESTINATION_ID = "topup_destination_id"
+TOPUP_FRIEND_ID = "topup_friend_id"
+TOPUP_ORIGIN_SCREEN = "topup"
+CENT = Decimal("0.01")
 
 
-def _normalize_link(raw_value: str) -> str:
-    normalized = raw_value.strip()
-    if normalized.lower() in {"", "-", "skip", "none", "no"}:
-        return ""
-    return normalized
+# ------------------------------------------------------------------ helpers
 
 
-def _request_code(request_id: int) -> str:
-    return f"TOPUP-{request_id}"
+def _as_int(value: object) -> int:
+    try:
+        return int(value or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
 
 
-def _parse_db_utc(value: object) -> datetime | None:
-    """Parse a SQLite timestamp (``CURRENT_TIMESTAMP`` or ISO) as aware UTC."""
-    raw = str(value or "").strip()
-    if not raw:
+def parse_topup_amount(text: str | None) -> Optional[tuple[float, bool]]:
+    """``(amount, rounded)``: the typed amount in cents, and whether it had more than 2 decimals.
+
+    Accepts '1 000', '1,000.50', '149,99'; a sign, scientific notation or a
+    value that rounds to zero is refused (None).
+    """
+    parsed = parse_amount(text)
+    if parsed is None:
         return None
     try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
+        exact = Decimal(str(parsed[0]))
+        cents = exact.quantize(CENT, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    if cents <= 0:
+        return None
+    return float(cents), cents != exact
 
 
-def _topup_moment(request: dict[str, object]) -> datetime | None:
-    return _parse_db_utc(request.get("submitted_at")) or _parse_db_utc(request.get("created_at"))
+def _callback_targets(callback: CallbackQuery) -> set[str]:
+    """The callback_data of every button on the tapped message (as it was when tapped)."""
+    markup = getattr(callback.message, "reply_markup", None)
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return set()
+    return {button.callback_data for row in markup.inline_keyboard for button in row if button.callback_data}
 
 
-def _age_fallback(moment: datetime, now: datetime | None = None) -> str:
-    """Static ``2h ago`` / ``on 17.09.2026`` text for clients without date entities."""
-    current = now if now is not None else datetime.now(timezone.utc)
-    seconds = int((current - moment).total_seconds())
-    if seconds < 60:
-        return "just now"
-    if seconds < 3600:
-        return f"{seconds // 60}m ago"
-    if seconds < 86400:
-        return f"{seconds // 3600}h ago"
-    return "on " + moment.strftime(DATE_INPUT_FORMAT)
+def _opened_from_list(callback: CallbackQuery, request_id: int) -> bool:
+    """A review (or its reject question) opened from 📥 Pending top-ups, not the push.
+
+    The list's review has [◀️ To pending]; its question's Keep reopens it from
+    the list. Old reviews (before WP14) had a Back to the list too, and their
+    decisions used to redraw the list, so they keep doing that.
+    """
+    targets = _callback_targets(callback)
+    return TOPUP_ADMIN_LIST_CALLBACK in targets or TopUpAction(action="admin_open", request_id=request_id).pack() in targets
 
 
-def _format_destination_text(
-    destination: dict[str, object],
-    *,
-    is_default: bool,
-    assigned_count: int,
-) -> str:
-    lines = [
-        "💳 Payment method:",
-        f"Title: <code>{escape_html(str(destination['title']))}</code>",
-        f"Currency: <code>{escape_html(str(destination['currency']))}</code>",
-        f"Default: <code>{'yes' if is_default else 'no'}</code>",
-        f"Assigned users: <code>{assigned_count}</code>",
-    ]
-    details = str(destination.get("details") or "").strip()
-    if details:
-        lines.extend(["", "Details:", f"<pre>{escape_html(details)}</pre>"])
-    payment_link = str(destination.get("payment_link") or "").strip()
-    if payment_link:
-        lines.append(f"Link: {escape_html(payment_link)}")
-    return "\n".join(lines)
+async def _default_currency(db: Database) -> str:
+    return await default_balance_currency(db)
 
 
-def _format_topup_user_text(
-    request: dict[str, object],
-    *,
-    submitted: bool,
-) -> str:
-    lines = [
-        f"💳 Top-up request <code>{escape_html(_request_code(int(request['id'])))}</code>",
-        f"Amount: <code>{float(request['amount']):.2f} {escape_html(str(request['currency']))}</code>",
-        f"Method: <code>{escape_html(str(request['destination_title']))}</code>",
-        "",
-        "Transfer to these details:",
-        f"<pre>{escape_html(str(request.get('destination_details') or ''))}</pre>",
-    ]
-    destination_link = str(request.get("destination_link") or "").strip()
-    if destination_link:
-        lines.append(f"Link: {escape_html(destination_link)}")
-    lines.extend(
-        [
-            "",
-            "Status: "
-            f"<code>{'waiting for admin confirmation' if submitted else 'waiting for your confirmation'}</code>",
-        ]
-    )
-    if submitted:
-        lines.append("Admin has been notified. The balance will be credited after manual confirmation.")
-    else:
-        lines.append("After the transfer, tap “I paid”.")
-    return "\n".join(lines)
-
-
-def _format_topup_admin_text(request: dict[str, object]) -> str:
-    balance_value = float(request.get("balance") or 0.0)
-    balance_currency = str(request.get("balance_currency") or "").strip().upper() or str(request["currency"])
-    lines = [
-        f"💳 Top-up request <code>{escape_html(_request_code(int(request['id'])))}</code>",
-        f"User: <b>{escape_html(str(request['full_name']))}</b>",
-        f"Telegram ID: <code>{int(request['telegram_id'])}</code>",
-        f"Amount: <b>{float(request['amount']):.2f} {escape_html(str(request['currency']))}</b>",
-        f"Current balance: <b>{balance_value:.2f} {escape_html(balance_currency)}</b>",
-        f"Method: {escape_html(str(request['destination_title']))}",
-        "",
-        "Details shown to user:",
-    ]
-    for detail_line in str(request.get("destination_details") or "").splitlines():
-        detail_line = detail_line.strip()
-        if detail_line:
-            lines.append(f"<code>{escape_html(detail_line)}</code>")
-    destination_link = str(request.get("destination_link") or "").strip()
-    if destination_link:
-        lines.append(f"Link: {escape_html(destination_link)}")
-    moment = _topup_moment(request)
-    if moment is not None:
-        lines.append(
-            "Submitted: <b>"
-            + tg_time(moment, "wdt", moment.strftime(f"{DATE_INPUT_FORMAT} %H:%M UTC"))
-            + "</b> ("
-            + tg_time(moment, "r", _age_fallback(moment))
-            + ")"
-        )
-    return "\n".join(lines)
-
-
-async def _send_topup_destination_menu(
-    target: Message | CallbackQuery,
-    db: Database,
-    *,
-    notice: Optional[str] = None,
+async def _show_on_origin(
+    message: Message,
+    data: Mapping[str, Any],
+    text: str,
+    markup: Optional[InlineKeyboardMarkup],
 ) -> None:
-    destinations = await db.list_payment_destinations()
-    if not destinations:
-        text = "Top-up is not configured yet. Ask an admin to add payment methods."
-        if isinstance(target, CallbackQuery):
-            await target.answer(text, show_alert=True)
-        else:
-            await target.answer(text, reply_markup=public_reply_keyboard())
+    """Redraw the screen the amount prompt came from; send it anew when there is none."""
+    origin = origin_of(data)
+    bot = message.bot
+    if origin is not None and bot is not None:
+        chat_id, message_id = origin
+        try:
+            await bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id, reply_markup=markup)
+            return
+        except TelegramBadRequest as error:
+            if is_not_modified_error(error):
+                return
+            if not is_uneditable_error(error):
+                raise
+            logger.debug("Top-up origin %s is gone, sending the request anew: %s", message_id, error)
+    await message.answer(text, reply_markup=markup)
+
+
+async def _strip_buttons(callback: CallbackQuery) -> None:
+    message = callback.message
+    if not isinstance(message, Message):
         return
-    default_destination_id = await db.get_default_payment_destination_id()
-    lines = ["💳 Top up balance:"]
-    if notice:
-        lines = [escape_html(notice), "", *lines]
-    lines.append("Choose a payment method.")
-    await respond_with_markup(
-        target,
-        "\n".join(lines),
-        reply_markup=topup_destination_keyboard(destinations, default_destination_id),
-    )
+    try:
+        await message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest as error:
+        logger.debug("Could not strip the buttons of message %s: %s", message.message_id, error)
 
 
 # ------------------------------------------------------------ member picker
@@ -208,71 +213,66 @@ async def _send_member_payment_destination_menu(
     await respond_with_markup(target, text, reply_markup=markup, toast=toast)
 
 
-async def _send_pending_topups(
-    target: Message | CallbackQuery,
-    db: Database,
-    *,
-    notice: Optional[str] = None,
+
+async def _ask_amount(
+    responder: Responder,
+    state: FSMContext,
+    destination: Mapping[str, Any],
+    picker: TopUpPicker,
 ) -> None:
-    requests = await db.list_pending_topup_requests()
-    lines = ["📥 Pending top-ups:"]
-    if notice:
-        lines = [escape_html(notice), "", *lines]
-    if requests:
-        for index, item in enumerate(requests, 1):
-            line = (
-                f"{index}. <b>{escape_html(str(item['full_name']))}</b> "
-                f"— <b>{float(item['amount']):.2f} {escape_html(str(item['currency']))}</b>"
-            )
-            moment = _topup_moment(item)
-            if moment is not None:
-                line += " · " + tg_time(moment, "r", _age_fallback(moment))
-            lines.append(line)
-    else:
-        lines.append("No pending top-up requests.")
-    await respond_with_markup(
-        target,
-        "\n".join(lines),
-        reply_markup=topup_pending_requests_keyboard(requests),
+    """The amount prompt; a callback's tapped message (picker or account) is the origin."""
+    currency = str(destination.get("currency") or "").strip().upper()
+    await ask(
+        responder,
+        state,
+        TopUpForm.amount,
+        amount_prompt_text(currency),
+        origin_screen=TOPUP_ORIGIN_SCREEN,
+        data={TOPUP_DESTINATION_ID: int(destination["id"]), TOPUP_FRIEND_ID: int(picker.friend["id"])},
     )
 
 
-async def _send_topup_review(
-    target: Message | CallbackQuery,
-    db: Database,
-    request_id: int,
-) -> None:
-    request = await db.get_topup_request(request_id)
-    if not request:
-        await respond_with_markup(target, "Top-up request not found.")
-        return
-    if str(request.get("status") or "") != "pending":
-        await _send_pending_topups(target, db, notice="This request is no longer pending.")
-        return
-    await respond_with_markup(
-        target,
-        _format_topup_admin_text(request),
-        reply_markup=topup_request_review_keyboard(request_id),
-    )
-
-
-async def _start_public_topup_flow(
-    target: Message | CallbackQuery,
+async def _start_topup(
+    target: Responder,
     state: FSMContext,
     db: Database,
     telegram_id: int,
+    *,
+    spawned: bool = False,
 ) -> None:
-    friend = await db.get_friend_by_telegram(telegram_id)
-    if not friend:
-        text = "Your profile is not set up yet. Ask an admin to add you to the users list."
+    """The picker: edits the tapped 👤 Account, or a new message (typed alias, ``spawned`` from a push).
+
+    With exactly one method that fits, the picker is skipped and the amount
+    prompt opens straight away (the tapped account is then its origin).
+    """
+    picker = await topup_picker(db, telegram_id)
+    if picker is None:
         if isinstance(target, CallbackQuery):
-            await target.answer(text, show_alert=True)
+            await answer_callback_once(target, NOT_SET_UP_ALERT, alert=True)
         else:
-            await target.answer(text, reply_markup=public_reply_keyboard())
+            await target.answer(NOT_SET_UP_TEXT, reply_markup=guest_reply_keyboard())
         return
-    await state.clear()
-    await state.update_data(topup_friend_id=int(friend["id"]))
-    await _send_topup_destination_menu(target, db)
+    message = target.message if isinstance(target, CallbackQuery) else target
+    if not isinstance(message, Message):
+        await answer_callback_once(target, ACCOUNT_REOPEN_ALERT, alert=True)  # type: ignore[arg-type]
+        return
+    if len(picker.methods) == 1:
+        # From a push the prompt gets no origin: the request comes as a new message.
+        await _ask_amount(message if spawned else target, state, picker.methods[0], picker)
+        if isinstance(target, CallbackQuery):
+            await answer_callback_once(target)
+        return
+    old_data = await reset_flow_state(state)
+    if message.bot is not None:
+        await wind_down(message.bot, message.chat.id, old_data)
+    # The 👤 Account copy opened from a push ends in [✖️ Close]; its picker keeps Close.
+    close = spawned or (isinstance(target, CallbackQuery) and CLOSE_CALLBACK in _callback_targets(target))
+    text, markup = topup_picker_screen(picker, close=close)
+    if spawned and isinstance(target, CallbackQuery):
+        await message.answer(text, reply_markup=markup)
+        await answer_callback_once(target)
+        return
+    await respond_with_markup(target, text, reply_markup=markup)
 
 
 @admin_router.message(F.text.in_({"💳 Payment", "💳 Payment methods"}))
@@ -348,16 +348,25 @@ async def handle_member_payment_destination_assign(
     await send_member_detail(callback, db, friend_id, banner=banner, toast=toast_from_html(banner))
 
 
+
 @public_router.message(F.text == "➕ Top up")
 async def handle_public_topup_start(
     message: Message,
     state: FSMContext,
     db: Database,
 ) -> None:
+    """The legacy reply label: the picker as a new message.
+
+    An admin always keeps the admin menu: the label answers with a pointer
+    and the admin menu, never with the guest menu.
+    """
     if not message.from_user:
-        await message.answer("Unable to identify your account.")
+        await message.answer(NO_IDENTITY_TEXT, reply_markup=guest_reply_keyboard())
         return
-    await _start_public_topup_flow(message, state, db, message.from_user.id)
+    if await db.is_admin(message.from_user.id):
+        await message.answer(ADMIN_TOPUP_TEXT, reply_markup=admin_reply_keyboard())
+        return
+    await _start_topup(message, state, db, message.from_user.id)
 
 
 @public_router.callback_query(TopUpAction.filter(F.action == "start"))
@@ -366,10 +375,24 @@ async def handle_public_topup_start_callback(
     state: FSMContext,
     db: Database,
 ) -> None:
+    """“👤 Account” → “➕ Top up”: the picker edits the account."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
-    await _start_public_topup_flow(callback, state, db, callback.from_user.id)
+    await _start_topup(callback, state, db, callback.from_user.id)
+
+
+@public_router.callback_query(TopUpAction.filter(F.action == "start_new"))
+async def handle_public_topup_start_new(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+) -> None:
+    """[➕ Top up] under a push: the picker as a NEW message ending in [✖️ Close]."""
+    if not callback.from_user:
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
+        return
+    await _start_topup(callback, state, db, callback.from_user.id, spawned=True)
 
 
 @public_router.callback_query(F.data.startswith("topup_destination:"))
@@ -378,42 +401,36 @@ async def handle_public_topup_destination_select(
     state: FSMContext,
     db: Database,
 ) -> None:
+    """A method on the picker: the amount prompt (the picker is its origin)."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
     try:
-        destination_id = int(callback.data.split(":", 1)[1])
-    except (TypeError, ValueError):
-        await callback.answer("Invalid payment method.", show_alert=True)
+        destination_id = int((callback.data or "").split(":", 1)[1])
+    except (IndexError, TypeError, ValueError):
+        await answer_callback_once(callback, DEAD_MEMBER_BUTTON_TOAST)
         return
+    picker = await topup_picker(db, callback.from_user.id)
+    if picker is None:
+        await answer_callback_once(callback, NOT_SET_UP_ALERT, alert=True)
+        return
+    close = CLOSE_CALLBACK in _callback_targets(callback)
     destination = await db.get_payment_destination(destination_id)
+    toast: Optional[str] = None
     if not destination:
-        await callback.answer("Payment method not found.", show_alert=True)
+        toast = METHOD_GONE_TOAST
+    elif picker.filtered and str(destination.get("currency") or "").strip().upper() != picker.currency:
+        toast = method_mismatch_toast(destination, picker.currency)
+    if toast is not None:
+        text, markup = topup_picker_screen(picker, close=close)
+        await stale_redirect(callback, toast, lambda: respond_with_markup(callback, text, reply_markup=markup))
         return
-    friend = await db.get_friend_by_telegram(callback.from_user.id)
-    if not friend:
-        await callback.answer("Your profile is not set up yet.", show_alert=True)
-        return
-    current_balance = max(float(friend.get("balance") or 0.0), 0.0)
-    current_currency = str(friend.get("balance_currency") or "").strip().upper()
-    destination_currency = str(destination.get("currency") or "").strip().upper()
-    if current_balance > 0 and current_currency and current_currency != destination_currency:
-        await callback.answer(
-            "This payment method uses another currency than the current balance.",
-            show_alert=True,
-        )
-        return
-    await state.set_state(TopUpForm.amount)
-    await state.update_data(topup_destination_id=destination_id, topup_friend_id=int(friend["id"]))
-    if callback.message:
-        await callback.message.answer(
-            "💳 Top up balance:\n"
-            f"Method: <code>{escape_html(str(destination['title']))}</code>\n"
-            f"Currency: <code>{escape_html(destination_currency)}</code>\n\n"
-            "Send the amount you want to top up.",
-            reply_markup=dialog_cancel_inline_keyboard(),
-        )
-    await callback.answer()
+    await _ask_amount(callback, state, destination, picker)
+
+
+def _blocks_balance(friend: Mapping[str, Any], destination: Mapping[str, Any], default_currency: str) -> bool:
+    balance, currency = balance_of(dict(friend), default_currency)
+    return balance > 0 and str(destination.get("currency") or "").strip().upper() != currency
 
 
 @public_router.message(TopUpForm.amount)
@@ -422,32 +439,36 @@ async def handle_public_topup_amount(
     state: FSMContext,
     db: Database,
 ) -> None:
+    """The amount: create the request and turn the origin screen into it."""
     if not message.from_user:
-        await state.clear()
-        await message.answer("Unable to identify your account.", reply_markup=public_reply_keyboard())
+        await reset_flow_state(state)
+        await message.answer(NO_IDENTITY_TEXT, reply_markup=guest_reply_keyboard())
         return
-    try:
-        amount = float((message.text or "").strip().replace(",", "."))
-    except ValueError:
-        await message.answer("Amount must be a positive number. Example: <code>1000</code>.")
+    if message.text is None:
+        await note_typo(message, state, AMOUNT_TEXT_HINT)
         return
-    if not math.isfinite(amount) or amount <= 0:
-        await message.answer("Amount must be greater than zero.")
+    parsed = parse_topup_amount(message.text)
+    if parsed is None:
+        await note_typo(message, state, AMOUNT_HINT)
         return
+    amount, rounded = parsed
     data = await state.get_data()
-    destination_id = int(data.get("topup_destination_id") or 0)
-    destination = await db.get_payment_destination(destination_id)
+    destination = await db.get_payment_destination(_as_int(data.get(TOPUP_DESTINATION_ID)))
     friend = await db.get_friend_by_telegram(message.from_user.id)
-    if not destination or not friend:
-        await state.clear()
-        await message.answer(
-            "Unable to create the top-up request right now. Please try again.",
-            reply_markup=public_reply_keyboard(),
-        )
+    expected_friend = _as_int(data.get(TOPUP_FRIEND_ID))
+    if (
+        not destination
+        or not friend
+        or (expected_friend and int(friend["id"]) != expected_friend)
+        or _blocks_balance(friend, destination, await _default_currency(db))
+    ):
+        # The method or the account changed meanwhile: the screen stays as it is.
+        await finish_prompt(message, state)
+        await message.answer(CREATE_FAILED_TEXT)
         return
     request_id = await db.create_topup_request(
         friend_id=int(friend["id"]),
-        destination_id=destination_id,
+        destination_id=int(destination["id"]),
         amount=amount,
         currency=str(destination["currency"]),
         destination_title=str(destination["title"]),
@@ -455,21 +476,60 @@ async def handle_public_topup_amount(
         destination_link=str(destination.get("payment_link") or ""),
     )
     request = await db.get_topup_request(request_id)
-    await state.clear()
+    flow = await finish_prompt(message, state)
     if not request:
-        await message.answer(
-            "Unable to load the top-up request right now.",
-            reply_markup=public_reply_keyboard(),
-        )
+        await message.answer(CREATE_FAILED_TEXT)
         return
-    await message.answer(
-        _format_topup_user_text(request, submitted=False),
-        reply_markup=topup_request_submit_keyboard(
-            request_id,
-            payment_details=str(request.get("destination_details") or ""),
-            payment_link=str(request.get("destination_link") or ""),
-        ),
-    )
+    currency = str(request.get("currency") or "").strip().upper()
+    text, markup = topup_request_screen(request, banner=rounded_banner(amount, currency) if rounded else None)
+    await _show_on_origin(message, flow, text, markup)
+
+
+async def _own_request(callback: CallbackQuery, db: Database, request_id: int) -> Optional[dict[str, Any]]:
+    """The tapped request when it is this member's; otherwise answer the tap and return None."""
+    request = await db.get_topup_request(request_id)
+    if not request:
+        await _strip_buttons(callback)
+        await answer_callback_once(callback, REQUEST_HANDLED)
+        return None
+    if callback.from_user is None or int(request.get("telegram_id") or 0) != callback.from_user.id:
+        await answer_callback_once(callback, NOT_YOURS_ALERT, alert=True)
+        return None
+    return request
+
+
+async def _show_member_final(callback: CallbackQuery, db: Database, request: Mapping[str, Any]) -> None:
+    """An old request screen tapped after the request moved on: show where it stands."""
+    text = member_request_final_text(request, await resolve_report_timezone(db), await _default_currency(db))
+    await respond_with_markup(callback, text, reply_markup=None, toast=member_already_toast(request))
+
+
+@public_router.callback_query(TopUpAction.filter(F.action == "cancel"))
+async def handle_public_topup_cancel(
+    callback: CallbackQuery,
+    callback_data: TopUpAction,
+    db: Database,
+) -> None:
+    """[✖️ Cancel] on the request screen: delete it; the request stays unsent."""
+    request = await _own_request(callback, db, callback_data.request_id)
+    if request is None:
+        return
+    if str(request.get("status") or "") != "new":
+        await _show_member_final(callback, db, request)
+        return
+    message = callback.message
+    if message is not None and callback.bot is not None:
+        await delete_quietly(callback.bot, message.chat.id, message.message_id)
+    await answer_callback_once(callback, TOPUP_CANCELLED_TOAST)
+
+
+async def _notify_admins(bot: Bot, db: Database, request: Mapping[str, Any]) -> None:
+    """The review push to every admin, best effort; failures are logged."""
+    text, markup = await review_screen(db, request, tz_name=await resolve_report_timezone(db), from_list=False)
+    for admin_id in await db.list_admin_ids():
+        sent = await send_message_with_retry(bot, int(admin_id), text, reply_markup=markup, logger=logger)
+        if sent is None:
+            logger.warning("Top-up %s: could not alert admin %s", request.get("id"), admin_id)
 
 
 @public_router.callback_query(TopUpAction.filter(F.action == "submit"))
@@ -478,46 +538,129 @@ async def handle_public_topup_submit(
     callback_data: TopUpAction,
     db: Database,
 ) -> None:
+    """✅ I paid: the request goes to the admins and its screen becomes final (no buttons)."""
     if not callback.from_user:
-        await callback.answer("Unable to identify your account.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
-    request = await db.get_topup_request(callback_data.request_id)
-    if not request:
-        await callback.answer("Top-up request not found.", show_alert=True)
-        return
-    if int(request["telegram_id"]) != callback.from_user.id:
-        await callback.answer("This request belongs to another user.", show_alert=True)
-        return
+    submitted: Optional[dict[str, Any]] = None
+    async with guarded(callback, ("topup_submit", callback_data.request_id)) as acquired:
+        if not acquired:
+            return
+        request = await _own_request(callback, db, callback_data.request_id)
+        if request is None:
+            return
+        if str(request.get("status") or "") != "new":
+            await _show_member_final(callback, db, request)
+            return
+        request = await db.mark_topup_request_pending(callback_data.request_id)
+        if not request or str(request.get("status") or "") != "pending":
+            await answer_callback_once(callback, SUBMIT_FAILED_ALERT, alert=True)
+            return
+        text = submitted_text(request, await resolve_report_timezone(db))
+        await respond_with_markup(callback, text, reply_markup=None, toast=SENT_TOAST)
+        submitted = request
+    if submitted is not None and callback.bot is not None:
+        await _notify_admins(callback.bot, db, submitted)
+
+
+# ------------------------------------------------------------- admin review
+
+
+async def show_pending_topups(
+    target: Responder,
+    db: Database,
+    *,
+    banner: Optional[str] = None,
+    toast: Optional[str] = None,
+) -> None:
+    """📥 Pending top-ups (from the 💳 Payment root); a decision made here comes back as a banner."""
+    text, markup = await pending_list_screen(db, banner=banner)
+    await respond_with_markup(target, text, reply_markup=markup, toast=toast)
+
+
+async def _decided_by(db: Database, request: Mapping[str, Any], viewer_id: Optional[int]) -> Optional[str]:
+    """The first name of the other admin who decided the request; None when it was the viewer."""
     status = str(request.get("status") or "")
-    if status == "pending":
-        await callback.answer("This request is already waiting for admin confirmation.", show_alert=True)
+    key = "approved_by_telegram_id" if status == "approved" else "rejected_by_telegram_id"
+    decider = _as_int(request.get(key))
+    if not decider or decider == viewer_id:
+        return None
+    name = await db.get_admin_name(decider)
+    if not name:
+        friend = await db.get_friend_by_telegram(decider)
+        name = str(friend.get("full_name") or "") if friend else ""
+    return first_name_of(name) if name.strip() else "another admin"
+
+
+async def _request_gone(callback: CallbackQuery, db: Database, from_list: bool) -> None:
+    """The request no longer exists (its member was deleted)."""
+    if from_list:
+        await stale_redirect(callback, REQUEST_HANDLED, lambda: show_pending_topups(callback, db))
         return
-    if status == "approved":
-        await callback.answer("This request has already been approved.", show_alert=True)
+    await _strip_buttons(callback)
+    await answer_callback_once(callback, REQUEST_HANDLED)
+
+
+async def _show_decided(callback: CallbackQuery, db: Database, request: Mapping[str, Any], from_list: bool) -> None:
+    """A stale review: the request was already decided (maybe by another admin)."""
+    decided_by = await _decided_by(db, request, callback.from_user.id if callback.from_user else None)
+    toast = admin_already_toast(request, decided_by)
+    if from_list or str(request.get("status") or "") not in {"approved", "rejected"}:
+        await stale_redirect(callback, toast, lambda: show_pending_topups(callback, db))
         return
-    if status == "rejected":
-        await callback.answer("This request was rejected.", show_alert=True)
+    text = review_final_text(request, await _default_currency(db), decided_by=decided_by)
+    await respond_with_markup(callback, text, reply_markup=None, toast=toast)
+
+
+async def _show_review(
+    callback: CallbackQuery,
+    db: Database,
+    request_id: int,
+    *,
+    from_list: bool,
+    toast: Optional[str] = None,
+) -> None:
+    request = await db.get_topup_request(request_id)
+    if not request:
+        await _request_gone(callback, db, from_list)
         return
-    request = await db.mark_topup_request_pending(callback_data.request_id)
-    if not request or str(request.get("status") or "") != "pending":
-        await callback.answer("Unable to submit the request.", show_alert=True)
+    if str(request.get("status") or "") != "pending":
+        await _show_decided(callback, db, request, from_list)
         return
-    if callback.message:
-        await callback.message.edit_text(_format_topup_user_text(request, submitted=True))
-    await callback.answer("Admin has been notified.")
-    admin_ids = await db.list_admin_ids()
-    for admin_id in admin_ids:
-        with contextlib.suppress(Exception):
-            await callback.bot.send_message(
-                admin_id,
-                _format_topup_admin_text(request),
-                reply_markup=topup_request_review_keyboard(callback_data.request_id),
-            )
+    text, markup = await review_screen(db, request, tz_name=await resolve_report_timezone(db), from_list=from_list)
+    await respond_with_markup(callback, text, reply_markup=markup, toast=toast)
+
+
+async def _show_decision(callback: CallbackQuery, db: Database, request: Mapping[str, Any], from_list: bool) -> None:
+    """After approve/reject: the push becomes final; from the list, the list gets a banner."""
+    toast = APPROVED_TOAST if str(request.get("status") or "") == "approved" else REJECTED_TOAST
+    if from_list:
+        await show_pending_topups(callback, db, banner=decided_banner(request), toast=toast)
+        return
+    text = review_final_text(request, await _default_currency(db))
+    await respond_with_markup(callback, text, reply_markup=None, toast=toast)
+
+
+async def _tell_member(bot: Optional[Bot], db: Database, request: Mapping[str, Any]) -> None:
+    """The decision push to the member (no reply keyboard: it would replace an admin's menu)."""
+    telegram_id = request.get("telegram_id")
+    if bot is None or telegram_id is None:
+        return
+    if str(request.get("status") or "") == "approved":
+        balance, currency = balance_of(dict(request), await _default_currency(db))
+        text = approved_push_text(request, balance, currency)
+        # 👤 Account is a member screen; an admin who topped up gets no button.
+        markup = None if await db.is_admin(int(telegram_id)) else topup_approved_push_keyboard()
+    else:
+        text, markup = rejected_push_text(request), None
+    sent = await send_message_with_retry(bot, int(telegram_id), text, reply_markup=markup, logger=logger)
+    if sent is None:
+        logger.warning("Top-up %s: could not tell user %s about the decision", request.get("id"), telegram_id)
 
 
 @admin_router.callback_query(TopUpAction.filter(F.action == "admin_list"))
 async def handle_admin_topup_list(callback: CallbackQuery, db: Database) -> None:
-    await _send_pending_topups(callback, db)
+    await show_pending_topups(callback, db)
 
 
 @admin_router.callback_query(TopUpAction.filter(F.action == "admin_open"))
@@ -526,7 +669,18 @@ async def handle_admin_topup_open(
     callback_data: TopUpAction,
     db: Database,
 ) -> None:
-    await _send_topup_review(callback, db, callback_data.request_id)
+    """A request from 📥 Pending top-ups: the review with [◀️ To pending]."""
+    await _show_review(callback, db, callback_data.request_id, from_list=True)
+
+
+@admin_router.callback_query(TopUpAction.filter(F.action == "review"))
+async def handle_admin_topup_review(
+    callback: CallbackQuery,
+    callback_data: TopUpAction,
+    db: Database,
+) -> None:
+    """Keep on the push's reject question: the push's review again."""
+    await _show_review(callback, db, callback_data.request_id, from_list=False)
 
 
 @admin_router.callback_query(TopUpAction.filter(F.action == "approve"))
@@ -536,31 +690,39 @@ async def handle_admin_topup_approve(
     db: Database,
 ) -> None:
     if not callback.from_user:
-        await callback.answer("Unable to identify admin.", show_alert=True)
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
         return
-    request, error = await db.approve_topup_request(callback_data.request_id, callback.from_user.id)
-    if error == "not_pending":
-        await callback.answer("This request is no longer pending.", show_alert=True)
-        await _send_pending_topups(callback, db)
-        return
-    if error == "currency_mismatch":
-        await callback.answer(
-            "User balance currency differs from the top-up currency. Fix it first.",
-            show_alert=True,
-        )
-        return
-    if not request:
-        await callback.answer("Top-up request not found.", show_alert=True)
-        return
-    await callback.answer("Top-up approved.")
-    await _send_pending_topups(callback, db, notice="Top-up approved.")
-    with contextlib.suppress(Exception):
-        await callback.bot.send_message(
-            int(request["telegram_id"]),
-            "✅ Your top-up request was approved.\n"
-            f"Amount credited: <code>{float(request['amount']):.2f} {escape_html(str(request['currency']))}</code>",
-            reply_markup=public_reply_keyboard(),
-        )
+    request_id = callback_data.request_id
+    from_list = _opened_from_list(callback, request_id)
+    decided: Optional[dict[str, Any]] = None
+    async with guarded(callback, ("topup_decide", request_id)) as acquired:
+        if not acquired:
+            return
+        current = await db.get_topup_request(request_id)
+        if not current:
+            await _request_gone(callback, db, from_list)
+            return
+        if str(current.get("status") or "") != "pending":
+            await _show_decided(callback, db, current, from_list)
+            return
+        request, error = await db.approve_topup_request(request_id, callback.from_user.id)
+        if error == "not_pending":
+            if request:
+                await _show_decided(callback, db, request, from_list)
+            else:
+                await _request_gone(callback, db, from_list)
+            return
+        if error == "currency_mismatch":
+            # The balance changed currency since the review was drawn: show why Approve is gone.
+            await _show_review(callback, db, request_id, from_list=from_list, toast=MISMATCH_TOAST)
+            return
+        if not request:
+            await _request_gone(callback, db, from_list)
+            return
+        await _show_decision(callback, db, request, from_list)
+        decided = request
+    if decided is not None:
+        await _tell_member(callback.bot, db, decided)
 
 
 @admin_router.callback_query(TopUpAction.filter(F.action == "reject"))
@@ -569,23 +731,53 @@ async def handle_admin_topup_reject(
     callback_data: TopUpAction,
     db: Database,
 ) -> None:
-    if not callback.from_user:
-        await callback.answer("Unable to identify admin.", show_alert=True)
-        return
-    request, error = await db.reject_topup_request(callback_data.request_id, callback.from_user.id)
-    if error == "not_pending":
-        await callback.answer("This request is no longer pending.", show_alert=True)
-        await _send_pending_topups(callback, db)
-        return
+    """❌ Reject (also on old messages) now asks first: [Keep][❌ Reject]."""
+    request_id = callback_data.request_id
+    from_list = _opened_from_list(callback, request_id)
+    request = await db.get_topup_request(request_id)
     if not request:
-        await callback.answer("Top-up request not found.", show_alert=True)
+        await _request_gone(callback, db, from_list)
         return
-    await callback.answer("Top-up rejected.")
-    await _send_pending_topups(callback, db, notice="Top-up rejected.")
-    with contextlib.suppress(Exception):
-        await callback.bot.send_message(
-            int(request["telegram_id"]),
-            "❌ Your top-up request was rejected.\n"
-            "Please contact the admin if you need clarification.",
-            reply_markup=public_reply_keyboard(),
-        )
+    if str(request.get("status") or "") != "pending":
+        await _show_decided(callback, db, request, from_list)
+        return
+    await respond_with_markup(
+        callback,
+        reject_confirm_text(request),
+        reply_markup=topup_reject_confirm_keyboard(request_id, from_list=from_list),
+    )
+
+
+@admin_router.callback_query(TopUpAction.filter(F.action == "reject_yes"))
+async def handle_admin_topup_reject_yes(
+    callback: CallbackQuery,
+    callback_data: TopUpAction,
+    db: Database,
+) -> None:
+    if not callback.from_user:
+        await answer_callback_once(callback, NO_IDENTITY_TEXT, alert=True)
+        return
+    request_id = callback_data.request_id
+    from_list = _opened_from_list(callback, request_id)
+    decided: Optional[dict[str, Any]] = None
+    async with guarded(callback, ("topup_decide", request_id)) as acquired:
+        if not acquired:
+            return
+        current = await db.get_topup_request(request_id)
+        if not current:
+            await _request_gone(callback, db, from_list)
+            return
+        if str(current.get("status") or "") != "pending":
+            await _show_decided(callback, db, current, from_list)
+            return
+        request, error = await db.reject_topup_request(request_id, callback.from_user.id)
+        if error == "not_pending" or not request:
+            if request:
+                await _show_decided(callback, db, request, from_list)
+            else:
+                await _request_gone(callback, db, from_list)
+            return
+        await _show_decision(callback, db, request, from_list)
+        decided = request
+    if decided is not None:
+        await _tell_member(callback.bot, db, decided)

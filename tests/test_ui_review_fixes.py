@@ -33,6 +33,7 @@ from app.ui.helpers import (
 from app.ui.keyboards import (
     CLOSE_CALLBACK,
     CURRENCY_OPTIONS,
+    admin_reply_keyboard,
     guest_reply_keyboard,
     member_balance_currency_keyboard,
     new_subscription_keyboard,
@@ -49,8 +50,15 @@ from app.ui.member_subscriptions import (
     member_card_text,
 )
 from app.ui.prompts import REOPEN_SCREEN_ALERT
+from app.ui.push_screens import (
+    PUSH_TEXT_BUDGET,
+    batch_reminder_parts,
+    batch_reminder_text,
+    comment_line,
+    reminder_text,
+)
 from app.ui.report_screens import close_confirm_text, recreate_confirm_text
-from app.ui.shell import JOIN_ALREADY_LINKED_TEXT
+from app.ui.shell import ADMIN_TOPUP_TEXT, JOIN_ALREADY_LINKED_TEXT
 from app.ui.style import NBSP, expandable, visible_len
 from app.ui.text import escape_html, parse_amount, parse_date_loose
 from dispatcher_harness import RealDispatcherTestCase
@@ -144,6 +152,15 @@ class JoinMenuTests(_Case):
         sent = self.bot.of(SendMessage)[-1]
         self.assertEqual(sent.reply_markup, guest_reply_keyboard())
         self.assertEqual(_keyboard(sent.reply_markup), [["❓ Help"]])
+
+
+class AdminLegacyTopUpTests(_Case):
+    async def test_an_admin_typing_the_old_top_up_label_keeps_the_admin_menu(self):
+        await self.make_admin()
+        await self.feed(self.message("➕ Top up"))
+        sent = self.bot.of(SendMessage)[-1]
+        self.assertEqual(sent.text, ADMIN_TOPUP_TEXT)
+        self.assertEqual(sent.reply_markup, admin_reply_keyboard())
 
 
 # =================================================== the old card's Reports
@@ -431,6 +448,99 @@ class InaccessiblePromptTests(_Case):
                 self.assertEqual([(a.text, a.show_alert) for a in answers], [(REOPEN_SCREEN_ALERT, True)])
                 self.assertIsNone(await self.state().get_state())
                 self.assertFalse(self.bot.of(SendMessage))
+
+
+# ============================================================ message budgets
+
+
+def _bill(index: int, **extra) -> dict:
+    due = date(2026, 11, 12)
+    item = {
+        "subscription_id": index,
+        "subscription_name": f"Subscription {index}",
+        "due_date": due,
+        "due_value": due.isoformat(),
+        "status_text": "Due tomorrow",
+        "tz_name": TZ,
+        "today": date(2026, 11, 11),
+        "amount_text": f"100.00{NBSP}RUB",
+        "payment_label": "Sber · RUB",
+        "payment_details": "",
+        "payment_link": "",
+        "comment": "",
+        "copyable": False,
+    }
+    item.update(extra)
+    return item
+
+
+class PushBudgetTests(unittest.TestCase):
+    def test_four_bills_with_long_comments_fit_one_push(self):
+        comment = "Family plan & shared: " + "x" * 880
+        details = "Card 2202 2002 1234 5678\nIvan P."
+        items = [_bill(i, comment=comment, payment_details=details, copyable=True) for i in range(4)]
+        text = batch_reminder_text(items, f"400.00{NBSP}RUB")
+        self.assertLessEqual(visible_len(text), PUSH_TEXT_BUDGET)
+        self.assertEqual(text.count("Subscription "), 4, "every bill is still listed")
+        five = batch_reminder_text([*items, _bill(4, comment=comment)], None)
+        self.assertLessEqual(visible_len(five), PUSH_TEXT_BUDGET)
+
+    def test_max_details_and_links_fit(self):
+        items = [
+            _bill(i, comment="c" * 1000, payment_details="D" * 1500 + f"{i}", payment_link="pay-" + "l" * 496)
+            for i in range(2)
+        ]
+        self.assertLessEqual(visible_len(batch_reminder_text(items, None)), PUSH_TEXT_BUDGET)
+
+    def test_a_batch_too_long_for_one_message_is_split_with_its_own_bills(self):
+        items = [_bill(i, subscription_name=f"Subscription {i} " + "N" * 50, comment="c" * 300) for i in range(60)]
+        parts = batch_reminder_parts(items, f"6{NBSP}000.00{NBSP}RUB")
+        self.assertGreater(len(parts), 1)
+        self.assertEqual([item for part, _ in parts for item in part], items, "every bill once, in order")
+        for index, (part, text) in enumerate(parts, 1):
+            self.assertLessEqual(visible_len(text), 4096)
+            self.assertIn(f"part {index} of {len(parts)}", text.splitlines()[0])
+        self.assertEqual(len(batch_reminder_parts(items[:2], None)), 1)
+
+    def test_a_legacy_comment_and_long_details_fit_a_single_reminder(self):
+        text = reminder_text(
+            subscription_name="Netflix",
+            amount_text=f"100.00{NBSP}RUB",
+            payment_details="Card 2202 " + "9" * 1500,
+            copyable=True,
+            comment="legacy " * 500,
+            due_value="2026-11-12",
+            tz_name=TZ,
+            today=date(2026, 11, 11),
+        )
+        self.assertLessEqual(visible_len(text), 4096)
+        self.assertIn("…", comment_line("legacy " * 500))
+
+    def test_requisites_are_code_lines_in_pushes(self):
+        text = reminder_text(
+            subscription_name="Netflix",
+            amount_text=f"100.00{NBSP}RUB",
+            payment_details="Card 2202 2002 1234 5678\nIvan P.",
+            copyable=True,
+            due_value="2026-11-12",
+            tz_name=TZ,
+            today=date(2026, 11, 11),
+        )
+        self.assertIn("<blockquote expandable><code>Card 2202 2002 1234 5678</code>\n<code>Ivan P.</code></blockquote>", text)
+
+    def test_your_share_is_the_full_share_when_the_balance_covers_part(self):
+        text = reminder_text(
+            subscription_name="Netflix",
+            amount_text=f"50.00{NBSP}RUB",
+            full_share_text=f"400.00{NBSP}RUB",
+            balance_used_text=f"350.00{NBSP}RUB",
+            left_to_pay_text=f"50.00{NBSP}RUB",
+            due_value="2026-11-12",
+            tz_name=TZ,
+            today=date(2026, 11, 11),
+        )
+        self.assertIn(f"💵 Your share: <b>400.00{NBSP}RUB</b>\n", text)
+        self.assertIn(f"💰 From balance: 350.00{NBSP}RUB · left to pay <b>50.00{NBSP}RUB</b>", text)
 
 
 class ReportChunkTests(unittest.TestCase):
