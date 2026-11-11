@@ -100,20 +100,18 @@ class DeleteConfirmationTests(unittest.TestCase):
         self.assertEqual(button["style"], "danger")
         self.assertEqual(button["callback_data"], "paydest:confirm_delete:9")
 
-    def test_dialog_cancel_stays_red(self):
-        self.assertEqual(_button(dialog_cancel_inline_keyboard(), "Cancel")["style"], "danger")
+    def test_dialog_cancel_is_a_plain_way_out(self):
+        # Cancel only drops the prompt: it is a way out, never styled (principle button-styles).
+        button = _button(dialog_cancel_inline_keyboard(), "✖️ Cancel")
+        self.assertEqual(button, {"text": "✖️ Cancel", "callback_data": "dialog:cancel"})
 
 
 class ForceReplyTests(unittest.TestCase):
-    def test_sent_prompt_keyboard_carries_force_reply(self):
-        dumped = _dump(dialog_cancel_inline_keyboard())
-        self.assertIs(dumped["force_reply"], True)
-        self.assertEqual(dumped["inline_keyboard"], [[{"text": "Cancel", "callback_data": "dialog:cancel", "style": "danger"}]])
 
-    def test_edit_variant_has_no_force_reply(self):
-        dumped = _dump(dialog_cancel_inline_keyboard(force_reply=False))
+    def test_prompt_keyboard_is_inline_cancel_only(self):
+        dumped = _dump(dialog_cancel_inline_keyboard())
         self.assertNotIn("force_reply", dumped)
-        self.assertEqual(dumped["inline_keyboard"][0][0]["callback_data"], "dialog:cancel")
+        self.assertEqual(dumped["inline_keyboard"], [[{"text": "✖️ Cancel", "callback_data": "dialog:cancel"}]])
 
     def test_builder_based_prompts_keep_force_reply(self):
         comment_markup = comment_edit_keyboard(3, True, force_reply=True)

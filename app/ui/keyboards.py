@@ -16,6 +16,8 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.core.constants import PAYMENT_MODE_FIXED, PAYMENT_MODE_SPLIT
+from app.ui.keyboard_fit import label_units, row_budget
+from app.ui.style import SEP
 from app.ui.states import (
     CycleAction,
     DueDateChangeAction,
@@ -116,6 +118,69 @@ COMMON_TIMEZONES = (
 )
 
 
+# ------------------------------------------------------------------ vocabulary
+#
+# One name per concept (principles: exit-verbs, same-name-everywhere). Ways
+# back are never styled; only the destructive verb of a confirmation is red.
+
+BACK_BUTTON_TEXT = "◀️ Back"
+CLOSE_BUTTON_TEXT = "✖️ Close"
+CANCEL_BUTTON_TEXT = "✖️ Cancel"
+KEEP_BUTTON_TEXT = "Keep"
+REFRESH_BUTTON_TEXT = "🔄 Refresh"
+TO_CARD_TEXT = "◀️ To card"
+TO_LIST_TEXT = "◀️ To list"
+TO_USERS_TEXT = "◀️ To users"
+TO_REMINDERS_TEXT = "◀️ To reminders"
+TO_PAYMENT_TEXT = "◀️ To payment"
+TO_PENDING_TEXT = "◀️ To pending"
+
+CLOSE_CALLBACK = "menu:close"
+CANCEL_CALLBACK = "dialog:cancel"
+# Callbacks whose only job is to delete their own message: their nav button is "✖️ Close".
+CLOSE_CALLBACKS = frozenset({CLOSE_CALLBACK})
+
+SELECTED_PREFIX = "✅ "
+TOGGLE_ON = "🟢"
+TOGGLE_OFF = "⚪"
+DEFAULT_METHOD_MARK = "⭐ "
+
+# Reply-menu labels. Clients keep showing an old reply keyboard until a new one
+# arrives, so every label ever shipped keeps a handler: the current ones below
+# plus LEGACY_MENU_ALIASES. MENU_BUTTON_TEXTS is what the menu-reset middleware
+# recognises as "the user left the pending input".
+MENU_USERS = "👥 Users"
+MENU_SUBSCRIPTIONS = "📋 Subscriptions"
+MENU_PAYMENT = "💳 Payment"
+MENU_REPORTS = "📊 Reports"
+MENU_SETTINGS = "⚙️ Settings"
+MENU_ACCOUNT = "👤 Account"
+MENU_HELP = "❓ Help"
+LEGACY_MENU_ALIASES = frozenset({"💳 Payment methods", "📊 Payments report", "➕ Top up", "➕ Add subscription"})
+MENU_LABELS = (
+    MENU_USERS,
+    MENU_SUBSCRIPTIONS,
+    MENU_PAYMENT,
+    MENU_REPORTS,
+    MENU_SETTINGS,
+    MENU_ACCOUNT,
+    MENU_HELP,
+)
+MENU_BUTTON_TEXTS = frozenset(MENU_LABELS) | LEGACY_MENU_ALIASES
+
+
+# --------------------------------------------------------------- reply menus
+
+
+def _reply_keyboard(*rows: Sequence[str]) -> ReplyKeyboardMarkup:
+    """A menu that stays under the input field (``is_persistent``) and sized to fit."""
+    return ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        is_persistent=True,
+        keyboard=[[KeyboardButton(text=label) for label in row] for row in rows],
+    )
+
+
 def _format_cycle_button_label(due_value: str) -> str:
     try:
         return datetime.strptime(due_value, "%Y-%m-%d").strftime("%d.%m.%Y")
@@ -124,40 +189,131 @@ def _format_cycle_button_label(due_value: str) -> str:
 
 
 def admin_reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        resize_keyboard=True,
-        keyboard=[
-            [KeyboardButton(text="👥 Users"), KeyboardButton(text="📋 Subscriptions")],
-            [KeyboardButton(text="💳 Payment"), KeyboardButton(text="📊 Reports")],
-            [KeyboardButton(text="⚙️ Settings")],
-        ],
+    return _reply_keyboard(
+        (MENU_USERS, MENU_SUBSCRIPTIONS),
+        (MENU_PAYMENT, MENU_REPORTS),
+        (MENU_SETTINGS, MENU_HELP),
     )
 
 
 def public_reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        resize_keyboard=True,
-        keyboard=[
-            [KeyboardButton(text="👤 Account"), KeyboardButton(text="📋 Subscriptions")],
-            [KeyboardButton(text="📊 Reports"), KeyboardButton(text="⚙️ Settings")],
-        ],
+    """The menu of a linked member. Never send it to an admin: it replaces their menu."""
+    return _reply_keyboard(
+        (MENU_ACCOUNT, MENU_SUBSCRIPTIONS),
+        (MENU_REPORTS, MENU_SETTINGS),
+        (MENU_HELP,),
     )
 
 
+def guest_reply_keyboard() -> ReplyKeyboardMarkup:
+    """The reduced menu of someone without access (a stranger, a failed sign-in link)."""
+    return _reply_keyboard((MENU_HELP,))
+
+
+# ---------------------------------------------------------------- nav helpers
+
+
+def nav_button(callback_data: str, text: str | None = None) -> InlineKeyboardButton:
+    """The way back of a screen, named by what it does; never styled.
+
+    ``menu:close`` (delete this message) is always "✖️ Close"; any other
+    callback is "◀️ Back" unless ``text`` names the target ("◀️ To card").
+    """
+    if callback_data in CLOSE_CALLBACKS:
+        label = CLOSE_BUTTON_TEXT
+    else:
+        label = text or BACK_BUTTON_TEXT
+    return InlineKeyboardButton(text=label, callback_data=callback_data)
+
+
+def nav_row(
+    callback_data: str,
+    text: str | None = None,
+    *,
+    refresh_callback: str | None = None,
+) -> list[InlineKeyboardButton]:
+    """The last row of a keyboard: the way back first, then an optional "🔄 Refresh".
+
+    A long target ("◀️ To reminders") does not fit half a row, so do not pair
+    it with Refresh; tests catch that through ``keyboard_problems``.
+    """
+    row = [nav_button(callback_data, text)]
+    if refresh_callback:
+        row.append(InlineKeyboardButton(text=REFRESH_BUTTON_TEXT, callback_data=refresh_callback))
+    return row
+
+
+def cancel_button(callback_data: str = CANCEL_CALLBACK, *, text: str = CANCEL_BUTTON_TEXT) -> InlineKeyboardButton:
+    """The "✖️ Cancel" of prompts, wizards and confirmations ("Keep" via ``text``); never red."""
+    return InlineKeyboardButton(text=text, callback_data=callback_data)
+
+
+def confirm_row(
+    cancel_callback: str,
+    verb_label: str,
+    yes_callback: str,
+    *,
+    cancel_text: str = CANCEL_BUTTON_TEXT,
+) -> list[InlineKeyboardButton]:
+    """``[✖️ Cancel][🗑 Delete]``: the safe answer on the left, the red bare verb on the right."""
+    return [
+        cancel_button(cancel_callback, text=cancel_text),
+        InlineKeyboardButton(text=verb_label, callback_data=yes_callback, style="danger"),
+    ]
+
+
+def radio_label(text: str, selected: bool) -> str:
+    """A picker option; the current one is marked with "✅ " (colour is not shown everywhere)."""
+    return f"{SELECTED_PREFIX}{text}" if selected else text
+
+
+def toggle_label(text: str, on: bool) -> str:
+    """``'📣 After due date · 🟢'`` / ``'… · ⚪'``: the state is on the button."""
+    return f"{text}{SEP}{TOGGLE_ON if on else TOGGLE_OFF}"
+
+
+def pair_rows(buttons: Iterable[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
+    """Siblings two per row, in order; a label too long for half a row gets a row of its own."""
+    half = row_budget(2)
+    rows: list[list[InlineKeyboardButton]] = []
+    pending: InlineKeyboardButton | None = None
+    for button in buttons:
+        if label_units(button.text) > half:
+            if pending is not None:
+                rows.append([pending])
+                pending = None
+            rows.append([button])
+        elif pending is None:
+            pending = button
+        else:
+            rows.append([pending, button])
+            pending = None
+    if pending is not None:
+        rows.append([pending])
+    return rows
+
+
+def payment_method_label(title: object, currency: object = "", *, default: bool = False) -> str:
+    """``'Sber · RUB'``, or ``'⭐ Sber · RUB'`` for the default method (plain text, not escaped)."""
+    name = str(title or "").strip()
+    code = str(currency or "").strip().upper()
+    label = f"{name}{SEP}{code}" if name and code else name or code
+    return f"{DEFAULT_METHOD_MARK}{label}" if default else label
+
+
 def dialog_cancel_inline_button() -> InlineKeyboardButton:
-    return InlineKeyboardButton(text="Cancel", callback_data="dialog:cancel", style="danger")
+    """The prompt's "✖️ Cancel" (callback ``dialog:cancel``, kept for old messages)."""
+    return cancel_button()
 
 
-def dialog_cancel_inline_keyboard(force_reply: bool = True) -> InlineKeyboardMarkup:
+def dialog_cancel_inline_keyboard() -> InlineKeyboardMarkup:
     """Cancel-only keyboard for text prompts.
 
-    ``force_reply=True`` opens the reply box on the client, so it is only valid
-    on a freshly sent prompt (``message.answer``); pass ``False`` when the
-    keyboard is attached through ``edit_text``/``edit_reply_markup``.
+    A message carries one reply_markup: with the inline [✖️ Cancel] there is
+    no ForceReply, so prompts never set ``force_reply`` (it was a dead extra).
     """
     return InlineKeyboardMarkup(
         inline_keyboard=[[dialog_cancel_inline_button()]],
-        force_reply=True if force_reply else None,
     )
 
 

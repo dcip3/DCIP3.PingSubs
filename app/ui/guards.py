@@ -41,8 +41,10 @@ async def guarded(callback: CallbackQuery | None, key: tuple[str, Hashable]) -> 
     """
     if key in _in_progress:
         if callback is not None:
+            from app.ui.helpers import answer_callback_once  # helpers is the heavier module
+
             try:
-                await callback.answer(ALREADY_RUNNING_TEXT, show_alert=False)
+                await answer_callback_once(callback, ALREADY_RUNNING_TEXT)
             except TelegramBadRequest as error:  # query too old: nothing to tell
                 logger.debug("Could not answer a repeated tap for %s: %s", key, error)
         yield False

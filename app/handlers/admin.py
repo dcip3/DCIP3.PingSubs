@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import html
 import logging
 from datetime import datetime, timezone
@@ -9,12 +8,14 @@ from aiogram import Bot, F
 
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup
 
 from app.ui.keyboards import (
+    MENU_HELP,
     admin_reply_keyboard,
     admin_settings_keyboard,
     build_test_payment_confirmation_keyboard,
+    guest_reply_keyboard,
     dialog_cancel_inline_keyboard,
     public_settings_keyboard,
     public_subscription_currency_keyboard,
@@ -70,6 +71,23 @@ from app.services import (
     format_converted_amount,
 )
 from app.ui.text import validate_person_name
+# The shell (WP1): /start, sign-in links, Help, Close/Cancel and identity errors.
+from app.ui.helpers import answer_callback_once, delete_quietly
+from app.ui.prompts import PROMPT_MESSAGE_ID, cancel_prompt, reset_flow_state, wind_down
+from app.ui.shell import (
+    FIRST_ADMIN_TEXT,
+    JOIN_ALREADY_LINKED_TEXT,
+    JOIN_FAILED_TEXT,
+    JOIN_LINK_BROKEN_TEXT,
+    JOIN_LINK_EXPIRED_TEXT,
+    NO_IDENTITY_TEXT,
+    STRANGER_START_TEXT,
+    admin_start_snapshot,
+    admin_start_text,
+    join_success_text,
+    member_start_snapshot,
+    member_start_text,
+)
 
 from . import admin_router, public_router
 
@@ -168,116 +186,180 @@ async def _show_public_settings_menu(
     await callback.answer(text, reply_markup=markup)
 
 
-@public_router.message(Command("start"))
-async def handle_start(message: Message, db: Database) -> None:
-    greeting = (
-        "PingSubs helps you manage shared subscriptions. "
-        "Admins keep the schedule up to date and I send reminders on time."
+async def _start_reply(message: Message, text: str, markup: ReplyKeyboardMarkup) -> None:
+    await message.answer(text, reply_markup=markup)
+
+
+async def _send_admin_start(message: Message, db: Database, *, invite_note: bool = False) -> None:
+    snapshot = await admin_start_snapshot(db)
+    await _start_reply(message, admin_start_text(snapshot, invite_note=invite_note), admin_reply_keyboard())
+
+
+async def _send_member_start(message: Message, db: Database, telegram_id: int) -> None:
+    snapshot = await member_start_snapshot(db, telegram_id)
+    await _start_reply(message, member_start_text(snapshot), public_reply_keyboard())
+
+
+def _invite_expired(friend: dict) -> bool:
+    raw = str(friend.get("invite_expires_at") or "").strip()
+    if not raw:
+        return False
+    try:
+        expires_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if expires_at.tzinfo is not None:
+        expires_at = expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+    return expires_at < datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+async def _handle_join(message: Message, db: Database, user_id: int, token: str) -> None:
+    """``/start join_<token>``: link this Telegram account to the invited user.
+
+    A sender who is already a linked member always keeps the member menu: the
+    reduced guest menu is only for people without access.
+    """
+    guest_menu = guest_reply_keyboard()
+    existing_friend = await db.get_friend_by_telegram(user_id)
+    invited_friend = await db.get_friend_by_invite_token(token)
+    if not invited_friend:
+        if existing_friend:
+            # Their own link again: claiming it cleared the token, so it is not
+            # found any more. They are already in; greet them as a member.
+            await _send_member_start(message, db, user_id)
+            return
+        await _start_reply(message, JOIN_LINK_BROKEN_TEXT, guest_menu)
+        return
+    invited_id = int(invited_friend["id"])
+    if existing_friend and int(existing_friend["id"]) == invited_id:
+        # Their own link again: they are already in.
+        subs = await db.list_subscriptions_for_user(user_id)
+        text = join_success_text(str(existing_friend.get("full_name") or ""), [str(sub["name"]) for sub in subs])
+        await _start_reply(message, text, public_reply_keyboard())
+        return
+    if existing_friend:
+        # Someone else's link: this account stays linked as it is.
+        await _start_reply(message, JOIN_ALREADY_LINKED_TEXT, public_reply_keyboard())
+        return
+    if _invite_expired(invited_friend):
+        await _start_reply(message, JOIN_LINK_EXPIRED_TEXT, guest_menu)
+        return
+    if invited_friend.get("telegram_id") is not None:
+        await _start_reply(message, JOIN_LINK_BROKEN_TEXT, guest_menu)
+        return
+    claimed = await db.claim_friend_invite(
+        invited_id,
+        user_id,
+        datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat(),
     )
+    if not claimed:
+        await _start_reply(message, JOIN_FAILED_TEXT, guest_menu)
+        return
+    subs = await db.list_subscriptions_for_user(user_id)
+    text = join_success_text(str(invited_friend.get("full_name") or ""), [str(sub["name"]) for sub in subs])
+    await _start_reply(message, text, public_reply_keyboard())
+
+
+@public_router.message(Command("start"))
+async def handle_start(message: Message, db: Database, state: FSMContext, bot: Bot) -> None:
+    """/start: drop any pending input, restore the right menu, and say what to do next."""
+    # The menu-reset middleware already did this when a state was set; doing it
+    # again is harmless and covers a /start that reached here some other way.
+    old_data = await reset_flow_state(state)
+    await wind_down(bot, message.chat.id, old_data)
 
     if not message.from_user:
-        await message.answer(greeting)
+        await _start_reply(message, STRANGER_START_TEXT, guest_reply_keyboard())
         return
 
     user_id = message.from_user.id
-    is_admin = await db.is_admin(user_id)
-    has_admin = await db.has_admins()
     start_payload = _extract_start_payload(message)
+    is_join = bool(start_payload and start_payload.startswith("join_"))
 
-    if is_admin:
-        await message.answer(greeting, reply_markup=admin_reply_keyboard())
+    if await db.is_admin(user_id):
+        await _send_admin_start(message, db, invite_note=is_join)
         return
 
-    if start_payload and start_payload.startswith("join_"):
-        invited_friend = await db.get_friend_by_invite_token(start_payload)
-        if not invited_friend:
-            await message.answer(
-                "This authorization link is invalid or has already been used.",
-                reply_markup=public_reply_keyboard(),
-            )
-            return
-
-        invite_expires_at = str(invited_friend.get("invite_expires_at") or "").strip()
-        if invite_expires_at:
-            try:
-                expires_at = datetime.fromisoformat(invite_expires_at)
-            except ValueError:
-                expires_at = None
-            if expires_at is not None and expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
-                await message.answer(
-                    "This authorization link has expired. Ask an admin for a new one.",
-                    reply_markup=public_reply_keyboard(),
-                )
-                return
-
-        existing_friend = await db.get_friend_by_telegram(user_id)
-        if existing_friend and int(existing_friend["id"]) != int(invited_friend["id"]):
-            await message.answer(
-                "This Telegram account is already linked to another user.",
-                reply_markup=public_reply_keyboard(),
-            )
-            return
-
-        if invited_friend.get("telegram_id") is not None:
-            await message.answer(
-                "This authorization link has already been used.",
-                reply_markup=public_reply_keyboard(),
-            )
-            return
-
-        claimed = await db.claim_friend_invite(
-            int(invited_friend["id"]),
-            user_id,
-            datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat(),
-        )
-        if not claimed:
-            await message.answer(
-                "Unable to complete authorization. Please try again or ask an admin for a new link.",
-                reply_markup=public_reply_keyboard(),
-            )
-            return
-
-        await message.answer(
-            f"{greeting}\n\nYour account is now linked. You can use the user menu below.",
-            reply_markup=public_reply_keyboard(),
-        )
+    if is_join:
+        await _handle_join(message, db, user_id, str(start_payload))
         return
 
-    if not has_admin:
+    if not await db.has_admins():
         admin_name, _ = validate_person_name(message.from_user.full_name)
         claimed = await db.ensure_first_admin(user_id, admin_name or "Admin")
         if claimed or await db.is_admin(user_id):
-            await message.answer(
-                f"{greeting}\n\nYou are the first user, so admin access is enabled for you.",
-                reply_markup=admin_reply_keyboard(),
-            )
+            await _start_reply(message, FIRST_ADMIN_TEXT, admin_reply_keyboard())
             return
-        await message.answer(greeting, reply_markup=public_reply_keyboard())
-        return
 
-    await message.answer(
-        greeting,
-        reply_markup=public_reply_keyboard(),
-    )
+    if await db.get_friend_by_telegram(user_id):
+        await _send_member_start(message, db, user_id)
+        return
+    await _start_reply(message, STRANGER_START_TEXT, guest_reply_keyboard())
+
+
+HELP_ROLE_ADMIN = "admin"
+HELP_ROLE_MEMBER = "member"
+HELP_ROLE_GUEST = "guest"
+
+_HELP_TEXTS = {
+    HELP_ROLE_ADMIN: (
+        "❓ <b>Help</b>\n\n"
+        "👥 Users — people, balances, sign-in links\n"
+        "📋 Subscriptions — plans, participants, reminders\n"
+        "💳 Payment — payment methods and top-up approvals\n"
+        "📊 Reports — who has paid\n"
+        "⚙️ Settings — reminder time, timezone, admin notifications\n\n"
+        "Start a fresh screen any time with /start."
+    ),
+    HELP_ROLE_MEMBER: (
+        "❓ <b>Help</b>\n\n"
+        "👤 Account — balance; “👤 Account” → “➕ Top up” to add money\n"
+        "📋 Subscriptions — your share, how to pay, “✅ Paid”\n"
+        "📊 Reports — what is paid and what is due\n"
+        "⚙️ Settings — your reminder time and timezone\n\n"
+        "Tap “✅ Paid” under a reminder once you have paid."
+    ),
+    HELP_ROLE_GUEST: (
+        "❓ <b>Help</b>\n\n"
+        "This bot reminds a group about shared subscriptions.\n"
+        "Ask the admin for your sign-in link."
+    ),
+}
+
+
+def help_text(role: str) -> str:
+    """The one help screen for an admin, a linked member or a guest."""
+    return _HELP_TEXTS.get(role, _HELP_TEXTS[HELP_ROLE_GUEST])
+
+
+def help_reply_keyboard(role: str) -> ReplyKeyboardMarkup:
+    if role == HELP_ROLE_ADMIN:
+        return admin_reply_keyboard()
+    if role == HELP_ROLE_MEMBER:
+        return public_reply_keyboard()
+    return guest_reply_keyboard()
+
+
+async def _help_role(db: Database, telegram_id: int | None) -> str:
+    if telegram_id is None:
+        return HELP_ROLE_GUEST
+    if await db.is_admin(telegram_id):
+        return HELP_ROLE_ADMIN
+    if await db.get_friend_by_telegram(telegram_id):
+        return HELP_ROLE_MEMBER
+    return HELP_ROLE_GUEST
 
 
 @public_router.message(Command("help"))
+@public_router.message(F.text == MENU_HELP)
 async def handle_public_help(message: Message, db: Database) -> None:
-    if message.from_user and await db.is_admin(message.from_user.id):
-        await send_admin_help(message)
-        return
+    role = await _help_role(db, message.from_user.id if message.from_user else None)
+    await message.answer(help_text(role), reply_markup=help_reply_keyboard(role))
 
-    await message.answer(
-        "I track shared subscriptions and remind everyone about payments.\n\n"
-        "Buttons:\n"
-        "👤 Account — your balance and subscriptions.\n"
-        "➕ Top up — create a balance top-up request.\n"
-        "📋 Subscriptions — your plans.\n"
-        "📊 Reports — your payment history.\n"
-        "⚙️ Settings — your timezone and reminder time.\n\n"
-        "Ask an admin to invite you if you need access."
-    )
 
+async def _answer_no_identity(message: Message) -> None:
+    """No readable sender: say so, and attach the menu that needs no account."""
+    await message.answer(NO_IDENTITY_TEXT, reply_markup=guest_reply_keyboard())
 
 
 @public_router.message(F.text == "📋 Subscriptions")
@@ -1054,29 +1136,33 @@ async def send_admin_help(message: Message) -> None:
     await message.answer(text, reply_markup=admin_reply_keyboard())
 
 
+# Close and Cancel are registered on public_router only: it runs first and
+# serves admins too, so copies on admin_router would never fire.
 @public_router.callback_query(F.data == "menu:close")
-@admin_router.callback_query(F.data == "menu:close")
-async def handle_menu_close(callback: CallbackQuery) -> None:
-    if callback.message:
-        with contextlib.suppress(Exception):
-            await callback.message.delete()
-        if callback.message.text:
-            with contextlib.suppress(Exception):
-                await callback.message.edit_text("Menu closed.")
-    await callback.answer()
+async def handle_menu_close(callback: CallbackQuery, state: FSMContext) -> None:
+    """✖️ Close: delete this message (too old to delete: strip its buttons), silently.
+
+    Closing the message of a pending prompt also ends that prompt, so the next
+    text is not taken as its answer.
+    """
+    message = callback.message
+    bot = callback.bot or (message.bot if message is not None else None)
+    if message is not None and bot is not None:
+        data = await state.get_data()
+        if data.get(PROMPT_MESSAGE_ID) == message.message_id:
+            old_data = await reset_flow_state(state)
+            await wind_down(bot, message.chat.id, old_data, skip_message_id=message.message_id)
+        await delete_quietly(bot, message.chat.id, message.message_id)
+    await answer_callback_once(callback)
 
 
 @public_router.callback_query(F.data == "dialog:cancel")
-@admin_router.callback_query(F.data == "dialog:cancel")
 async def handle_dialog_cancel_callback(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
-    await state.clear()
-    if callback.message:
-        with contextlib.suppress(Exception):
-            await callback.message.delete()
-    await callback.answer()
+    """✖️ Cancel: wind the flow down, delete the prompt, toast 'Cancelled' (works without FSM data)."""
+    await cancel_prompt(callback, state)
 
 
 

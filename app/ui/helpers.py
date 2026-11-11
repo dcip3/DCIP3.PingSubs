@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import logging
+from collections import OrderedDict
+from contextvars import ContextVar
 from datetime import date, datetime
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Awaitable, Callable, Dict, Optional, Sequence, Tuple, Union
+
+from aiogram import Bot
 
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State
@@ -12,7 +17,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from app.core.constants import (
     DEFAULT_CURRENCIES,
@@ -22,7 +27,6 @@ from app.core.constants import (
 from app.storage.db import Database
 from app.services import normalize_payment_mode, parse_fixed_amount
 from app.ui.keyboards import (
-    admin_reply_keyboard,
     build_members_list_keyboard,
     build_participants_keyboard,
     build_currency_keyboard,
@@ -66,7 +70,10 @@ from app.core.reminders import (
     due_status_html,
     tg_due,
 )
+from app.ui.style import TOAST_MAX_LEN
 from app.ui.text import escape_html, format_display_name
+
+logger = logging.getLogger(__name__)
 
 MAX_TELEGRAM_MESSAGE_LEN = 3900
 BLOCKQUOTE_OPEN = "<blockquote expandable>"
@@ -383,21 +390,259 @@ def _build_open_cycle_summary(
     }
 
 
+# ------------------------------------------------------- screens and edits
+#
+# One message per flow: inline buttons edit the message they sit on, and every
+# callback is answered exactly once (with the toast, when there is one).
+
+STALE_QUERY_MARKERS = ("query is too old", "query_id_invalid", "query id is invalid")
+NOT_MODIFIED_MARKER = "message is not modified"
+UNEDITABLE_MARKERS = (
+    "message can't be edited",
+    "message to edit not found",
+    "there is no text in the message to edit",
+    "message_id_invalid",
+)
+_ANSWERED_LIMIT = 4096
+_answered_callbacks: "OrderedDict[str, None]" = OrderedDict()
+# Set by stale_redirect so that the redraw's own answer carries the toast.
+_pending_toast: ContextVar[Optional[Tuple[str, str, bool]]] = ContextVar("pending_toast", default=None)
+
+SUBSCRIPTION_GONE = "Subscription was deleted"
+USER_GONE = "User was deleted"
+METHOD_GONE = "Payment method was deleted"
+REQUEST_HANDLED = "Request already handled"
+CYCLE_CLOSED = "This cycle is already closed"
+NO_ACCESS = "You are no longer in this subscription"
+# A malformed or retired button: one toast, plus a redraw of the parent when one is known.
+DEAD_BUTTON = "This button no longer works"
+def prompt_out_of_date_text(section: str = "📋 Subscriptions") -> str:
+    """The one wording for an answer to a prompt whose flow data is gone (e.g. after a restart)."""
+    return f"⌛️ This prompt is out of date. Open “{section}” again."
+
+
+PROMPT_OUT_OF_DATE_TEXT = prompt_out_of_date_text()
+
+
+class StaleTexts:
+    """Toasts for a button pressed on an outdated screen (not an error)."""
+
+    SUBSCRIPTION_GONE = SUBSCRIPTION_GONE
+    USER_GONE = USER_GONE
+    METHOD_GONE = METHOD_GONE
+    REQUEST_HANDLED = REQUEST_HANDLED
+    CYCLE_CLOSED = CYCLE_CLOSED
+    NO_ACCESS = NO_ACCESS
+    DEAD_BUTTON = DEAD_BUTTON
+
+
+STALE_TEXTS = StaleTexts
+
+
+def _error_text(error: Exception) -> str:
+    return str(error).lower()
+
+
+def is_stale_query_error(error: Exception) -> bool:
+    """A second answer, or an answer after ~15 s: nothing left to tell the user."""
+    return isinstance(error, TelegramBadRequest) and any(m in _error_text(error) for m in STALE_QUERY_MARKERS)
+
+
+def is_not_modified_error(error: Exception) -> bool:
+    return isinstance(error, TelegramBadRequest) and NOT_MODIFIED_MARKER in _error_text(error)
+
+
+def is_uneditable_error(error: Exception) -> bool:
+    """The message is gone, too old, or not a text message: send a new one instead."""
+    return isinstance(error, TelegramBadRequest) and any(m in _error_text(error) for m in UNEDITABLE_MARKERS)
+
+
+def _remember_answered(callback_id: str) -> None:
+    _answered_callbacks[callback_id] = None
+    while len(_answered_callbacks) > _ANSWERED_LIMIT:
+        _answered_callbacks.popitem(last=False)
+
+
+def callback_was_answered(callback: CallbackQuery) -> bool:
+    return callback.id in _answered_callbacks
+
+
+async def answer_callback_once(
+    callback: CallbackQuery,
+    text: Optional[str] = None,
+    *,
+    alert: bool = False,
+) -> bool:
+    """Answer a tap at most once; later calls for the same callback do nothing.
+
+    ``text`` is the toast (cut to 200 characters); ``alert=True`` shows it as a
+    blocking alert. A pending toast set by ``stale_redirect`` is used when no
+    text is given. An answer that comes too late, or after the call site
+    answered by itself, is ignored. Returns True when this call answered.
+    """
+    if callback_was_answered(callback):
+        return False
+    if text is None:
+        pending = _pending_toast.get()
+        if pending is not None and pending[0] == callback.id:
+            _, text, alert = pending
+    _remember_answered(callback.id)
+    toast = text[:TOAST_MAX_LEN] if text else None
+    try:
+        await callback.answer(toast, show_alert=bool(alert and toast))
+    except TelegramBadRequest as error:
+        if not is_stale_query_error(error):
+            raise
+        logger.debug("Callback %s was already answered or is too old: %s", callback.id, error)
+        return False
+    return True
+
+
 async def respond_with_markup(
     target: Responder,
     text: str,
     *,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
-) -> None:
-    if isinstance(target, CallbackQuery):
+    reply_markup: Optional[Union[InlineKeyboardMarkup, ReplyKeyboardMarkup]] = None,
+    toast: Optional[str] = None,
+    alert: bool = False,
+) -> Optional[Message]:
+    """Show a screen: edit the tapped message, or answer a typed one.
+
+    For a callback the message is edited in place ("not modified" is fine); a
+    message that can no longer be edited gets the screen as a new message. The
+    callback is then answered exactly once, with ``toast`` (``alert=True`` for
+    a blocking problem). Returns the message that shows the screen, if known.
+    """
+    if not isinstance(target, CallbackQuery):
+        return await target.answer(text, reply_markup=reply_markup)
+    shown: Optional[Message] = None
+    message = target.message
+    if isinstance(message, Message):
         try:
-            await target.message.edit_text(text, reply_markup=reply_markup)
-        except TelegramBadRequest as exc:
-            if "message is not modified" not in str(exc):
+            result = await message.edit_text(text, reply_markup=reply_markup)
+            shown = result if isinstance(result, Message) else message
+        except TelegramBadRequest as error:
+            if is_not_modified_error(error):
+                shown = message
+            elif is_uneditable_error(error):
+                shown = await message.answer(text, reply_markup=reply_markup)
+            else:
                 raise
-        await target.answer()
-    else:
-        await target.answer(text, reply_markup=reply_markup)
+    elif message is not None and target.bot is not None:
+        # Too old to touch (InaccessibleMessage), but the chat is still known.
+        shown = await target.bot.send_message(message.chat.id, text, reply_markup=reply_markup)
+    await answer_callback_once(target, toast, alert=alert)
+    return shown
+
+
+async def edit_in_place(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> bool:
+    """Edit a known message (the screen a prompt came from) without any fallback.
+
+    Returns True when the message now shows ``text``: it was edited, or it
+    already showed exactly this ("message is not modified", for example after
+    saving the same value twice). Returns False only when the message cannot
+    be edited any more (deleted, too old); the caller may then send a new
+    screen. Any other bad request (broken HTML, text over 4096) is a bug and
+    is raised.
+    """
+    try:
+        await bot.edit_message_text(
+            text=text,
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest as error:
+        if is_not_modified_error(error):
+            logger.debug("Message %s in chat %s already up to date", message_id, chat_id)
+            return True
+        if is_uneditable_error(error):
+            logger.debug("Message %s in chat %s not edited: %s", message_id, chat_id, error)
+            return False
+        logger.warning("Could not edit message %s in chat %s: %s", message_id, chat_id, error)
+        raise
+    return True
+
+
+async def safe_edit_text(
+    message: Message,
+    text: str,
+    reply_markup: Optional[Union[InlineKeyboardMarkup, ReplyKeyboardMarkup]] = None,
+) -> Message:
+    """Edit ``message``; when it cannot be edited, send the text as a new message.
+
+    Returns the message that now shows the text. A ``ReplyKeyboardMarkup`` can
+    only travel with a new message, so it always takes the new-message path.
+    """
+    if isinstance(reply_markup, ReplyKeyboardMarkup):
+        return await message.answer(text, reply_markup=reply_markup)
+    try:
+        result = await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as error:
+        if is_not_modified_error(error):
+            return message
+        if is_uneditable_error(error):
+            return await message.answer(text, reply_markup=reply_markup)
+        raise
+    return result if isinstance(result, Message) else message
+
+
+async def delete_quietly(bot: Bot, chat_id: int, *message_ids: Optional[int]) -> None:
+    """Delete messages, ignoring the ones that are gone or not ours to delete.
+
+    A message older than 48 hours cannot be deleted; it loses its buttons
+    instead, so nothing on it invites another tap. Empty ids are skipped and
+    duplicates are handled once.
+    """
+    seen: set[int] = set()
+    for raw_id in message_ids:
+        if not raw_id:
+            continue
+        message_id = int(raw_id)
+        if message_id in seen:
+            continue
+        seen.add(message_id)
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            continue
+        except TelegramForbiddenError:
+            continue
+        except TelegramBadRequest as error:
+            if "not found" in _error_text(error):
+                continue
+            logger.debug("Could not delete message %s in chat %s: %s", message_id, chat_id, error)
+        try:
+            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            logger.debug("Could not strip buttons from message %s in chat %s: %s", message_id, chat_id, error)
+
+
+async def stale_redirect(
+    callback: CallbackQuery,
+    toast: str,
+    redraw: Union[Awaitable[object], Callable[[], Awaitable[object]]],
+    *,
+    alert: bool = False,
+) -> None:
+    """Redraw the current state for a button pressed on an outdated screen.
+
+    ``redraw`` (a coroutine, or a no-argument callable returning one) redraws
+    the parent screen, for example the list after the object was deleted. The
+    tap is answered once with ``toast`` ("Subscription was deleted"): by the
+    redraw itself when it goes through ``respond_with_markup``, otherwise here.
+    """
+    token = _pending_toast.set((callback.id, toast, alert))
+    try:
+        await (redraw() if callable(redraw) else redraw)
+    finally:
+        _pending_toast.reset(token)
+    await answer_callback_once(callback, toast, alert=alert)
 
 
 def _split_plain_block(block: str, limit: int) -> list[str]:
@@ -1795,11 +2040,12 @@ async def get_edit_subscription_id(state: FSMContext) -> Optional[int]:
 async def require_edit_subscription_id(message: Message, state: FSMContext) -> Optional[int]:
     subscription_id = await get_edit_subscription_id(state)
     if subscription_id is None:
-        await message.answer(
-            "Session expired. Open 📋 Subscriptions and select the item again.",
-            reply_markup=admin_reply_keyboard(),
-        )
-        await state.clear()
+        from app.ui.prompts import reset_flow_state, wind_down  # prompts imports this module
+
+        old_data = await reset_flow_state(state)
+        if message.bot is not None:
+            await wind_down(message.bot, message.chat.id, old_data)
+        await message.answer(PROMPT_OUT_OF_DATE_TEXT)
         return None
     return subscription_id
 

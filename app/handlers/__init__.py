@@ -9,5 +9,7 @@ from . import participants as _participants  # noqa: F401
 from . import reminders as _reminders  # noqa: F401
 from . import members as _members  # noqa: F401
 from . import topups as _topups  # noqa: F401
+# Catch-alls: include this router after every other one (see main.build_dispatcher).
+from .fallback import fallback_router  # noqa: E402
 
-__all__ = ["public_router", "admin_router"]
+__all__ = ["public_router", "admin_router", "fallback_router"]

@@ -15,11 +15,46 @@ from pathlib import Path
 from typing import Iterable
 import unittest
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.ui.keyboard_fit import ELLIPSIS, fit_label, keyboard_problems
-from app.ui.keyboards import COMMON_TIMEZONES
+from app.ui.keyboards import (
+    BACK_BUTTON_TEXT,
+    CANCEL_BUTTON_TEXT,
+    CLOSE_BUTTON_TEXT,
+    COMMON_TIMEZONES,
+    KEEP_BUTTON_TEXT,
+    LEGACY_MENU_ALIASES,
+    MENU_BUTTON_TEXTS,
+    REFRESH_BUTTON_TEXT,
+    TO_CARD_TEXT,
+    TO_LIST_TEXT,
+    TO_PAYMENT_TEXT,
+    TO_PENDING_TEXT,
+    TO_REMINDERS_TEXT,
+    TO_USERS_TEXT,
+    admin_reply_keyboard,
+    cancel_button,
+    confirm_row,
+    dialog_cancel_inline_keyboard,
+    guest_reply_keyboard,
+    nav_button,
+    nav_row,
+    pagination_row,
+    pair_rows,
+    payment_method_label,
+    public_reply_keyboard,
+    radio_label,
+    toggle_label,
+)
+from app.ui.keyboard_fit import is_back_button
+from app.ui.prompts import prompt_markup
 import keyboard_guard
 from keyboard_guard import install_keyboard_guard, misplaced_back_ok
 
@@ -32,6 +67,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 LONG_NAME = "W" * 40
 NAME_64 = "Alexandra Konstantinopolskaya-Wellington of Westminster Mews WWW"[:64]
 LONG_SUB = "Spotify Family Premium Duo Plus"
+AMOUNT = 12500.0
 LONG_METHOD = "Main corporate RUB card T-Bank"
 ALL_TIMEZONES = COMMON_TIMEZONES
 LONG_REQUISITES = ("Card 2200 1234 5678 9012, T-Bank, Alexandra Konstantinopolskaya. " * 5)[:300]
@@ -130,6 +166,97 @@ class AssertFitsTests(unittest.TestCase):
         self.assertEqual(keyboard_rule_violations(markup), ["more than one coloured button: ['✅ Paid', '➕ Top up']"])
         # The danger verb of a confirmation does not count as a call to action.
         assert_fits(_inline([_button("✖️ Cancel"), _button("🗑 Delete", "danger")], [_button("✅ Paid", "success")]))
+
+
+# ------------------------------------------------------- reply keyboards, nav
+
+
+REPLY_BUILDERS = (admin_reply_keyboard, public_reply_keyboard, guest_reply_keyboard)
+NAV_TEXTS = (
+    BACK_BUTTON_TEXT, TO_CARD_TEXT, TO_LIST_TEXT, TO_USERS_TEXT, TO_REMINDERS_TEXT, TO_PAYMENT_TEXT, TO_PENDING_TEXT,
+)
+
+
+def _plain(text: str, callback_data: str = "x") -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=callback_data)
+
+
+class ReplyKeyboardFitTests(unittest.TestCase):
+    def test_reply_keyboards_fit(self):
+        for builder in REPLY_BUILDERS:
+            with self.subTest(builder=builder.__name__):
+                assert_fits(builder())
+
+    def test_every_reply_label_fits_half_a_row(self):
+        labels = [button.text for builder in REPLY_BUILDERS for row in builder().keyboard for button in row]
+        markup = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=label), KeyboardButton(text=label)] for label in labels])
+        assert_fits(markup)
+
+    def test_legacy_aliases_are_handled_but_never_shown(self):
+        # Old clients may still show them (some are too wide for half a row); new menus never do.
+        shown = {button.text for builder in REPLY_BUILDERS for row in builder().keyboard for button in row}
+        self.assertEqual(shown & LEGACY_MENU_ALIASES, set())
+        self.assertLessEqual(shown | LEGACY_MENU_ALIASES, MENU_BUTTON_TEXTS)
+
+
+class NavHelperFitTests(unittest.TestCase):
+    def test_pagination_row_fits_every_page(self):
+        for page, total in ((1, 1), (1, 3), (2, 3), (3, 3), (99, 100), (100, 100)):
+            with self.subTest(page=page, total=total):
+                row = pagination_row(page, total, previous_callback="p", next_callback="n")
+                assert_fits(_inline(row, nav_row("back")))
+
+    def test_prompt_cancel_keyboard_fits(self):
+        assert_fits(dialog_cancel_inline_keyboard())
+        assert_fits(dialog_cancel_inline_keyboard())
+        assert_fits(prompt_markup([[_plain("↺ Use default"), _plain("⏭ Skip")]]))
+
+    def test_every_way_back_fits_its_nav_row(self):
+        for text in NAV_TEXTS:
+            with self.subTest(text=text):
+                self.assertTrue(is_back_button(text))
+                assert_fits(_inline(nav_row("back", text)))
+
+    def test_short_ways_back_fit_beside_refresh(self):
+        # '◀️ To reminders' is too wide for half a row: screens with it get no Refresh beside it.
+        for text in (BACK_BUTTON_TEXT, TO_CARD_TEXT, TO_LIST_TEXT, TO_USERS_TEXT, TO_PAYMENT_TEXT, TO_PENDING_TEXT):
+            with self.subTest(text=text):
+                markup = _inline(nav_row("back", text, refresh_callback="refresh"))
+                assert_fits(markup)
+                self.assertEqual([button.text for button in markup.inline_keyboard[0]], [text, REFRESH_BUTTON_TEXT])
+        assert_fits(_inline(nav_row("menu:close", refresh_callback="refresh")))
+        self.assertTrue(keyboard_rule_violations(_inline(nav_row("back", TO_REMINDERS_TEXT, refresh_callback="r"))))
+
+    def test_exit_labels_are_ways_back_and_never_styled(self):
+        buttons = [nav_button("back"), nav_button("menu:close"), cancel_button(), cancel_button("x", text=KEEP_BUTTON_TEXT)]
+        self.assertEqual([b.text for b in buttons], [BACK_BUTTON_TEXT, CLOSE_BUTTON_TEXT, CANCEL_BUTTON_TEXT, "Keep"])
+        for button in buttons:
+            with self.subTest(text=button.text):
+                self.assertTrue(is_back_button(button.text))
+                self.assertIsNone(button.style)
+
+    def test_confirmation_rows_fit_with_the_way_back_first(self):
+        for verb in ("🗑 Delete", "🔗 New link", "🔒 Close cycle", "♻️ Recreate", "📬 Send", "✏️ Set all"):
+            with self.subTest(verb=verb):
+                assert_fits(_inline(confirm_row("no", verb, "yes")))
+        assert_fits(_inline(confirm_row("no", "❌ Reject", "yes", cancel_text=KEEP_BUTTON_TEXT)))
+
+    def test_toggles_and_radios_fit_their_rows(self):
+        assert_fits(_inline([_plain(toggle_label("📣 After due date", True))],
+                            [_plain(toggle_label("✅ Payment recorded", False))]))
+        timezones = [_plain(fit_label(radio_label(tz, True), 2)) for tz in ALL_TIMEZONES]
+        assert_fits(_inline(*pair_rows(timezones)))
+
+    def test_pair_rows_of_worst_case_labels_fit(self):
+        labels = ["💰 Pricing", "👥 Participants", "🔔 Reminders", "💳 Payment", "📊 Reports", "🗂 Open cycles",
+                  "✏️ Rename", "🗑 Delete", "🔀 Move cycle (keep payments)"]
+        assert_fits(_inline(*pair_rows(_plain(label) for label in labels)))
+
+    def test_payment_method_labels_cut_from_user_data_fit(self):
+        for default in (False, True):
+            label = fit_label(payment_method_label(LONG_METHOD, "RUB", default=default), 1)
+            assert_fits(_inline([_plain(label)], nav_row("back", TO_PAYMENT_TEXT)),
+                        user_texts=(payment_method_label(LONG_METHOD, "RUB", default=default),))
 
 
 # ------------------------------------------------------------ the global guard
